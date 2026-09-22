@@ -9,6 +9,9 @@ authors = [{ name = "UA Web Data Collector team" }]
 # Foundation-залежності (WP-00). Наступні WP додають свої залежності самостійно
 # в алфавітному порядку та перегенеровують uv.lock (docs/plan/cards/WP-00.md).
 dependencies = [
+  # alembic, asyncpg, sqlalchemy — WP-01A PostgreSQL foundation (§7.2 queue, §9.1 schema).
+  "alembic>=1.16",
+  "asyncpg>=0.30",
   # fastapi/uvicorn — стаб `GET /api/v1/health/components` (WP-00 PR2; далі owner WP-11A).
   "fastapi>=0.118",
   # idna, phonenumbers, pyyaml — WP-01C shared contracts (§9.3 п.8 нормалізація контактів;
@@ -20,6 +23,7 @@ dependencies = [
   # PyMongo Async API для domain repository додає WP-01B, §8).
   "pymongo>=4.15",
   "pyyaml>=6.0",
+  "sqlalchemy[asyncio]>=2.0.43,<3",
   "structlog>=25.4",
   "typer>=0.27",
   "uvicorn>=0.37",
@@ -40,6 +44,9 @@ dev = [
   "pytest-socket>=0.7",
   "respx>=0.22",
   "ruff>=0.13",
+  # testcontainers — PostgreSQL 18 у Docker для tests/integration/postgres (WP-01A);
+  # loopback only, див. tests/integration/postgres/conftest.py.
+  "testcontainers>=4.10",
   "types-pyyaml>=6.0",
 ]
 

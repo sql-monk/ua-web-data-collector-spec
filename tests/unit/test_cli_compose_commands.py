@@ -1,6 +1,7 @@
 """CLI-команди з реальною/placeholder-поведінкою після WP-00 PR2 (картка, PR2 вимоги 5 і 7).
 
-- `db migrate`: TCP-перевірка PostgreSQL → 0 + «no migrations yet; owner WP-01A»; недоступний → 1;
+- `db migrate` (після WP-01A PR1 — реальний Alembic): без DSN → 1 з назвою env; недоступний
+  сервер → 1 без stdout (помилка драйвера підставляється, socket не створюється);
 - `db ensure-mongo`: ідемпотентна ініціалізація single-member replica set (фейковий клієнт);
   `--validators/--indexes` після ініціалізації — стаб WP-01B (код 2);
 - `worker <role>`/`scheduler`: placeholder-процес живий до stop/SIGTERM, код 0, стаб-рядок у stderr;
@@ -10,8 +11,9 @@
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import Any, NoReturn
 
+import asyncpg
 import pymongo
 import pytest
 from pymongo.errors import OperationFailure
@@ -45,21 +47,47 @@ def _postgres(ok: bool) -> Any:
     return check
 
 
-def test_db_migrate_exits_0_with_owner_message_when_postgres_reachable(
+def test_db_migrate_requires_dsn_and_is_no_longer_a_tcp_stub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """WP-01A PR1 замінив TCP-стаб на Alembic (docs/plan/deps/WP-01A-to-WP-00.md, п.1).
+
+    One-shot `migrate-postgres` отримує DSN міграційної ролі через
+    `COLLECTOR_POSTGRES_DSN_FILE` (Docker secret), тому доступність PostgreSQL більше не
+    перевіряється окремим TCP-пробом, а помилка конфігурації має бути явною і без stub-рядка.
+    Повний шлях `upgrade head` покрито tests/integration/postgres/test_cli_db.py.
+    """
     monkeypatch.setattr(health, "check_postgres", _postgres(True))
+    monkeypatch.delenv("COLLECTOR_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("COLLECTOR_POSTGRES_DSN_FILE", raising=False)
     result = runner.invoke(app, ["db", "migrate"])
-    assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == "no migrations yet; owner WP-01A"
+    assert result.exit_code == 1, result.output
+    assert "COLLECTOR_POSTGRES_DSN" in result.output
+    assert "no migrations yet" not in result.output
     assert "not implemented" not in result.output
 
 
 def test_db_migrate_exits_1_when_postgres_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Недоступний сервер → exit 1 без stdout і без traceback (one-shot не пускає api далі).
+
+    Відмова підставляється у `asyncpg.connect`, а не через реальний закритий порт: на POSIX
+    `pytest-socket` блокує створення socket у звичайних тестах, тож спроба справжнього
+    зʼєднання давала б `SocketBlockedError` (CI PR #3, job `python`). Реальний шлях до
+    PostgreSQL перевіряють integration-тести.
+    """
     monkeypatch.setattr(health, "check_postgres", _postgres(False))
+    monkeypatch.delenv("COLLECTOR_POSTGRES_DSN_FILE", raising=False)
+    monkeypatch.setenv("COLLECTOR_POSTGRES_DSN", "postgresql://nobody:x@postgres.invalid/void")
+
+    async def _refuse(*args: object, **kwargs: object) -> NoReturn:
+        raise ConnectionRefusedError("[Errno 111] Connect call failed")
+
+    monkeypatch.setattr(asyncpg, "connect", _refuse)
     result = runner.invoke(app, ["db", "migrate"])
     assert result.exit_code == 1
     assert result.stdout == ""
+    assert "postgres error" in result.stderr
+    assert "Traceback" not in result.output
 
 
 # --- db ensure-mongo --------------------------------------------------------------------------

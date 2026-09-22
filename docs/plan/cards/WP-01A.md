@@ -90,6 +90,12 @@ uv run pytest -m integration tests/integration/postgres
 
 ### Операції
 
+- **Транзакційний audit для control plane (§13, знахідка S-2 пострев'ю PR1):** операції, для
+  яких у PR1 audit лишився обов'язком викликача, отримують `append_audit` усередині репозиторію,
+  у тій самій транзакції (патерн `request_scale`): `set_source_state`, `add_policy_version`,
+  `upsert_route`/`set_route_state`, `upsert_cursor`, `block_origin`, `quarantine(owner=None)`,
+  `upsert_pool` поза scale-командою. Обов'язкові `actor`/`reason`; тест — mutating-операція без
+  audit-запису неможлива.
 - **Upload claim (§10 п.5, R-38/R-41):** `acquire_upload_claim(object_key, owner, lease)` — unique object key; reacquire атомарно збільшує `claim_generation` і змінює owner; `commit_reference(object_key, generation, sha256, size, uri)` виконується лише з предикатом `claim_generation = :generation AND lease_expires_at > now() AND owner = :owner`, інакше `StaleClaimError`; `list_orphan_candidates(grace)` для sweeper (WP-02/12) — лише без DB reference і без живого claim.
 - **Parse/normalized (§7.3 крок 2, §10 п.8):** одна транзакція `record_parse_result(parse_attempt, normalized_artifact_ref, entity_uuid, target_collection)` → `parse_attempts` + `normalized_artifacts` + атомарна видача `projection_version` під advisory lock `pg_advisory_xact_lock(hashtext(entity_uuid))` (або `SELECT ... FOR UPDATE` на `entity_index`) + `projection_tasks` + `outbox_events(projection.command)`. Unique `(entity_uuid, projection_version)` і unique artifact projection key (повторний виклик для того самого artifact → той самий task, без дубля).
 - **Projection queue:** `claim_projection_tasks` / heartbeat / complete аналогічно crawl queue; index `projection_tasks(status, not_before, priority, task_id)`.

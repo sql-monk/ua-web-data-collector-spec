@@ -1,9 +1,10 @@
 """CLI-контракт §16.2: `--help` містить усі команди, стаби повертають 2 і owner-WP.
 
-Після WP-00 PR2 `db migrate`, `db ensure-mongo`, `api`, `scheduler` і `worker <role>` мають
-мінімальну реальну/placeholder-поведінку (tests/unit/test_cli_compose_commands.py);
-стабами лишаються `e2e`, `release build|verify`, `controller` і прапорці
-`ensure-mongo --validators/--indexes`.
+Після WP-00 PR2 `db ensure-mongo`, `api`, `scheduler` і `worker <role>` мають мінімальну
+реальну/placeholder-поведінку (tests/unit/test_cli_compose_commands.py), а після WP-01A PR1
+`db migrate` і `db roles` — повну (tests/unit/persistence/postgres/test_cli_db.py,
+tests/integration/postgres/test_cli_db.py). Стабами лишаються `e2e`, `release build|verify`,
+`controller` і прапорці `ensure-mongo --validators/--indexes`.
 """
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ WORKER_ROLES = (
 
 # (argv, owner-WP) — стаби контракту §16.2, що лишилися після PR2, і їхні власники.
 STUBS: tuple[tuple[list[str], str], ...] = (
+    # `db` тут немає: `ensure-mongo` після WP-00 PR2 реальна (прапорці `--validators`/
+    # `--indexes` стають стабом WP-01B лише після ініціалізації RS — це вимагає живої Mongo,
+    # тому перевіряється в tests/unit/test_cli_compose_commands.py), а `db migrate`/`db roles`
+    # реалізовані WP-01A (docs/plan/deps/WP-01A-to-WP-00.md).
     (["e2e", "--source", "fixtures", "--offline"], "WP-14"),
     (["release", "build", "--watermark", "test", "--output", ".artifacts/release"], "WP-11A"),
     (["release", "verify", "--manifest", ".artifacts/release/manifest.json"], "WP-11A"),
@@ -51,7 +56,7 @@ def test_help_lists_all_contract_commands() -> None:
 
 @pytest.mark.parametrize(
     ("group", "subcommands"),
-    [("db", ("ensure-mongo", "migrate")), ("release", ("build", "verify"))],
+    [("db", ("ensure-mongo", "migrate", "roles")), ("release", ("build", "verify"))],
 )
 def test_group_help_lists_subcommands(group: str, subcommands: tuple[str, ...]) -> None:
     result = runner.invoke(app, [group, "--help"])

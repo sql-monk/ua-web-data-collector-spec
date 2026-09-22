@@ -64,6 +64,58 @@ jobs:
       - name: collector version
         run: uv run collector version
 
+  integration-postgres:
+    name: integration (PostgreSQL 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # WP-01A: service container з pinned digest; тести беруть admin DSN з
+    # COLLECTOR_TEST_POSTGRES_ADMIN_DSN (без testcontainers у CI), кожен тест — своя БД з template.
+    # trust-auth: контейнер живе лише в job на runner і недоступний ззовні — паролів немає.
+    services:
+      postgres:
+        image: postgres:18@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: collector_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U collector_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      COLLECTOR_TEST_POSTGRES_ADMIN_DSN: postgresql://collector_ci@127.0.0.1:5432/postgres
+      COLLECTOR_POSTGRES_DSN: postgresql://collector_ci@127.0.0.1:5432/collector_ci_alembic
+      COLLECTOR_TEST_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python from .python-version
+        run: uv python install
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: create database for alembic commands
+        run: psql "$COLLECTOR_TEST_POSTGRES_ADMIN_DSN" -v ON_ERROR_STOP=1 -c "CREATE DATABASE collector_ci_alembic"
+
+      - name: alembic upgrade head && alembic check (картка WP-01A)
+        run: uv run alembic upgrade head && uv run alembic check
+
+      - name: collector db migrate --check && collector db roles
+        run: uv run collector db migrate --check && uv run collector db roles
+
+      - name: pytest -m integration tests/integration/postgres
+        run: uv run pytest -m integration tests/integration/postgres
+
   pre-commit:
     name: pre-commit (ruff, markdownlint, hygiene)
     runs-on: ubuntu-latest
