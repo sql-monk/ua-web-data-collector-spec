@@ -12,3 +12,6 @@ test-results/
 *.pyc
 dist/
 build/
+
+# orchestration worktrees
+.worktrees/
