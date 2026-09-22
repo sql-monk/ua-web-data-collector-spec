@@ -7,7 +7,7 @@
 | Картка | `docs/plan/cards/WP-01A.md` — «Спільні вимоги» + «PR1» |
 | Розділи ТЗ | §5.5, §7.2, §7.6, §9.1 (рядки PR1), §9.3, §13, §15, §18; REVIEW.md R-27, R-28, R-32, R-53 |
 | Середовище | Windows 11, uv 0.12.13, CPython 3.13, Docker 29.8, PostgreSQL 18 (`postgres:18@sha256:86c951e0…`) |
-| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2); після gate 3 — `fix(wp-01a)` (H-1, M-1…M-5, 7 low) |
+| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2); після gate 3 — `fix(wp-01a)` (H-1, M-1…M-5, 7 low); після пострев'ю — `fix(wp-01a)` (S-1…S-4) |
 
 ## Що зроблено
 
@@ -387,8 +387,8 @@ gate 2: **587 passed, 1 skipped** у `-m "not live"`, з них 75 integration (
 | L-3 | зміни у трьох тестових файлах WP-00 | resolved — owner-рішення оркестратора, зафіксовано у `docs/plan/deps/WP-01A-to-WP-00.md` |
 | I-1 | втрату `SKIP LOCKED` не ловив жоден assertion | fixed (тест із двох половин; обидві перевірені мутацією) |
 | I-2 | index не обслуговує `ORDER BY` у `claim` | fixed (міграція `0002_claim_index`, вимір 331 мс → 0.18 мс) |
-| I-3 | heartbeat у межах простроченого lease | accepted — контракт зафіксовано тестом тестувальника |
-| I-4 | ідемпотентність `audit_log` — best effort | accepted — дія ідемпотентна через unique `scale_commands.idempotency_key` |
+| I-3 | heartbeat у межах простроченого lease | **accepted (wp-implementer WP-01A, 2026-09-22)** — контракт зафіксовано тестом тестувальника `test_heartbeat_after_lease_expiry_contract`: власник може продовжити ще не відновлений lease, після `recover_expired_leases` — ні |
+| I-4 | ідемпотентність `audit_log` — best effort | **accepted (wp-implementer WP-01A, 2026-09-22)** — партиційована таблиця не дає глобального unique без partition key у ключі; ідемпотентність самої дії тримає unique `scale_commands.idempotency_key`, дубль у журналі нешкідливий |
 
 ## Відповіді на код-рев'ю
 
@@ -479,6 +479,57 @@ $ uv run pre-commit run --all-files
 | medium | 5 | 5 | 0 | 0 |
 | low | 9 | 7 | 2 | 0 |
 | informational | 4 | 0 | 3 | 1 |
+
+## Відповіді на пострев'ю за ТЗ
+
+Вердикт пострев'ю — `accept`, 0 `missing` (`docs/plan/reports/WP-01A/spec-review-pr1.md`).
+Чотири низькі/інформаційні знахідки закрито комітом `fix(wp-01a): spec review findings S-1..S-4`.
+
+| # | Знахідка | Статус | Що зроблено |
+|---|---|---|---|
+| S-1 | gate-2 I-3 та I-4 позначені `accepted` без owner/дати (DoD §18 п.8) | **fixed** | Обидва рядки таблиці «Статус знахідок gate 2» тепер мають формат `accepted (wp-implementer WP-01A, 2026-09-22)` з аргументом і посиланням на тест, що фіксує контракт. |
+| S-2 | audit-запис транзакційно гарантований лише для scale-команд | **fixed (задокументовано; реалізація — PR2)** | Перелік операцій нижче + рядок у картці `docs/plan/cards/WP-01A.md` (розділ PR2). |
+| S-3 | інтерпретація «desired/current» у `worker_pools` не зафіксована | **fixed** | Абзац у docstring `repositories/pools.py` і розділ нижче. |
+| S-4 | міграція `0003` імпортувала runtime-модуль `partitions` | **fixed** | DDL заморожено константою й літералом у самій ревізії; імпорт прибрано. Тест `test_migrations.py::test_default_partition_from_bare_upgrade_matches_runtime_helper`: чистий `alembic upgrade head` створює рівно одну партицію `audit_log_default` (без жодного runtime-хелпера), `alembic check` без drift, а імʼя все ще збігається з `partitions.default_partition_name` — розходження знімка міграції й коду стане видимим. |
+
+### S-3: `worker_pools.current_*` — heartbeat-derived, не колонка
+
+§9.1 перелічує для `worker_pools` «desired/current replicas + concurrency», і це могло б
+читатися як вимога зберігати current у таблиці. Реалізація свідомо цього не робить: §7.6
+формулює current як **heartbeat-derived** («`applied` дозволений лише коли heartbeat-derived
+current replicas/concurrency відповідають desired revision»), тож єдине джерело істини —
+`repositories.pools.observed_capacity()` (ready-instances зі свіжим heartbeat: кількість,
+сума `slots_total`, мінімальна підтверджена `pool_revision`), і саме її звіряє
+`transition_scale_command('applied')`.
+
+Окрема колонка була б другим, розсинхронізованим джерелом істини: після смерті instance вона
+лишалася б застарілою і давала б хибний `applied`. Наслідок для споживачів: **WP-01D і WP-11A
+читають current через `observed_capacity`, а не з рядка `worker_pools`** — шукати там
+`current_replicas`/`current_concurrency` не треба. Зафіксовано в docstring модуля
+`repositories/pools.py`.
+
+### S-2: операції, де audit поки лишається обов'язком викликача
+
+Транзакційно гарантований audit у PR1 має лише `request_scale` (desired state + `audit_log` +
+команда — одна транзакція, §7.6). Для решти mutating-операцій control plane викликач
+(WP-11A operator API / WP-01D controller) **зобов'язаний** сам додати `append_audit` у ту саму
+транзакцію, інакше §13 «audit log усіх mutating actions» тримається лише на дисципліні
+API-шару:
+
+| Операція | Файл | Дія за ТЗ |
+|---|---|---|
+| `set_source_state` | `repositories/sources.py` | pause/resume/disable джерела (FR-009) |
+| `add_policy_version` | `repositories/sources.py` | зміна policy/лімітів джерела |
+| `upsert_route` / `set_route_state` | `repositories/sources.py` | ручне відкриття/закриття circuit breaker маршруту |
+| `upsert_cursor` | `repositories/sources.py` | ручне зміщення курсора (replay/backfill) |
+| `block_origin` | `repositories/limiter.py` | ручне блокування origin оператором |
+| `quarantine(owner=None)` | `repositories/queue.py` | операторський карантин job |
+| `upsert_pool` (без scale-команди) | `repositories/pools.py` | пряма зміна desired state поза scale-командою |
+
+**Рішення:** у PR2 ці операції отримують транзакційний audit усередині репозиторію — тим самим
+патерном, що й `request_scale` (обовʼязкові `actor`/`reason`, `append_audit` у тій самій
+транзакції), щоб гарантія §13 не залежала від дисципліни викликача. Рядок додано до картки
+`docs/plan/cards/WP-01A.md`, розділ PR2.
 
 ## Що не перевірено
 

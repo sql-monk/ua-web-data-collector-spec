@@ -28,19 +28,25 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from collector.persistence.postgres.partitions import (
-    default_partition_name,
-    default_partition_sql,
-)
-
 revision: str = "0003_default_partition"
 down_revision: str | Sequence[str] | None = "0002_claim_index"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+# DDL заморожений у самій ревізії і **не** імпортує runtime-модуль
+# `collector.persistence.postgres.partitions` (S-4 пострев'ю): історична міграція — це знімок
+# схеми на момент застосування, тож зміна формату імені DEFAULT-партиції у майбутніх PR не
+# повинна змінювати сенс уже застосованої `0003`. Що імена збігаються з runtime-хелпером
+# сьогодні, перевіряє тест
+# `test_migrations.py::test_default_partition_from_bare_upgrade_matches_runtime_helper`.
+AUDIT_LOG_DEFAULT_PARTITION = "audit_log_default"
+
+
 def upgrade() -> None:
-    op.execute(default_partition_sql("audit_log"))
+    op.execute(
+        f"CREATE TABLE IF NOT EXISTS {AUDIT_LOG_DEFAULT_PARTITION} PARTITION OF audit_log DEFAULT"
+    )
     op.add_column(
         "worker_instances",
         sa.Column("drain_requested_at", sa.DateTime(timezone=True), nullable=True),
@@ -51,4 +57,4 @@ def downgrade() -> None:
     op.drop_column("worker_instances", "drain_requested_at")
     # DETACH перед DROP: рядки, що осіли в DEFAULT, лишаються у відчепленій таблиці, а не
     # зникають разом із партицією (downgrade — дев-сценарій, але дані журналу не губимо).
-    op.execute(f"ALTER TABLE audit_log DETACH PARTITION {default_partition_name('audit_log')}")
+    op.execute(f"ALTER TABLE audit_log DETACH PARTITION {AUDIT_LOG_DEFAULT_PARTITION}")

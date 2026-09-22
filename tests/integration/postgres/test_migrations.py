@@ -261,3 +261,34 @@ async def test_fresh_upgrade_head_without_maintenance_can_write_audit(
             assert await conn.scalar(text("SELECT count(*) FROM audit_log")) == 1
     finally:
         await engine.dispose()
+
+
+async def test_default_partition_from_bare_upgrade_matches_runtime_helper(
+    pg_empty_database: PostgresSettings,
+) -> None:
+    """S-4: `alembic upgrade head` з чистої БД працює без runtime-хелперів партицій.
+
+    Міграція `0003` містить заморожений DDL (не імпортує `partitions`), тому тест перевіряє
+    і що чистий upgrade проходить, і що заморожене імʼя DEFAULT-партиції все ще збігається з
+    поточним runtime-хелпером — розходження між знімком міграції та кодом стане видимим.
+    """
+    engine = create_async_engine(pg_empty_database.url, poolclass=None)
+    try:
+        async with engine.begin() as conn:
+            await upgrade_to_head(conn)
+        async with engine.connect() as conn:
+            assert await check_no_drift(conn) == []
+            partitions = (
+                await conn.execute(
+                    text(
+                        "SELECT c.relname, pg_get_expr(c.relpartbound, c.oid) FROM pg_class c "
+                        "JOIN pg_inherits i ON i.inhrelid = c.oid "
+                        "WHERE i.inhparent = 'audit_log'::regclass"
+                    )
+                )
+            ).all()
+        assert [(name, bound) for name, bound in partitions] == [
+            (default_partition_name("audit_log"), "DEFAULT")
+        ]
+    finally:
+        await engine.dispose()

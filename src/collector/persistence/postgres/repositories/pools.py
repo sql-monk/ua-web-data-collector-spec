@@ -2,6 +2,16 @@
 scale commands зі станами `requested → draining → awaiting_manual_apply | applying → applied |
 failed | superseded`.
 
+**`current_*` не є колонками.** §9.1 називає для `worker_pools` «desired/current replicas +
+concurrency», але current тут — величина, похідна від heartbeat, а не окреме записуване поле:
+§7.6 прямо вимагає, щоб `applied` дозволявся «лише коли **heartbeat-derived** current
+replicas/concurrency відповідають desired revision». Тому джерело істини для current —
+`observed_capacity()` (ready-instances зі свіжим heartbeat: кількість, сума slots, мінімальна
+підтверджена pool revision), і саме її звіряє `transition_scale_command('applied')`. Окрема
+колонка була б другим, розсинхронізованим джерелом істини і давала б хибний «applied» після
+смерті instance. WP-01D і WP-11A читають current через `observed_capacity`, а не з таблиці
+(S-3 пострев'ю).
+
 Transaction boundaries:
 
 - `request_scale` — desired-state update, supersede попередніх команд, audit-запис і insert
