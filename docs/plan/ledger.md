@@ -17,7 +17,7 @@
 
 | WP | Стан | Примітка |
 |---|---|---|
-| WP-01A | in_progress (PR1) | картка `docs/plan/cards/WP-01A.md`; worktree `.worktrees/wp-01a` |
+| WP-01A | testing (PR1) | картка `docs/plan/cards/WP-01A.md`; 541 tests, 36 integration на PostgreSQL 18 |
 | WP-01B | pending | після WP-01A |
 | WP-01D | pending | після WP-00, WP-01A |
 | WP-02 | pending | після WP-01A |
@@ -56,4 +56,5 @@
 | Файл | Від | До | Стан |
 |---|---|---|---|
 | `WP-00-to-repo-config.md` | WP-00 PR1 | orchestrator | resolved — MD024 siblings_only у `.markdownlint-cli2.jsonc` (main) |
-| `WP-01C-to-WP-00.md` | WP-01C | WP-00 | resolved — п.1–3 застосовано у `wp/01c-contracts` за рішенням оркестратора; Dockerfile COPY реєстру → PR2 |
+| `WP-01C-to-WP-00.md` | WP-01C | WP-00 | resolved — п.1–3 застосовано у `wp/01c-contracts`; Dockerfile COPY реєстру → PR2 |
+| `WP-01A-to-WP-00.md` | WP-01A | WP-00 | п.1 applied у branch WP-01A; п.2–3 (postgres init, DSN secret, alembic у image) передано в PR2 |
