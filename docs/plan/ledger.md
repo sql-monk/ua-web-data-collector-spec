@@ -11,7 +11,7 @@
 | WP-00 | PR1 python+CI | `wp/00-1-python-ci` | merged 7223bec | docs done: `reports/WP-00/docs-pr1.md`; ADR-0001 | CLI = Typer; 127 tests; Linux-паритет підтверджено в Docker |
 | WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | in_progress | — | worktree `.worktrees/wp-00-2` |
 | WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | pending | — | після merge PR2 |
-| WP-01C | — | `wp/01c-contracts` | in_progress | — | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
+| WP-01C | — | `wp/01c-contracts` | testing | реалізація: `reports/WP-01C/implementation.md` (334 tests, 32 schema snapshots) | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
 
 ## Хвиля 1
 
@@ -56,3 +56,4 @@
 | Файл | Від | До | Стан |
 |---|---|---|---|
 | `WP-00-to-repo-config.md` | WP-00 PR1 | orchestrator | resolved — MD024 siblings_only у `.markdownlint-cli2.jsonc` (main) |
+| `WP-01C-to-WP-00.md` | WP-01C | WP-00 | resolved — п.1–3 застосовано у `wp/01c-contracts` за рішенням оркестратора; Dockerfile COPY реєстру → PR2 |
