@@ -91,6 +91,10 @@ jobs:
     name: gitleaks (secret scan)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      # gitleaks-action на pull_request читає список комітів PR через GitHub API.
+      pull-requests: read
     steps:
       - uses: actions/checkout@v5
         with:
