@@ -50,8 +50,10 @@ jobs:
       - name: mypy src
         run: uv run mypy src
 
+      # Включно з tests/integration/test_compose_render.py — `docker compose config` через docker
+      # CLI runner-а (gate 3, CR-3: render-тести мають реально виконуватись у CI, не skip).
       - name: pytest (без live)
-        run: uv run pytest -m "not live"
+        run: uv run pytest -m "not live" -rs
 
       - name: contracts JSON Schema snapshots без drift (WP-01C)
         run: uv run collector contracts export --check
@@ -109,3 +111,78 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # GITLEAKS_LICENSE потрібен лише для org-репозиторіїв; задається в GitHub Environments.
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  docker:
+    # WP-00 PR2 (§7.5, §16.1 п.14, §16.2): compose config, build image `collector`, SBOM (syft),
+    # vulnerability scan (trivy; CRITICAL блокує — §13), clean-host start core+workers з --wait.
+    name: docker (compose config, build, sbom, scan, up --wait)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROFILES: core,workers
+      COLLECTOR_IMAGE: collector:ci
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Секрети для Compose з *.example (лише CI/локальна розробка)
+        run: bash ./deploy/compose/secrets/init-secrets.sh
+
+      - name: docker compose config --quiet
+        run: docker compose config --quiet
+
+      - name: docker compose config (усі profiles, валідність)
+        run: docker compose --profile core --profile workers --profile browser config --quiet
+
+      - name: docker build collector
+        run: |
+          docker build \
+            --build-arg COLLECTOR_GIT_SHA="${{ github.sha }}" \
+            --build-arg COLLECTOR_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t "$COLLECTOR_IMAGE" .
+          docker inspect "$COLLECTOR_IMAGE" --format 'User={{.Config.User}}' | grep -q 'User=10001:10001'
+
+      - name: SBOM (syft, SPDX JSON як artifact)
+        uses: anchore/sbom-action@v0.24.2
+        with:
+          image: collector:ci
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom-collector.spdx.json
+          upload-artifact: true
+
+      # §13: будь-який CRITICAL (і без fix) блокує — unfixed CRITICAL потребує датованого
+      # risk acceptance в ADR (не мовчазного ignore-unfixed).
+      - name: Vulnerability scan (trivy; CRITICAL блокує, включно з unfixed)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: collector:ci
+          format: table
+          severity: CRITICAL
+          exit-code: "1"
+
+      # HIGH: блокує лише за наявності fix (оновити digest base image / залежність);
+      # unfixed HIGH — risk acceptance в ADR-0002 (owner WP-13).
+      - name: Vulnerability scan (trivy; HIGH з fix блокує)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: collector:ci
+          format: table
+          severity: HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: docker compose up core+workers --wait (clean host, §16.3)
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: docker compose ps + health
+        # Регресійний assert (gate 3, CR-2): кожен контейнер або running+healthy, або one-shot
+        # exited 0 — явний парсинг JSON (підрядковий grep рахував `unhealthy` як healthy).
+        run: |
+          docker compose ps -a
+          docker compose exec -T api python -m collector.api.health
+          docker compose ps -a --format json | python3 deploy/compose/check-healthy.py
+
+      - name: docker compose down -v
+        if: always()
+        run: docker compose down -v --remove-orphans

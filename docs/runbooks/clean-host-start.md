@@ -1,0 +1,102 @@
+# Runbook: clean-host start (Docker Compose, single host)
+
+Мета: підняти стек UA Web Data Collector на чистому Linux-хості однією документованою
+командою (§16.2, §16.3, R-51). Стан на WP-00 PR2: profiles `core` + `workers`; `gui`
+додається у PR3 (тоді команда стає `--profile core --profile workers --profile gui`).
+
+## Передумови
+
+- Docker Engine 27+ з Compose plugin v2.30+ (перевірено на Docker 29.8 / Compose v5.5.1);
+- доступ до registry: `docker.io` (python, postgres, mongo), `ghcr.io` (uv), `quay.io` (minio);
+- `git clone` репозиторію; `uv`/Python на хості **не потрібні** — image збирається у Docker;
+- вільні ресурси: ліміти сумарно **16 CPU / 16 ГіБ** для core+workers за замовчуванням
+  (`deploy.resources.limits` у `docker-compose.yml`: postgres 2/2G + mongo 2/2G + minio 1/1G +
+  api 1/1G + scheduler 0.5/512M + discovery 0.5/512M + fetch 2×1/1G + parse 2×2/2G +
+  projector 1/1G + translation 0.5/512M + export 1/1G + maintenance 0.5/512M; one-shots
+  0.5/512M короткочасно); хост може мати менше — ліміти є верхньою межею, не резервуванням.
+  Фактичне споживання placeholder-стека — < 1 CPU / ~1.5 ГіБ.
+
+## Кроки
+
+```bash
+git clone <repo> collector && cd collector
+
+# 1. Секрети (локальні файли поза git; для не-локального використання змініть значення)
+./deploy/compose/secrets/init-secrets.sh
+
+# 2. Профілі за замовчуванням для всіх наступних команд
+export COMPOSE_PROFILES=core,workers
+export COLLECTOR_GIT_SHA="$(git rev-parse HEAD)"
+
+# 3. Перевірка конфігурації та збірка image `collector`
+docker compose config --quiet
+docker compose build --pull
+
+# 4. Старт із очікуванням healthy/completed
+docker compose up -d --wait
+docker compose ps
+```
+
+Очікуваний результат `docker compose ps`: `postgres`, `mongo`, `minio`, `api`,
+`scheduler` і всі `*-worker` — `Up (healthy)`; `migrate-postgres` та `ensure-mongo` —
+`Exited (0)`. Перевірка health API зсередини мережі (порт назовні не публікується):
+
+```bash
+docker compose exec api python -m collector.api.health
+# postgres: ok (...)  mongo: ok (writable primary of replica set 'rs0')  minio: ok (liveness HTTP 200)
+```
+
+## Секрети: права файлів
+
+`init-secrets.sh` генерує випадкові паролі (`openssl rand -hex 24`) і keyfile; файли мають
+режим **0644** свідомо: Compose bind-mount-ить file-secrets з правами хоста, а читають їх
+non-root uid контейнерів (999, 10001) — 0600 від користувача хоста дає `Permission denied`
+на Linux. Наслідок: секрети читає будь-який локальний користувач хоста з доступом до
+каталогу репозиторію — прийнятно лише для single-host MVP (ADR-0002); для спільного хоста
+обмежте каталог (`chmod 0700 deploy/compose/secrets` не допоможе контейнерам — потрібні
+Swarm secrets, WP-01D).
+
+## Локальна розробка з портами на 127.0.0.1
+
+```bash
+docker compose -f docker-compose.yml -f deploy/compose/dev.override.yml up -d --wait
+curl -s http://127.0.0.1:8000/api/v1/health/components
+```
+
+## Масштабування (§7.5)
+
+```bash
+docker compose up -d --no-recreate --scale fetch-worker=4 --scale parse-worker=2
+# browser-worker живе у профілі `browser`: додайте його до COMPOSE_PROFILES (після canary, §8).
+COMPOSE_PROFILES=core,workers,browser docker compose up -d --no-recreate --scale browser-worker=1
+```
+
+Прапорець `--profile <name>` **замінює** значення `COMPOSE_PROFILES`, а не доповнює його:
+`docker compose --profile browser up …` активує лише `browser` без `core` і падає з
+`depends on undefined service "postgres"`. Або перелічуйте всі профілі прапорцями
+(`--profile core --profile workers --profile browser`), або задавайте повний список у
+`COMPOSE_PROFILES`.
+
+## Restart без втрати даних
+
+`docker compose restart` перезапускає контейнери; named volumes (`collector_postgres-data`,
+`collector_mongo-data`, `collector_mongo-config`, `collector_minio-data`) зберігаються.
+Workers завершуються по SIGTERM (drain) у межах `stop_grace_period` 120 с.
+
+## Зупинка
+
+```bash
+docker compose down            # контейнери й мережі; дані у volumes лишаються
+docker compose down -v         # + видалення volumes (усі дані!)
+```
+
+## Типові проблеми
+
+| Симптом | Причина / дія |
+|---|---|
+| `service "…-worker" depends on undefined service "postgres"` | активовано профіль без `core` (напр. `--profile workers` або `--profile browser` — прапорець замінює `COMPOSE_PROFILES`); додайте `core` |
+| `up -d --wait` завершився з кодом 1, `mongo` має `RestartCount` > 0, стек далі стає healthy | init-фаза entrypoint mongo (виправлено healthcheck-ом у PR2 gate 2, 10/10 циклів зелені); якщо повториться — повторний `docker compose up -d --wait` штатний (ідемпотентний), повідомте owner WP-00/WP-01B з `docker events` |
+| `mongo` не стає healthy, у логах «permissions on … keyfile are too open» | keyfile копіюється в tmpfs з 0400 entrypoint-ом; перевірте, що `deploy/compose/secrets/mongo_keyfile` існує і readable |
+| `ensure-mongo` `Exited (1)`, `Authentication failed` | `mongo_root_password` змінено після першої ініціалізації volume; скиньте `down -v` або оновіть пароль у Mongo |
+| `api` `unhealthy` | `python -m collector.api.health` у контейнері покаже, який компонент `error` |
+| secret file `Permission denied` у контейнері | файли секретів мають бути readable для uid 10001/999 (`chmod 0644`) |

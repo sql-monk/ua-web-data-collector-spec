@@ -1,4 +1,10 @@
-"""CLI-контракт §16.2: `--help` містить усі команди, стаби повертають 2 і owner-WP."""
+"""CLI-контракт §16.2: `--help` містить усі команди, стаби повертають 2 і owner-WP.
+
+Після WP-00 PR2 `db migrate`, `db ensure-mongo`, `api`, `scheduler` і `worker <role>` мають
+мінімальну реальну/placeholder-поведінку (tests/unit/test_cli_compose_commands.py);
+стабами лишаються `e2e`, `release build|verify`, `controller` і прапорці
+`ensure-mongo --validators/--indexes`.
+"""
 
 from __future__ import annotations
 
@@ -27,18 +33,12 @@ WORKER_ROLES = (
     "maintenance",
 )
 
-# (argv, owner-WP) — кожен стаб контракту §16.2 і його власник за карткою WP-00.
+# (argv, owner-WP) — стаби контракту §16.2, що лишилися після PR2, і їхні власники.
 STUBS: tuple[tuple[list[str], str], ...] = (
-    (["db", "ensure-mongo", "--validators", "--indexes"], "WP-01B"),
-    (["db", "ensure-mongo"], "WP-01B"),
-    (["db", "migrate"], "WP-01A"),
     (["e2e", "--source", "fixtures", "--offline"], "WP-14"),
     (["release", "build", "--watermark", "test", "--output", ".artifacts/release"], "WP-11A"),
     (["release", "verify", "--manifest", ".artifacts/release/manifest.json"], "WP-11A"),
-    (["api"], "WP-11A"),
-    (["scheduler"], "WP-01D"),
     (["controller"], "WP-01D"),
-    *((["worker", role], "WP-01D") for role in WORKER_ROLES),
 )
 
 

@@ -4,8 +4,8 @@
 
 - стаб пише повідомлення саме в stderr, stdout порожній (скрипти/CI не сплутають
   повідомлення стаба з корисним виводом);
-- усі ролі §7.6 і жодної зайвої: `worker` для кожної ролі → 2 + owner; невідома роль —
-  usage error без «not implemented»;
+- усі ролі §7.6 і жодної зайвої: `worker` для кожної ролі приймається (placeholder після
+  PR2 — див. test_cli_compose_commands.py); невідома роль — usage error без «not implemented»;
 - типізовані стаби валідують обов'язкові параметри (usage error, а не стаб);
 - перелік команд у `--help` збігається з §16.2 точно (без зайвих команд);
 - `version` працює через реальні entry points (`python -m collector.cli`, console script)
@@ -42,15 +42,10 @@ FOUNDATION_EXTENSIONS = frozenset({"contracts"})  # WP-01C: `collector contracts
 STUB_OWNER_PATTERN = re.compile(r"^not implemented: owned by WP-\d{2}[A-Z]?$")
 
 STUB_ARGV: tuple[list[str], ...] = (
-    ["db", "ensure-mongo", "--validators", "--indexes"],
-    ["db", "migrate"],
     ["e2e", "--source", "fixtures", "--offline"],
     ["release", "build", "--watermark", "test", "--output", ".artifacts/release"],
     ["release", "verify", "--manifest", ".artifacts/release/manifest.json"],
-    ["api"],
-    ["scheduler"],
     ["controller"],
-    *(["worker", role] for role in sorted(SPEC_7_6_ROLES)),
 )
 
 
@@ -71,13 +66,6 @@ def test_stub_message_goes_to_stderr_only(argv: list[str]) -> None:
 
 def test_worker_role_enum_matches_spec_7_6_exactly() -> None:
     assert {role.value for role in WorkerRole} == SPEC_7_6_ROLES
-
-
-@pytest.mark.parametrize("role", sorted(SPEC_7_6_ROLES))
-def test_worker_every_spec_role_is_stub_owned_by_wp_01d(role: str) -> None:
-    result = runner.invoke(app, ["worker", role])
-    assert result.exit_code == 2
-    assert result.stderr.strip() == "not implemented: owned by WP-01D"
 
 
 @pytest.mark.parametrize("bad_role", ["mailer", "Fetch", "fetch ", "", "fetch,parse"])
