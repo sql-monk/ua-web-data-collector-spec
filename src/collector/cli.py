@@ -4,35 +4,44 @@
 `not implemented: owned by WP-XX` у stderr і завершуються з кодом 2. Власник WP
 замінює тіло відповідної команди, не змінюючи її назву та параметри.
 
-Винятки після WP-00 PR2 (Docker/Compose; картка WP-00, PR2 вимоги 5 і 7):
+Стан команд після WP-00 PR2 (Docker/Compose) і WP-01A PR1 (PostgreSQL foundation):
 
-- `version` — реальна;
-- `db migrate` — перевіряє TCP-з'єднання з PostgreSQL і завершується 0 з повідомленням
-  «no migrations yet; owner WP-01A» (Alembic додає WP-01A);
-- `db ensure-mongo` — реально ініціалізує single-member replica set (ідемпотентно);
+- `version` — реальна (WP-00);
+- `contracts export [--check]` — реальна (WP-01C; foundation-розширення поза §16.2);
+- `db migrate [--check] [--partitions-ahead N]` — реальна (WP-01A): `alembic upgrade head`
+  і місячні партиції; DSN з `COLLECTOR_POSTGRES_DSN` або `COLLECTOR_POSTGRES_DSN_FILE`
+  (Docker secret; у Compose це one-shot `migrate-postgres`). Замінила TCP-перевірку
+  «no migrations yet; owner WP-01A» з WP-00 PR2;
+- `db roles [--sql PATH]` — реальна (WP-01A): ролі БД §13 і GRANT, ідемпотентно;
+- `db ensure-mongo` — реально ініціалізує single-member replica set (ідемпотентно; WP-00 PR2);
   `--validators`/`--indexes` лишаються стабом WP-01B (після ініціалізації RS → код 2);
 - `api` — запускає uvicorn зі стабом `GET /api/v1/health/components`
   (`collector.api.health`; owner WP-11A);
 - `scheduler` і `worker <role>` — placeholder-процеси: тримають контейнер живим, логують,
   що lease/queue-логіка не реалізована (owner WP-01D), коректно зупиняються по SIGTERM
   (код 0). У stderr при старті друкується той самий рядок `not implemented: owned by
-  WP-01D`, щоб скрипти могли відрізнити placeholder від реалізації.
+  WP-01D`, щоб скрипти могли відрізнити placeholder від реалізації;
+- решта (`e2e` — WP-14, `release build|verify` — WP-11A, `controller` — WP-01D) — стаби.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import threading
 import time
+from collections.abc import Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 import typer
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from collector.core.config import env_or_file, mongo_address
 from collector.core.logging import configure_logging, get_logger
 from collector.core.version import version_info
+from collector.persistence.postgres.config import PostgresSettings
 from collector.workers.roles import WorkerRole
 
 if TYPE_CHECKING:
@@ -253,23 +262,93 @@ def db_ensure_mongo(
 
 
 @db_app.command("migrate")
-def db_migrate() -> None:
-    """Перевіряє з'єднання з PostgreSQL; migrations ще немає (owner WP-01A, Alembic).
+def db_migrate(
+    check: Annotated[
+        bool,
+        typer.Option(
+            "--check", help="Не застосовувати; exit 1, якщо схема відрізняється від моделей."
+        ),
+    ] = False,
+    partitions_ahead: Annotated[
+        int,
+        typer.Option(
+            "--partitions-ahead", min=0, help="Скільки місяців партицій створити наперед."
+        ),
+    ] = 3,
+) -> None:
+    """Застосовує PostgreSQL migrations (`alembic upgrade head`) і створює місячні партиції.
 
-    У Compose це one-shot `migrate-postgres`: exit 0 = «дозволити старт api».
-    Перевірка лише TCP (`COLLECTOR_POSTGRES_HOST`/`PORT`), без credentials — драйвер
-    і `alembic upgrade head` додає WP-01A.
+    DSN — env `COLLECTOR_POSTGRES_DSN` або файл `COLLECTOR_POSTGRES_DSN_FILE`. Після міграцій
+    виконайте `collector db roles`, щоб оновити GRANT для нових таблиць.
     """
-    from collector.api.health import check_postgres
+    from collector.persistence.postgres.ops import migrate_database
 
-    configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
-    log = get_logger("collector.db.migrate")
-    status = check_postgres()
-    if not status.ok:
-        log.error("migrate.postgres_unreachable", detail=status.detail)
+    settings = _postgres_settings()
+    result = _run_async(
+        migrate_database(settings, check_only=check, partitions_months_ahead=partitions_ahead)
+    )
+    if check:
+        for problem in result.drift:
+            typer.echo(problem, err=True)
+        if result.drift:
+            typer.echo("schema drift: схема відрізняється від моделей", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"schema up to date: revision={result.revision_after}")
+        return
+    typer.echo(
+        f"migrated {settings.redacted_dsn}: "
+        f"{result.revision_before or 'empty'} -> {result.revision_after}"
+    )
+    for partition in result.partitions_created:
+        typer.echo(f"partition created: {partition}")
+    if result.drift:
+        for problem in result.drift:
+            typer.echo(problem, err=True)
+        typer.echo("schema drift після upgrade: перевірте моделі/міграції", err=True)
         raise typer.Exit(code=1)
-    log.info("migrate.postgres_reachable", detail=status.detail, latency_ms=status.latency_ms)
-    typer.echo("no migrations yet; owner WP-01A")
+
+
+@db_app.command("roles")
+def db_roles(
+    sql: Annotated[
+        Path | None,
+        typer.Option(
+            "--sql", help="Альтернативний SQL-файл ролей (типово — вбудований roles.sql)."
+        ),
+    ] = None,
+) -> None:
+    """Створює ролі БД §13 і застосовує GRANT (ідемпотентно; після `db migrate`)."""
+    from collector.persistence.postgres.ops import apply_database_roles
+    from collector.persistence.postgres.roles import ROLE_NAMES, default_roles_sql_path
+
+    settings = _postgres_settings()
+    path = sql or default_roles_sql_path()
+    if not path.is_file():
+        typer.echo(f"SQL-файл ролей не знайдено: {path}", err=True)
+        raise typer.Exit(code=1)
+    _run_async(apply_database_roles(settings, sql_path=path))
+    typer.echo(
+        f"roles applied to {settings.redacted_dsn} from {path.name}: {', '.join(ROLE_NAMES)}"
+    )
+
+
+def _postgres_settings() -> PostgresSettings:
+    from collector.persistence.postgres.config import PostgresConfigError
+
+    try:
+        return PostgresSettings.from_env()
+    except PostgresConfigError as exc:
+        typer.echo(f"postgres config: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _run_async[T](coro: Coroutine[Any, Any, T]) -> T:
+    """`asyncio.run` з перекладом помилок БД у exit code 1 без traceback у stderr."""
+    try:
+        return asyncio.run(coro)
+    except (OSError, DBAPIError, SQLAlchemyError) as exc:
+        typer.echo(f"postgres error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()

@@ -42,6 +42,9 @@ FOUNDATION_EXTENSIONS = frozenset({"contracts"})  # WP-01C: `collector contracts
 STUB_OWNER_PATTERN = re.compile(r"^not implemented: owned by WP-\d{2}[A-Z]?$")
 
 STUB_ARGV: tuple[list[str], ...] = (
+    # Підкоманд `db` тут немає: `ensure-mongo` реальна з WP-00 PR2 (її стаб-прапорці
+    # вимагають живої Mongo), `db migrate`/`db roles` реалізовані WP-01A
+    # (docs/plan/deps/WP-01A-to-WP-00.md).
     ["e2e", "--source", "fixtures", "--offline"],
     ["release", "build", "--watermark", "test", "--output", ".artifacts/release"],
     ["release", "verify", "--manifest", ".artifacts/release/manifest.json"],
@@ -114,7 +117,8 @@ def test_help_command_set_equals_spec_16_2_exactly() -> None:
 
 @pytest.mark.parametrize(
     ("group", "expected"),
-    [("db", {"ensure-mongo", "migrate"}), ("release", {"build", "verify"})],
+    # `roles` — owned extension групи `db` за карткою WP-01A (docs/plan/deps/WP-01A-to-WP-00.md).
+    [("db", {"ensure-mongo", "migrate", "roles"}), ("release", {"build", "verify"})],
 )
 def test_group_command_set_is_exact(group: str, expected: set[str]) -> None:
     result = runner.invoke(app, [group, "--help"])
