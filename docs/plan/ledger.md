@@ -17,7 +17,7 @@
 
 | WP | Стан | Примітка |
 |---|---|---|
-| WP-01A | testing (PR1) | картка `docs/plan/cards/WP-01A.md`; 541 tests, 36 integration на PostgreSQL 18 |
+| WP-01A | testing pass → fix (PR1) | 576 + 71 integration tests; матриця прав 8 ролей БД; `reports/WP-01A/testing-pr1.md` |
 | WP-01B | pending | після WP-01A |
 | WP-01D | pending | після WP-00, WP-01A |
 | WP-02 | pending | після WP-01A |
