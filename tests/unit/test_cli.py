@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
-from collector.cli import NOT_IMPLEMENTED_EXIT_CODE, app
+from collector.cli import app
 from collector.core import version as version_module
 from collector.core.version import SCHEMA_VERSION_PLACEHOLDER, git_sha, version_info
 from collector.workers.roles import WorkerRole
@@ -68,7 +68,7 @@ def test_worker_help_lists_all_roles_from_spec_7_6() -> None:
 @pytest.mark.parametrize(("argv", "owner"), STUBS, ids=[" ".join(a) for a, _ in STUBS])
 def test_stub_returns_exit_code_2_and_owner(argv: list[str], owner: str) -> None:
     result = runner.invoke(app, argv)
-    assert result.exit_code == NOT_IMPLEMENTED_EXIT_CODE
+    assert result.exit_code == 2  # контракт картки WP-00/§16.2, не константа
     assert result.output.strip() == f"not implemented: owned by {owner}"
 
 

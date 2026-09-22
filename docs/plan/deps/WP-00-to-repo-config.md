@@ -5,7 +5,7 @@
 | Від | WP-00 PR1 (`wp/00-1-python-ci`) |
 | До | оркестратор / власник repo-level конфігів (файл поза owned files WP-00) |
 | Файл | `.markdownlint-cli2.jsonc` |
-| Стан | open |
+| Стан | resolved — застосовано на `main` (`b3dafd8 chore: allow repeated sibling headings in WP cards (MD024 siblings_only)`); після rebase `wp/00-1-python-ci` hook `markdownlint-cli2` зелений |
 
 ## Що потрібно
 

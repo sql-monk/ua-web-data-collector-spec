@@ -9,12 +9,24 @@
   PostgreSQL/MongoDB/MinIO; будь-який інший host кидає `SocketConnectBlockedError`;
 - `live`: socket увімкнено; такі тести запускаються лише явно (`-m live`) з дозволу
   користувача і ніколи не входять у `pytest -m "not live"`.
+
+Event loop для async-тестів — завжди `SelectorEventLoop` (hook `pytest_asyncio_loop_factories`).
+На Windows default `ProactorEventLoop` з'єднується через `_overlapped.ConnectEx`, минаючи
+`socket.connect`, тому `asyncio.open_connection`/`httpx.AsyncClient` обходили б блокування
+у режимі allow-hosts. Selector loop іде через `sock_connect` → `socket.connect`, і асинхронний
+шлях блокується так само, як синхронний. Ціна: на Windows selector loop не підтримує
+asyncio subprocess/pipes — тестам, що цього потребують, робити окремий loop явно.
+
+Відомі межі pytest-socket у режимі allow-hosts (integration/e2e; на Windows — усі тести):
+не перехоплюються `socket.connect_ex`, UDP `sendto`, `socket.getaddrinfo` (DNS-резолв імен)
+і subprocess. У CI (Linux) для звичайних тестів діє повне `disable_socket`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 import pytest
 
@@ -36,3 +48,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: Iterable[pytest.
             item.add_marker(pytest.mark.enable_socket)
         elif _is_loopback_level(item) or IS_WINDOWS:
             item.add_marker(pytest.mark.allow_hosts(list(LOOPBACK_HOSTS)))
+
+
+def pytest_asyncio_loop_factories(
+    config: pytest.Config, item: pytest.Item
+) -> Mapping[str, Callable[[], asyncio.AbstractEventLoop]]:
+    """Один loop factory для всіх async-тестів: SelectorEventLoop (див. docstring модуля)."""
+    return {"selector": asyncio.SelectorEventLoop}

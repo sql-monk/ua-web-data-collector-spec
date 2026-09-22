@@ -26,7 +26,16 @@ repos:
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.0
     hooks:
+      # Staged-зміни при кожному commit (upstream entry: gitleaks git --pre-commit --staged).
       - id: gitleaks
+      # Уся доступна git-історія: при `run --all-files` на чистому дереві staged-hook нічого
+      # не сканує, тому acceptance «gitleaks чистий» доводить саме цей hook (у CI ще job `secrets`).
+      - id: gitleaks
+        alias: gitleaks-history
+        name: Detect hardcoded secrets (git history)
+        entry: gitleaks git --redact --no-banner --verbose
+        pass_filenames: false
+        always_run: true
 
   - repo: https://github.com/DavidAnson/markdownlint-cli2
     rev: v0.23.3
