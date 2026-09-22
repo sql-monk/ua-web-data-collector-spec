@@ -99,4 +99,5 @@ async def finish_run(
 
 
 async def get_run(session: AsyncSession, run_id: UUID) -> CrawlRun | None:
+    """Один crawl run за PK. Transaction boundary: викликач; один SELECT, без блокування."""
     return await session.get(CrawlRun, run_id)

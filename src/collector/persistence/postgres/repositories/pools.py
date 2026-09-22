@@ -169,10 +169,12 @@ async def upsert_pool(
 
 
 async def get_pool(session: AsyncSession, role: WorkerRole) -> WorkerPool | None:
+    """Один pool за role (PK). Transaction boundary: викликач; один SELECT, без блокування."""
     return await session.get(WorkerPool, role.value)
 
 
 async def list_pools(session: AsyncSession) -> list[WorkerPool]:
+    """Усі pools, впорядковані за role. Transaction boundary: викликач; один SELECT."""
     return list((await session.execute(select(WorkerPool).order_by(WorkerPool.role))).scalars())
 
 
@@ -288,18 +290,22 @@ async def set_instance_status(
 async def mark_draining(
     session: AsyncSession, instance_id: UUID, *, now: datetime | None = None
 ) -> WorkerInstance:
+    """`set_instance_status(..., "draining")` — той самий transaction boundary."""
     return await set_instance_status(session, instance_id, "draining", now=now)
 
 
 async def mark_stopped(
     session: AsyncSession, instance_id: UUID, *, now: datetime | None = None
 ) -> WorkerInstance:
+    """`set_instance_status(..., "stopped")` — той самий transaction boundary."""
     return await set_instance_status(session, instance_id, "stopped", now=now)
 
 
 async def mark_ready(
     session: AsyncSession, instance_id: UUID, *, now: datetime | None = None
 ) -> WorkerInstance:
+    """`set_instance_status(..., "ready")` — той самий transaction boundary; єдиний спосіб
+    зняти `drain_requested_at` (M-2 код-рев'ю)."""
     return await set_instance_status(session, instance_id, "ready", now=now)
 
 
@@ -527,6 +533,7 @@ async def transition_scale_command(
 
 
 async def get_scale_command(session: AsyncSession, command_id: UUID) -> ScaleCommand | None:
+    """Одна scale command за PK. Transaction boundary: викликач; один SELECT, без блокування."""
     return await session.get(ScaleCommand, command_id)
 
 

@@ -7,6 +7,7 @@
 - [docs/research/news-central-baltic.md](docs/research/news-central-baltic.md), [news-western.md](docs/research/news-western.md), [news-southern.md](docs/research/news-southern.md) — live-паспорти 58 новинних джерел у 19 країнах.
 - [docs/research/source-registry.yaml](docs/research/source-registry.yaml) — канонічні `source_id`, display names, домени та рейтинги всіх 70 джерел.
 - [docs/contracts.md](docs/contracts.md) — shared data contracts (WP-01C): identity/temporal/canonical serialization, `state_hash`, resolution/release, версіонування схем і ownership.
+- [docs/persistence/postgres.md](docs/persistence/postgres.md) — PostgreSQL-схема control plane (WP-01A): таблиці, transaction boundaries, партиціонування, ролі БД.
 - [REVIEW.md](REVIEW.md) — результати критичного рев’ю ТЗ і виправлення.
 - [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) — план реалізації субагентами: конвеєр work packages, картки, gate-и.
 - [docs/plan/ledger.md](docs/plan/ledger.md) — стан кожного work package/під-PR у конвеєрі.

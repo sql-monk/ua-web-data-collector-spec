@@ -92,6 +92,7 @@ async def ensure_bucket(
 
 
 async def get_bucket(session: AsyncSession, origin: str) -> OriginRateBucket | None:
+    """Bucket за origin. Transaction boundary: викликач; один SELECT, без блокування."""
     return await session.get(OriginRateBucket, origin)
 
 

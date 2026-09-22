@@ -327,6 +327,7 @@ async def recover_expired_leases(
 
 
 async def get_job(session: AsyncSession, job_id: UUID) -> CrawlJob | None:
+    """Один job за PK. Transaction boundary: викликач; один SELECT, без блокування."""
     return await session.get(CrawlJob, job_id)
 
 
