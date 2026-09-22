@@ -5,7 +5,7 @@
 | Поле | Значення |
 |---|---|
 | Статус | Готово до декомпозиції та реалізації |
-| Версія | 1.2 |
+| Версія | 1.3 |
 | Дата | 2026-09-22 |
 | Мова | Українська |
 | Робоча назва системи | UA Web Data Collector |
@@ -50,7 +50,9 @@
 - зберігає доказовий сирий оригінал і метадані отримання;
 - перетворює різні формати у стабільні доменні контракти та перекладає новини українською;
 - веде історію змін, не плутаючи відсутність відповіді з видаленням оголошення;
+- розрізняє час події у джерелі, час спостереження, отримання та запису;
 - вимірює свіжість, повноту, дублікати й помилки по кожному джерелу;
+- створює відтворювані dataset releases для досліджень;
 - дає змогу додавати нові адаптери без змін ядра.
 
 ### 2.2. У межах MVP
@@ -58,7 +60,7 @@
 - Новини: повний оригінальний текст, заголовок, анонс, автори, рубрики, теги, час, canonical URL, мова, географія, медіа-метадані, очищений HTML, український переклад і provenance перекладу.
 - Автобазари: повна публічна картка оголошення, опис, марка/модель/комплектація, рік, VIN, пробіг, технічні поля, географія, ціна, продавець, ім’я, телефони/e-mail, профіль, медіа URL, статус та історія змін.
 - Каталоги: повна публічна картка товару, бренд, артикул/MPN/GTIN, категорія, характеристики, продавець, контакти, ціна, валюта, наявність, доставка, рейтинг, відгуки, запитання/відповіді, медіа URL та історія змін.
-- Внутрішній API читання, експорт Parquet/JSONL, CLI керування, метрики і журнал запусків.
+- Внутрішній API читання, експорт Parquet/JSONL, DuckDB research kit, CLI керування, метрики і журнал запусків.
 
 ### 2.3. Поза межами MVP
 
@@ -81,6 +83,8 @@
 | Дублікати за ключем джерела | 0; семантичні дублікати між джерелами не більше 2% після матчингу |
 | Відтворюваність | кожен запис має `source_id`, `fetch_id`, час, URL і hash сирого об’єкта |
 | Відновлення після збою | повторний запуск не створює дублікатів і не втрачає підтверджені записи |
+| Часова коректність | source/observation/fetch/ingest timestamps не підміняють один одного; невідомий source time лишається nullable |
+| Відтворюваність dataset release | повторна збірка за manifest дає ті самі part hashes або пояснений versioned diff |
 
 ## 3. Операційні правила збору
 
@@ -162,7 +166,9 @@
 - `source_id`, `source_item_id` — джерело та стабільний ID на джерелі;
 - `canonical_url`, `source_url`;
 - `title`, `description_excerpt`, `full_text`, `language`, `country_code`;
-- `published_at`, `updated_at_source`, `first_seen_at`, `last_seen_at` у UTC;
+- `source_event_at`, `source_updated_at` — час події/оновлення, заявлений джерелом; nullable і ніколи не підміняється crawler time;
+- `observed_at` — логічний час конкретного source snapshot; `fetched_at` — завершення HTTP fetch; `ingested_at` — commit normalized record; `first_seen_at`, `last_seen_at` — межі спостережень;
+- `source_timezone_raw`, `source_time_precision`, `source_time_inferred` для збереження вихідної часової семантики;
 - `status`: `active`, `inactive`, `deleted`, `unknown`;
 - `content_hash`, `identity_hash`, `fetch_id`, `parser_version`;
 - `raw_object_uri`, `schema_version`;
@@ -170,7 +176,7 @@
 - `contacts` як окрема versioned collection: тип, нормалізоване й вихідне значення, ім’я/роль, `first_seen_at`, `last_seen_at`;
 - `media_assets`: URL, тип, caption, width/height/duration, source hash і optional downloaded object URI.
 
-Грошові значення зберігаються як `amount_minor BIGINT` + `currency CHAR(3)`, ніколи як float. Час — `timestamptz`; вихідний timezone/offset зберігається окремо, якщо джерело його передає.
+Грошові значення зберігаються як `amount_minor BIGINT` + `currency CHAR(3)`, ніколи як float. Усі нормалізовані timestamps — UTC `timestamptz`; вихідний timezone/offset і точність зберігаються окремо. Для досліджень порядок визначається `source_event_at` або `observed_at`, а не `ingested_at`.
 
 ### 5.2. Product і OfferObservation
 
@@ -232,6 +238,12 @@
 | FR-021 | Parser ніколи не робить синхронний запис у дві БД; PostgreSQL projection outbox і Mongo unique idempotency key забезпечують at-least-once delivery без дублікатів. |
 | FR-022 | Reconciler виявляє task без Mongo applied receipt/PostgreSQL acknowledgement, acknowledgement без index і version drift; повторна проєкція з raw/normalized artifact відновлює узгодженість. |
 | FR-023 | Read/export API приховує межу двох БД, але не виконує необмежені runtime joins; масові cross-domain вибірки формуються як versioned Parquet/JSONL. |
+| FR-024 | Кожен доменний запис виконує bitemporal contract §9.6: source/effective time не підміняється fetch/ingest time, а всі припущення про час явно маркуються. |
+| FR-025 | History compaction не видаляє версії, закріплені export/release/backup/incident/research references; dry-run, manifest і restore test обов'язкові. |
+| FR-026 | Cross-source merge є versioned і оборотним: decision з evidence/score/rule/actor може бути superseded або undone без втрати source records та observations. |
+| FR-027 | Dataset release має immutable manifest із registry/schema/parser/matcher/translation versions, watermark, exclusions, row/part counts і checksums. |
+| FR-028 | Capacity plan щомісяця перераховує fetch/artifact/DB/index/WAL/backup/translation volumes, unit cost і headroom; перевищення threshold створює scaling decision. |
+| FR-029 | V1 аналітика використовує DuckDB поверх immutable Parquet releases; новий production analytics datastore додається лише після benchmark і ADR. |
 
 ## 7. Архітектура
 
@@ -257,7 +269,9 @@ Source Registry ──> Scheduler ──> Discovery ──> Fetch Queue ──> 
                          │                                                                 │
                          └──────────────────> Read/Export API <────────────────────────────┘
                                                    │
-                                      Parquet/JSONL / Consumers
+                            Versioned Parquet/JSONL Releases
+                                      │                 │
+                             DuckDB Research       Other Consumers
 
 PostgreSQL News ──> Translation Queue/Worker + QA ──> PostgreSQL Translation Versions
 Failed terminal jobs ──> PostgreSQL Dead Letter
@@ -279,6 +293,7 @@ All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafan
 - **MongoDB Domain Store:** поточні source documents і append-only observations каталогів/авто, sellers, contacts, reviews/questions; не керує scheduler або source cursors.
 - **Mongo Projector:** бере task/artifact pointer із PostgreSQL, читає валідований normalized artifact із S3/MinIO, ідемпотентно проєктує його в MongoDB та повертає applied receipt.
 - **Exporter:** read-only відносно PostgreSQL і MongoDB; об'єднує результати лише через стабільні internal UUID/source identity, а не через неявні cross-database joins.
+- **Research Kit:** read-only DuckDB queries/views поверх перевірених Parquet releases; не читає operational БД напряму й не змінює дані.
 
 ### 7.2. Черга MVP
 
@@ -339,6 +354,7 @@ MongoDB є авторитетним serving store catalog/vehicle, але від
 | MongoDB 8.0 replica set | каталоги, offers, авто, sellers/contacts та їхні observations | гнучкі BSON documents; replica set потрібен для транзакцій/change streams; exact image digest pin |
 | PyMongo Async API | MongoDB projector і domain repository | без ODM-магії; Pydantic contract → явний BSON mapping; retryable writes, primary reads, `readConcern=majority` і `writeConcern=majority`; транзакції — `snapshot` |
 | S3-compatible storage (MinIO local, managed S3 prod) | raw і normalized artifacts, screenshots за потреби, exports | content-addressed keys; lifecycle: hot → compressed archive → delete згідно з політикою |
+| DuckDB, pinned | локальні й CI-відтворювані дослідження Parquet releases | [напряму читає Parquet і підтримує filter/projection pushdown](https://duckdb.org/docs/stable/data/parquet/overview); read-only views/macros; не є operational DB та не читає mutable current state |
 | FastAPI | operator/read API, health/readiness | не відкривати назовні без auth gateway |
 | Google Cloud Translation Advanced | основний переклад усіх перелічених мов в українську | офіційно підтримує `de`, `fr`, `en`, `lt`, `lv`, `et`, `pl`, `hu`, `ro`, `cs`, `sk`, `sl`, `hr`, `it`, `es`, `nl` і `uk`; batch для backfill, online для нових статей |
 | NLLB-200 distilled або Marian/OPUS-MT | локальний fallback і cost experiment | запускати тільки після benchmark на затвердженому multilingual наборі; не змішувати результати без `provider/model` |
@@ -362,11 +378,13 @@ MongoDB є авторитетним serving store catalog/vehicle, але від
 | `fetches`, `raw_objects`, `parse_attempts` | UUID PK/FK; requested/final URL, HTTP metadata, raw `sha256/uri/size`, parser/schema version, result/error, timestamps |
 | `artifact_upload_claims`, `normalized_artifacts` | claim: unique object key, owner, status, lease expiry, monotonic int64 `claim_generation`; artifact: UUID PK, `entity_uuid`, `sha256/uri/size`, media type, domain, schema version, raw/fetch/parser lineage; без domain payload JSONB |
 | `projection_tasks` | UUID `task_id`; FK artifact/entity; monotonic `projection_version`; target collection/schema; status/priority/attempt/not-before/lease; unique `(entity_uuid, projection_version)` і artifact projection key |
-| `projection_acknowledgements` | PK/FK `task_id`; entity/version; Mongo receipt ID/cluster time; `applied_to_current`; acknowledged timestamp; result hash |
+| `projection_acknowledgements` | PK/FK `task_id`; entity/version; Mongo receipt ID/cluster time; `applied_to_current`, `state_changed`; acknowledged timestamp; result/event hashes |
 | `entity_index` | PK `entity_uuid`; domain/source identity; Mongo collection/document ID; `confirmed_projection_version`; unique source identity; timestamps |
 | `change_events`, `outbox_events` | UUID PK; event/aggregate/version/type/schema; payload або artifact pointer; `available_at`, `published_at`, attempts/error; unique event ID |
 | `news_articles`, `news_article_versions`, `news_translations`, `translation_segments` | UUID PK/FK; source identity; immutable article version; original/cleaned/translated artifact refs; language/provider/model/glossary versions; timestamps |
-| `entity_aliases`, `match_candidates`, `exports`, `quality_results`, `dead_letters`, `audit_log` | UUID PK/FK; version/status/score або manifest watermark; actor/reason; timestamps |
+| `entity_aliases`, `match_candidates`, `entity_resolution_decisions` | UUID PK/FK; candidate/decision version, action, member IDs, canonical group, score/evidence, rule/model version, actor, reason, effective/system timestamps, supersedes ID |
+| `dataset_releases`, `release_parts`, `retention_pins`, `compaction_runs`, `version_archive_index` | immutable release/part manifests, watermarks, schema/code/config hashes, row counts/checksums; pin owner/reason/expiry; compaction state; exact entity/version → Parquet part/row-group locator + hash |
+| `capacity_snapshots`, `exports`, `quality_results`, `dead_letters`, `audit_log` | measured/forecast volume and unit cost or manifest/status; actor/reason; timestamps |
 
 Великі fetch/event tables партиціонуються щомісяця за `fetched_at/created_at`. Обов'язкові operational indexes: `crawl_jobs(status, not_before, priority, job_id)`, `projection_tasks(status, not_before, priority, task_id)`, `outbox_events(published_at, available_at, event_id)` і `entity_index(domain, confirmed_projection_version, entity_uuid)`. `entity_index` не дублює domain document. Видалення raw object або domain document не повинно руйнувати lineage record.
 
@@ -411,6 +429,15 @@ lineage:
   raw_sha256: string
   parser_version: string
   projection_task_id: UUID
+time:
+  source_event_at: datetime | null
+  source_updated_at: datetime | null
+  observed_at: datetime
+  fetched_at: datetime
+  ingested_at: datetime
+  source_timezone_raw: string | null
+  source_time_precision: second | minute | hour | day | month | year | unknown
+  source_time_inferred: boolean
 first_seen_at: datetime
 last_seen_at: datetime
 ```
@@ -449,9 +476,51 @@ last_seen_at: datetime
 ### 9.5. Узгоджене читання та export snapshot
 
 - `entity_index.confirmed_projection_version` змінюється тільки після підтвердженого Mongo receipt і ніколи не зменшується: `GREATEST(existing, receipt.projection_version)`. `domain.changed` створюється лише для `applied_to_current=true AND state_changed=true`.
-- Online API читає PostgreSQL index, потім Mongo з filter `{entity_uuid, projection_version}`. Якщо current document новіший, API читає `entity_projection_versions` і його exact snapshot/artifact ref; якщо потрібної версії немає, повертає `409 projection_inconsistent`, ставить reconcile task і не змішує версії.
+- Online API читає PostgreSQL index, потім Mongo з filter `{entity_uuid, projection_version}`. Якщо current document новіший, API читає hot `entity_projection_versions`, а після compaction — `version_archive_index` і exact Parquet row/artifact ref. Лише якщо версії немає ні в hot, ні в archive, повертає `409 projection_inconsistent`, ставить reconcile task і не змішує версії.
 - Export спочатку фіксує immutable manifest із PostgreSQL snapshot watermark та парами `(entity_uuid, confirmed_projection_version)`, а потім читає exact Mongo version records/snapshots. Manifest містить hash кожного part і schema versions; нові projections не змінюють уже створений export.
 - Reconciler та consistency-critical reads використовують primary + majority concern. Eventual/stale secondary reads дозволені лише окремому exploratory endpoint із явним `consistency=stale_ok` і без export/quality рішень.
+
+### 9.6. Часова модель
+
+Система використовує дві незалежні часові осі:
+
+- **source/effective time:** `source_event_at`, `source_updated_at` і source validity, якщо її явно дає джерело;
+- **system/knowledge time:** `fetched_at`, `observed_at`, `ingested_at` і commit/version time системи.
+
+Невідомий source time лишається `null`; заборонено заповнювати його `fetched_at`. Якщо аналітичний контракт потребує fallback, він повертає окремі `effective_at` і `effective_at_basis = source_event | source_updated | observed` та `source_time_inferred=true`. Зберігаються вихідний текст часу, timezone/offset, declared locale і precision (`second | minute | hour | day | month | year | unknown`).
+
+У dataset release для кожної версії обчислюються дві напіввідкриті осі: `[valid_from, valid_to)` за `effective_at` і `[known_from, known_to)` за `ingested_at`; відкрита верхня межа є `null`. `valid_to` визначається наступною source-effective версією тієї сутності, `known_to` — наступною версією, яку система дізналася. Query contract підтримує окремі `as_of_valid_time` та `as_known_at`; late-arriving record вставляється у version history і не переписує system time. Новинне виправлення, relisting авто або backdated price зберігають обидві осі.
+
+### 9.7. Retention, pinning і compaction
+
+- Current documents, changed business observations, news versions, release manifests, lineage та audit зберігаються безстроково за замовчуванням; великі payloads переходять у cold object tier.
+- `entity_projection_versions` із `state_changed=false` тримаються в MongoDB 90 днів, потім архівуються в partitioned Parquet за domain/source/month. Changed versions та heartbeat snapshots не видаляються з дослідницької історії; їх можна перемістити в cold Parquet, але не втратити.
+- `retention_pins` захищають artifact/version за release, активним export, backup watermark, incident або явно названим research run. Pin має owner, reason, scope, created/expiry; безстроковий pin потребує owner review раз на рік.
+- Compactor працює mark → dry-run manifest → immutable archive part → row/hash verify → PostgreSQL transaction, що вставляє archive locators і переводить run у `verified` → Mongo delete → 30-day rollback window → artifact sweep. API починає бачити locator до видалення hot record, тому немає вікна, де exact version відсутня. Він не видаляє current/confirmed version, останній successful snapshot сутності, pinned version або artifact із живим lineage reference.
+- Mongo/API отримують archive locator для compacted version. Відтворення published release читає pinned hot record або archived Parquet з тим самим hash; silent omission заборонений.
+
+### 9.8. Оборотне entity resolution
+
+- Source records ніколи фізично не зливаються. Global entity/group є materialized projection послідовності `entity_resolution_decisions`.
+- Decision contract: `decision_id`, `decision_version`, `action = merge | unmerge | reject | manual_link | manual_block`, member entity IDs, canonical group ID, evidence refs, feature values, score/calibration version, rule/model version, actor, reason, effective/system time і optional `supersedes_decision_id`.
+- Auto-merge дозволений лише за domain threshold і precision gate; `manual_block` забороняє повторне auto-merge до явного superseding decision.
+- Unmerge/split перебудовує aliases, group projection і наступні releases, але не змінює попередні published releases та не втрачає observations. Кожен export містить resolution snapshot/version.
+
+### 9.9. Dataset release contract
+
+Published dataset release є immutable і має стани `draft | building | validating | published | failed | superseded`. Manifest містить:
+
+- `release_id`, human-readable tag, created/published time, owner і purpose;
+- PostgreSQL snapshot/export watermark та список `(entity_uuid, projection_version)` або hash partition index;
+- source registry/policy versions, included/excluded/degraded sources і причини;
+- schema, parser, normalizer, matcher, resolution, translation provider/model/glossary versions;
+- Git commit, container image digests, sanitized config hash і build command;
+- part URIs, formats, partitions, row counts, min/max effective/system times, byte sizes і SHA-256;
+- quality report, reconciliation result і link на previous/superseding release.
+
+Для deterministic rebuild exporter фіксує column order/types, partition keys, stable row sort `(entity_uuid, projection_version)`, null/decimal/timestamp representation, compression codec/level, row-group size і writer library/version. Volatile build timestamps не потрапляють у part contents; SQL без явного `ORDER BY` не може використовувати фізичний file order як змістовний.
+
+Опублікований release не перезаписується. Виправлення створює новий release; `uv run collector release verify --manifest <path>` перевіряє manifest/schema/part hashes до виконання DuckDB research SQL.
 
 ## 10. Алгоритм збору й оновлення
 
@@ -469,6 +538,9 @@ last_seen_at: datetime
 12. Translation worker перекладає в `uk`, відновлює структуру, валідовує числа, дати, URL, імена/терміни з glossary та записує immutable translation version.
 13. Окремий publisher доставляє outbox events щонайменше один раз; споживачі зобов’язані бути ідемпотентними.
 14. Завершення crawl run обчислює quality gates. Невдалий gate не позначає відсутні сутності видаленими.
+15. Resolution worker створює candidates/decisions і перебудовує global entity groups; source records не змінюються, а unmerge є replay тієї самої decision history.
+16. Release builder фіксує watermark і resolution snapshot, створює Parquet parts/manifest, перевіряє counts/hashes/quality та лише після цього атомарно переводить release у `published`.
+17. Compactor архівує й видаляє hot history тільки за процедурою §9.7; capacity planner після кожного місячного зрізу оновлює forecast і scaling triggers.
 
 Retry policy за замовчуванням: максимум 4 спроби для idempotent GET, backoff 5 с / 30 с / 2 хв / 10 хв із jitter; окремий денний retry budget на джерело. Timeout: connect 10 с, read 30 с, total 60 с; великі файли sitemap можуть мати окремий manifest override.
 
@@ -498,11 +570,12 @@ Retry policy за замовчуванням: максимум 4 спроби д
 ### 12.1. Quality gates на crawl run
 
 - parse success rate ≥ 99% для стабільного адаптера;
-- required-field completeness ≥ 99.5%; для новин `title`, `canonical_url`, `published_at`; для offer/listing — ID, URL, price/status згідно з джерелом;
+- required-field completeness ≥ 99.5%; для новин `title`, `canonical_url` і `source_event_at` або явний `source_time_missing_reason`; для offer/listing — ID, URL, price/status згідно з джерелом;
 - item yield не падає більш ніж на 30% проти медіани 7 успішних порівнюваних запусків;
 - cardinality категорій/валют/статусів не має неочікуваних нових значень;
 - duplicate source keys = 0;
-- часові значення не більш ніж на 24 години в майбутньому й не старші заданого backfill window без позначки.
+- source timestamps не більш ніж на 24 години в майбутньому й не старші заданого backfill window без flag; підозрілий час карантиниться, але не замінюється crawler time;
+- усі записи мають `fetched_at/ingested_at`; nullable/source-time inference rate не відхиляється більш ніж на 10 percentage points від 7-run baseline без schema incident;
 - для новин coverage translation = 100% завершених original article versions, крім записів зі статусом `translation_failed` і явним retry plan;
 - placeholder/URL/числа в перекладі збережені на 100%, language detection українського результату ≥ 0.95 confidence для текстів понад 200 символів.
 
@@ -546,6 +619,11 @@ Rubric перекладу, шкала 0–2 для кожного критері
 - `source_freshness_seconds`, `queue_oldest_age_seconds`, `dead_letters_total`;
 - `raw_bytes_total`, `raw_dedup_ratio`, `artifact_orphans_total`, DB/storage utilization;
 - `projection_tasks_total{domain,status}`, `projection_lag_seconds`, `projection_replays_total`, `cross_store_drift_total`;
+- `late_arrivals_total`, `source_time_null_ratio`, `source_time_inferred_total`, temporal-order violations;
+- `resolution_decisions_total{action,actor_type}`, candidate precision sample, blocked remerge attempts;
+- `compaction_candidates/archived/deleted/pinned`, archive verification failures, hot/cold bytes;
+- `dataset_release_builds_total{status}`, release age/duration/rows/bytes/hash failures;
+- capacity actual/forecast/headroom і monthly cost by storage/compute/translation class;
 - `translation_jobs_total{source_language,status}`, `translation_characters_total`, `translation_cost`, `translation_latency_seconds`, `translation_memory_hit_ratio`;
 - quality completeness/yield/duplicate metrics.
 
@@ -554,8 +632,8 @@ Rubric перекладу, шкала 0–2 для кожного критері
 ### 14.2. Алерти
 
 - SEV-1: витік secrets, неконтрольований request rate, підозрілий масовий export контактів, недоступність PostgreSQL/MongoDB/artifact store або підтверджена втрата projection.
-- SEV-2: немає нових news понад 30 хв для активного джерела, projection lag понад 15 хв, cross-store drift, translation lag понад 20 хв, queue age понад SLO, parse success <95%, yield drop >50%, 429/403 spike.
-- SEV-3: storage >75%, окремий адаптер деградував, наближення анонімного rate budget.
+- SEV-2: немає нових news понад 30 хв для активного джерела, projection lag понад 15 хв, cross-store drift, release/archive hash failure, translation lag понад 20 хв, queue age понад SLO, parse success <95%, yield drop >50%, 429/403 spike.
+- SEV-3: storage >70% або 90-day forecast порушує 30% headroom, source-time drift, окремий адаптер деградував, наближення анонімного rate budget.
 
 Runbook має містити pause source, inspect raw/parse/projection error, restore lease, replay from raw, reconcile PostgreSQL tasks із Mongo applied receipts та PostgreSQL acknowledgements, rotate key, sweep/expire artifact objects і rollback parser/schema version.
 
@@ -570,6 +648,22 @@ Runbook має містити pause source, inspect raw/parse/projection error, 
 - PostgreSQL partitions, Mongo indexes/collection sizes і retention перевіряються на dataset масштабу не менш як 2× річний прогноз.
 - Raw HTML/XML/JSON, очищений оригінал і переклади зберігаються безстроково за замовчуванням; object storage має versioning, compression і tiering. Media binaries мають окремий retention через обсяг.
 
+### 15.1. Capacity і cost model
+
+Щомісячний `capacity_snapshot` зберігає actual, 30/90/365-day forecast, unit price/config source, confidence і owner для таких класів:
+
+| Клас | Базова формула прогнозу | Trigger рішення |
+|---|---|---|
+| Fetch/network | planned requests × measured retry/change ratio × p50/p95 response bytes | rate/egress або daily budget >80% |
+| S3 artifacts/releases | new compressed bytes + versioning overhead − verified lifecycle deletion | forecast залишає <30% headroom за 90 днів |
+| Mongo data/indexes | current + projection versions + observations + measured index/replica factor | data+indexes >70% usable disk або working set не вміщується |
+| PostgreSQL/WAL | rows/day × measured bytes + WAL + indexes + PITR retention | disk/WAL >70% або checkpoint/replication SLO порушено |
+| Backups | full/incremental size × retention/replicas + restore scratch space | restore drill перевищив затверджений RTO/RPO |
+| Translation | new/changed characters − translation-memory hits × provider unit price | forecast >80% monthly character/cost budget |
+| Compute/browser | measured CPU/RAM seconds per 1k jobs × planned volume | p95 queue age/SLO порушено при <70% utilization reserve |
+
+Модель використовує фактичні p50/p95 за останні 30 днів, окремо показує backfill і steady state та не змішує logical/compressed/replicated bytes. Зміна storage engine, sharding або нового analytics datastore потребує benchmark на 2× forecast, оцінки migration/restore cost і ADR. Для v1 дослідницькі запити виконуються DuckDB по partitioned Parquet; ClickHouse/OpenSearch не додаються без доведеного query/SLA gap.
+
 ## 16. Тестування та приймання
 
 ### 16.1. Рівні тестів
@@ -582,6 +676,11 @@ Runbook має містити pause source, inspect raw/parse/projection error, 
 6. **Load:** черга, PostgreSQL і MongoDB на 2× прогнозі, browser pool окремо.
 7. **Translation QA:** golden multilingual corpus для всіх 16 вихідних мов, preservation тест чисел/URL/імен, glossary і regression score.
 8. **Security:** SSRF redirect, zip bomb, XXE, hostile HTML, secret log checks.
+9. **Temporal:** nullable/precision/timezone cases, late arrivals, backdated corrections, relisting і перевірка source/system axes.
+10. **Resolution:** merge → manual block → unmerge → replay; source observations незмінні, старий release відтворюється, новий використовує новий snapshot.
+11. **Compaction:** pin race, dry-run, archive row/hash verification, concurrent exact reads never see a gap, rollback window, restore exact version із Parquet.
+12. **Release/analytics:** дві збірки з однаковим manifest дають ті самі hashes; DuckDB contract queries проходять без доступу до operational БД.
+13. **Capacity:** synthetic 2× forecast, формули unit cost і thresholds перевіряються golden snapshot tests.
 
 ### 16.2. Команди як контракт
 
@@ -595,6 +694,9 @@ docker compose up -d --wait postgres mongo minio
 uv run alembic upgrade head
 uv run collector db ensure-mongo --validators --indexes
 uv run collector e2e --source fixtures --offline
+uv run collector release build --watermark test --output .artifacts/release
+uv run collector release verify --manifest .artifacts/release/manifest.json
+duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*.parquet')"
 ```
 
 Фінальні назви CLI можуть змінитися один раз у foundation PR; після цього README і CI мають виконувати саме ці команди.
@@ -611,6 +713,11 @@ uv run collector e2e --source fixtures --offline
 - один source pause зупиняє нові запити не пізніше 60 секунд;
 - відсутність credentials у source runtime не ламає інші джерела й не спричиняє спроб login;
 - lineage від експортованого рядка до raw artifact відкривається через один API lookup, навіть якщо API внутрішньо читає entity index у PostgreSQL і document у MongoDB;
+- late-arriving/backdated fixtures зберігають source та system time окремо й дають правильні `[valid_from, valid_to)` інтервали;
+- merge/unmerge replay не змінює source records, відтворює попередній release і створює новий resolution snapshot;
+- compaction dry-run, pin race, concurrent read, archive verification і rollback пройдено; published release після compaction має ті самі part hashes;
+- capacity snapshot побудовано з фактичних pilot metrics; усі класи мають не менше 30% 90-day headroom або затверджений scaling ADR;
+- DuckDB відкриває release після hash verification і виконує contract queries без credentials PostgreSQL/MongoDB;
 - кожне джерело з §4.1 має доказаний `source_state`; кожен route — `route_state`, а sample item — `content_access` із §5.5; для кожної з 19 країн щонайменше одне джерело з `source_state=enabled` віддає item із `content_access=full`, оригіналом і українським перекладом через API/SQL;
 - 30 випадкових перекладів на кожну вихідну мову пройшли human QA за rubric, critical meaning errors = 0.
 
@@ -631,9 +738,9 @@ uv run collector e2e --source fixtures --offline
 | WP | Власність | Залежить від | Результат і критерій приймання |
 |---|---|---|---|
 | WP-00 | Foundation | — | repo layout, `pyproject`, lock, CI, Compose, coding/PR rules; порожній smoke проходить |
-| WP-01C | Shared data contracts | WP-00 | canonical UUID/source identity, artifact, projection command/ack, domain event і export manifest schemas; compatibility fixtures green |
-| WP-01A | PostgreSQL foundation | WP-01C | єдине ownership SQL migrations; control/news schemas, jobs, artifact pointers, projection tasks/acks, outboxes, entity index/lineage; clean SQL integration green |
-| WP-01B | MongoDB domain foundation | WP-01C, WP-01A | єдине ownership Mongo validators/index migrations; replica set Compose, repositories, projector, applied receipts/reconciler; crash/out-of-order tests green |
+| WP-01C | Shared data contracts | WP-00 | canonical UUID/source identity, temporal axes, artifact, projection command/ack, resolution decision, domain event і dataset release schemas; compatibility fixtures green |
+| WP-01A | PostgreSQL foundation | WP-01C | єдине ownership SQL migrations; control/news schemas, jobs, artifact pointers, projection tasks/acks, outboxes, entity index/lineage, release/pin/capacity tables; clean SQL integration green |
+| WP-01B | MongoDB domain foundation | WP-01C, WP-01A | єдине ownership Mongo validators/index migrations; replica set, repositories, projector, receipts/reconciler, compaction/archive locator; crash/out-of-order/restore tests green |
 | WP-02 | Fetch core | WP-01A | HTTP fetcher, robots snapshot, allowlist, limiter, retries, raw S3; SSRF/rate tests green |
 | WP-03 | Discovery | WP-01A, WP-02 | API/RSS/sitemap streaming, cursors, idempotent jobs; gzip/pagination fixtures green |
 | WP-04 | Translation core | WP-01A | segmenter, provider interface, Google adapter, translation memory, glossary, QA corpus; all language pairs green |
@@ -645,12 +752,13 @@ uv run collector e2e --source fixtures --offline
 | WP-06E | News PL/HU/RO | WP-05 | усі джерела цих країн + translations |
 | WP-06F | News CZ/SK/SI/HR | WP-05 | усі джерела цих країн + translations |
 | WP-06G | News IT/ES | WP-05 | усі джерела цих країн + translations |
-| WP-07 | Vehicle contracts & matching | WP-01A, WP-01B | vehicle/seller/contact domain contracts, dictionaries і matching implementation поверх owned storage APIs; golden fixtures; schema changes через WP-01A/B owners |
+| WP-07 | Vehicle contracts & matching | WP-01A, WP-01B | vehicle/seller/contact contracts, reversible resolution decisions, manual block/unmerge, dictionaries і matching; golden fixtures; schema changes через WP-01A/B owners |
 | WP-08A–D | Vehicle adapters | WP-03, WP-07 | один незалежний пакет на AUTO.RIA, OLX Авто, RST, Automoto; full public field coverage |
-| WP-09 | Catalog contracts & matching | WP-01A, WP-01B | product/offer/review/question domain contracts, category mapping і matching поверх owned storage APIs; benchmark; schema changes через WP-01A/B owners |
+| WP-09 | Catalog contracts & matching | WP-01A, WP-01B | product/offer/review/question contracts, reversible resolution decisions, category mapping і matching; benchmark; schema changes через WP-01A/B owners |
 | WP-10A–H | Catalog adapters | WP-03, WP-09 | один незалежний пакет на Prom, Rozetka, Epicentr, Allo, Hotline, Comfy, Foxtrot, MOYO |
-| WP-11 | Operator API/export | WP-01A, WP-01B, WP-04 | bounded cross-store read API, status/pause/replay, original+translation export, Parquet/JSONL manifest; RBAC tests |
-| WP-12 | Observability/runbooks | WP-01B, WP-02, WP-04, WP-11 | dashboards, projection/drift/source/translation alerts, backup/restore procedure, SLO queries; injected-failure і restore exercises |
+| WP-11A | Operator API/releases | WP-01A, WP-01B, WP-04, WP-07, WP-09 | bounded cross-store API, status/pause/replay, immutable Parquet/JSONL dataset releases, temporal/resolution snapshots; reproducibility/RBAC tests |
+| WP-11B | DuckDB research kit | WP-11A | pinned DuckDB, manifest verifier, read-only views/macros і representative price/vehicle/news SQL; offline contract queries green |
+| WP-12 | Observability/lifecycle/runbooks | WP-01B, WP-02, WP-04, WP-11A | dashboards, projection/drift/source/translation/release/capacity alerts, compactor, backup/restore procedure; injected-failure, compaction і restore exercises |
 | WP-13 | Security review | WP-02–12 | threat model validation, dependency/container scans, secret checks; findings triaged |
 | WP-14 | Integration/release | усі required WP | 7-day pilot, 19-country coverage, traceability matrix, acceptance report; no unresolved critical/high findings |
 
@@ -665,6 +773,7 @@ uv run collector e2e --source fixtures --offline
 - реалізація відповідає одному issue/WP і не містить сторонніх змін;
 - formatter, lint, types, unit/contract/integration tests пройшли;
 - зміна схеми має migration і compatibility evidence;
+- зміна timestamp, matching або release contract має temporal/replay/reproducibility evidence;
 - новий адаптер має manifest, fixtures, golden outputs, field coverage report, quality sample і bounded live smoke;
 - документація, метрики й runbook оновлені;
 - secret scan чистий; публічні контакти присутні тільки в Mongo domain collections та immutable domain artifacts, а не в fixtures з випадково приватних джерел або технічних logs;
@@ -681,6 +790,10 @@ uv run collector e2e --source fixtures --offline
 | Несанкціонований доступ до зібраних контактів | низька/високий | encryption, RBAC, audit log, закритий research API | аномальний export/access pattern |
 | Вибух обсягу raw storage | висока/середній | compression, content addressing, lifecycle | >75% capacity або прогноз >бюджету |
 | Невірний cross-source match | середня/середній | deterministic IDs first, candidate review | precision нижче 99% для auto-merge |
+| Необоротний помилковий merge | середня/високий | source records immutable, versioned decisions, manual block, unmerge replay | source observation втрачено або split неможливий |
+| Плутанина source/system time | висока/високий | окремі temporal axes, nullable source time, inference flag, late-arrival tests | crawler time записано як source time або negative interval |
+| Неконтрольоване зростання projection history | висока/високий | hot/cold policy, pins, verified compaction, capacity forecast | <30% 90-day headroom або compaction verify failed |
+| Невідтворюваний dataset release | середня/високий | immutable manifest, code/config/schema versions, part hashes, DuckDB verifier | повторна збірка має непояснений hash/count diff |
 | Розсинхронізація PostgreSQL і MongoDB | середня/високий | transactional outbox, monotonic projection version/CAS, Mongo applied receipt, PostgreSQL acknowledgement, reconciler, exact-version export | відсутній ack >15 хв або `cross_store_drift_total > 0` після reconcile |
 | Надмірно великий Mongo document | середня/високий | bounded embedding, окремі observation/review/media collections, size metric | document >8 MiB або unbounded array detected |
 | Надмірне використання браузера | середня/середній | browser by exception, budget metric | >10% fetches без ADR |
@@ -697,12 +810,14 @@ uv run collector e2e --source fixtures --offline
 | Q-002 | Завантажувати бінарні фото/відео чи лише URL/метадані? | URL/метадані; binary download off | Product owner, до WP-02 close |
 | Q-003 | Як шардити повний каталог між worker pools? | стабільний hash категорії; збирати всі категорії | Engineering, до WP-03 close |
 | Q-004 | Яку глибину історичного backfill робити? | максимально доступна в sitemap/API, але не старше 5 років | Product, до масового backfill |
-| Q-005 | Retention raw/history? | безстроково з cold tier | Data owner, до pilot |
+| Q-005 | Retention raw/history? | raw/changed history безстроково з cold tier; unchanged projection records 90 днів hot, далі verified Parquet compaction | Data owner, до pilot |
 | Q-006 | Інфраструктурний бюджет/SLO? | один хост MVP, SLO з §2.4 | Product/DevOps, до WP-00 close |
 | Q-007 | Чи переходить login/API-key канал у майбутню версію? | ні; v1 завжди anonymous-only | Product, після v1 |
 | Q-008 | Місячний бюджет Google Cloud Translation? | character budget конфігурується; backfill paused без ліміту | Product, до WP-04 live |
 | Q-009 | Перекладати оновлену статтю повністю чи лише змінені сегменти? | лише змінені сегменти, потім збирати повну version | Product, до WP-04 close |
 | Q-010 | Яка production topology MongoDB? | single-member replica set у локальному MVP; 3 data-bearing members у різних failure domains перед HA production | DevOps, до production |
+| Q-011 | Яка cadence dataset releases? | щотижня та on-demand; published releases immutable | Research owner, до WP-11A close |
+| Q-012 | Які auto-merge thresholds по доменах? | auto-merge лише deterministic IDs; fuzzy лишається candidate до benchmark precision ≥99% | Data owner, до WP-07/WP-09 close |
 
 Рішення оформлювати у `docs/decisions/NNNN-title.md` з полями Context, Decision, Consequences, Date, Owner, Status.
 
@@ -730,8 +845,9 @@ uv run collector e2e --source fixtures --offline
 │   ├── persistence/{postgres,mongo}/
 │   ├── api/
 │   └── telemetry/
-├── schemas/{events,mongo}/
+├── schemas/{events,mongo,releases}/
 ├── migrations/{postgres,mongo}/
+├── research/{sql,views}/
 ├── tests/{unit,contract,integration,e2e,fixtures}/
 ├── sources/<source_id>/manifest.yaml
 ├── docs/{adr,runbooks,decisions}/
@@ -801,4 +917,9 @@ parser:
 | Технічна безпека | FR-013, §13 | SSRF/XXE/secret tests and scans |
 | Експлуатація | FR-009, §14 | pause/replay drill, dashboards and alert exercise |
 | Узгодженість двох БД | FR-020—FR-023, §7.3—§7.4, §9 | crash-window replay, reconciliation, backup/restore drill, bounded read/export tests |
+| Часова коректність | FR-024, §9.6 | timezone/precision/null, late-arrival, relisting і bitemporal interval tests |
+| Керована історія | FR-025, §9.7 | pin race, compaction dry-run, archive hash/row verify, rollback/restore |
+| Оборотний matching | FR-026, §9.8 | merge/block/unmerge/replay, immutable source records, resolution snapshot |
+| Відтворювані дослідження | FR-027, FR-029, §9.9 | manifest/part hashes, identical rebuild, offline DuckDB contract queries |
+| Capacity і витрати | FR-028, §15.1 | monthly actual/forecast, golden formulas, 2× load і headroom gate |
 | Незалежна реалізація | §17, §18 | WP acceptance, CI, contract/version ownership |

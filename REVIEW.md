@@ -4,7 +4,7 @@
 
 Об’єкт: `TECHNICAL_SPECIFICATION.md`
 
-Результат: усі критичні й суттєві зауваження виправлено у версії 1.2.
+Результат: усі критичні й суттєві зауваження виправлено у версії 1.3.
 
 ## Чекліст і виправлення
 
@@ -52,6 +52,14 @@
 | R-40 | Середній | Mongo одночасно називався source of truth і materialized projection. | Fixed | Ролі уточнено: S3 raw — canonical evidence, normalized artifact — reproducible input, PostgreSQL — canonical control/index/news, Mongo — authoritative serving projection. |
 | R-41 | Середній | Upload claim не мав формального fencing token. | Fixed | Додано unique object key, монотонну `claim_generation`, атомарне збільшення та commit predicate з generation і чинним lease. |
 | R-42 | Середній | Byte-equivalent event replay не мав canonical serialization contract. | Fixed | Receipt зберігає готові UTF-8 event bytes, media type і SHA-256; reconciler копіює bytes без reserialization, великі payloads мають immutable artifact ref. |
+| R-43 | Високий | Історія не розділяла час події у джерелі та час отримання/запису системою. | Fixed | Додано temporal contract із source/effective та system/knowledge axes, precision/timezone/inference metadata і late-arrival tests. |
+| R-44 | Високий | Mandatory projection version на кожен fetch міг необмежено роздувати MongoDB. | Fixed | Додано retention pins, 90-day hot window для unchanged versions, verified Parquet compaction, rollback window та archive locator. |
+| R-45 | Високий | Cross-source merge не мав формального unmerge/replay contract. | Fixed | Source records лишаються immutable; рішення versioned, мають evidence/model/actor/supersedes, manual block і відтворюваний resolution snapshot. |
+| R-46 | Високий | Export manifest не був повним контрактом відтворюваного dataset release. | Fixed | Додано immutable release lifecycle, watermarks, registry/schema/code/config/model versions, exclusions, part counts/hashes і reproducibility test. |
+| R-47 | Середній | Масштаб був оцінкою без регулярної capacity/cost моделі та scaling trigger. | Fixed | Додано щомісячний actual/30/90/365 forecast для network/S3/Mongo/PostgreSQL/WAL/backups/translation/compute і 30% headroom gate. |
+| R-48 | Середній | Не було стандартного способу досліджувати releases без прямого доступу до operational БД. | Fixed | Додано pinned read-only DuckDB research kit поверх перевірених partitioned Parquet releases; новий analytics datastore потребує benchmark/ADR. |
+| R-49 | Високий | Назва bitemporal не мала формального valid/known interval query contract. | Fixed | Release тепер містить `[valid_from, valid_to)` та `[known_from, known_to)`, basis/inference metadata і окремі `as_of_valid_time`/`as_known_at` запити. |
+| R-50 | Високий | Compaction могла створити вікно між видаленням hot version і доступністю archive locator. | Fixed | Archive part і hashes перевіряються, locators атомарно публікуються в PostgreSQL до Mongo delete; API весь час бачить hot або archive version. |
 
 ## Підсумкова перевірка узгодженості
 
@@ -62,7 +70,11 @@
 - SLO ↔ метрики/алерти: узгоджено — окремо вимірюються crawl freshness і translation latency.
 - Зберігання ↔ відтворюваність: узгоджено — raw, original, cleaned і translated artifacts immutable та пов’язані hash/version.
 - Приймання ↔ тести: узгоджено — offline E2E, bounded live smoke, field coverage і multilingual QA мають числові пороги.
+- Час ↔ історія: узгоджено — source/effective та system/knowledge axes окремі, late arrivals не переписують ingestion history.
+- Matching ↔ releases: узгоджено — merge/unmerge versioned, а кожен release фіксує resolution snapshot.
+- Retention ↔ дослідження: узгоджено — compaction не порушує pins, release hashes або відновлення exact version.
+- Масштаб ↔ витрати: узгоджено — capacity snapshot має вимірювані формули, headroom gate і trigger для ADR.
 
 ## Залишкові відкриті рішення
 
-Вони не є дефектами ТЗ і мають safe default у §20: перший дослідницький сценарій, завантаження media binaries, шардінг повного каталогу, глибина backfill, retention та бюджет інфраструктури/перекладу. Source API keys не є відкритим рішенням v1.
+Вони не є дефектами ТЗ і мають safe default у §20: перший дослідницький сценарій, media binaries, шардінг, backfill, retention, бюджет, cadence releases, Mongo topology та domain matching thresholds. Source API keys не є відкритим рішенням v1.
