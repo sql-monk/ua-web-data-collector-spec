@@ -1,0 +1,158 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Посилання на immutable content-addressed artifact.\n\n`schema_version` тут — версія схеми *вмісту* (наприклад, normalized payload), а не\nверсія цього контракту (`ArtifactRef.contract_version`).",
+      "properties": {
+        "media_type": {
+          "minLength": 3,
+          "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Версія схеми вмісту artifact (для normalized/event payload).",
+          "title": "Schema Version"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "media_type",
+        "sha256",
+        "size_bytes",
+        "uri"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/events/domain_changed_event.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Публічна подія зміни current state після Mongo commit (§7.3 п.4).\n\nСтворюється лише для receipt з `applied_to_current=true AND state_changed=true`;\nconsumer дедуплікує за `event_id`. `payload` або `payload_artifact` — рівно одне.",
+  "properties": {
+    "aggregate_id": {
+      "format": "uuid",
+      "title": "Aggregate Id",
+      "type": "string"
+    },
+    "aggregate_version": {
+      "description": "`projection_version`, що стала current.",
+      "minimum": 1,
+      "title": "Aggregate Version",
+      "type": "integer"
+    },
+    "event_id": {
+      "description": "Стабільний ID події; той самий при replay.",
+      "format": "uuid",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_type": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+      "title": "Event Type",
+      "type": "string"
+    },
+    "occurred_at": {
+      "description": "Mongo commit time receipt.",
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "payload": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Payload"
+    },
+    "payload_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "payload_schema_version": {
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Payload Schema Version",
+      "type": "string"
+    },
+    "previous_state_hash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Previous State Hash"
+    },
+    "projection_task_id": {
+      "format": "uuid",
+      "title": "Projection Task Id",
+      "type": "string"
+    },
+    "result_state_hash": {
+      "title": "Result State Hash",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "aggregate_id",
+    "aggregate_version",
+    "event_id",
+    "event_type",
+    "occurred_at",
+    "payload_schema_version",
+    "projection_task_id",
+    "result_state_hash"
+  ],
+  "title": "DomainChangedEvent",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

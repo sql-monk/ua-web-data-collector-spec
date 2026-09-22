@@ -1,0 +1,576 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Посилання на immutable content-addressed artifact.\n\n`schema_version` тут — версія схеми *вмісту* (наприклад, normalized payload), а не\nверсія цього контракту (`ArtifactRef.contract_version`).",
+      "properties": {
+        "media_type": {
+          "minLength": 3,
+          "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Версія схеми вмісту artifact (для normalized/event payload).",
+          "title": "Schema Version"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "media_type",
+        "sha256",
+        "size_bytes",
+        "uri"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "ComponentVersions": {
+      "additionalProperties": false,
+      "description": "Версії коду/моделей, що впливають на відтворюваність (§9.9).",
+      "properties": {
+        "glossary_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Glossary Version"
+        },
+        "matcher_version": {
+          "minLength": 1,
+          "title": "Matcher Version",
+          "type": "string"
+        },
+        "normalizer_version": {
+          "minLength": 1,
+          "title": "Normalizer Version",
+          "type": "string"
+        },
+        "parser_version": {
+          "minLength": 1,
+          "title": "Parser Version",
+          "type": "string"
+        },
+        "resolution_version": {
+          "minLength": 1,
+          "title": "Resolution Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "translation_model_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Translation Model Version"
+        },
+        "translation_provider": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Translation Provider"
+        }
+      },
+      "required": [
+        "matcher_version",
+        "normalizer_version",
+        "parser_version",
+        "resolution_version",
+        "schema_version"
+      ],
+      "title": "ComponentVersions",
+      "type": "object"
+    },
+    "EntityVersionRef": {
+      "additionalProperties": false,
+      "description": "Пара `(entity_uuid, projection_version)` у watermark списку release (§9.5).",
+      "properties": {
+        "entity_uuid": {
+          "format": "uuid",
+          "title": "Entity Uuid",
+          "type": "string"
+        },
+        "projection_version": {
+          "minimum": 1,
+          "title": "Projection Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entity_uuid",
+        "projection_version"
+      ],
+      "title": "EntityVersionRef",
+      "type": "object"
+    },
+    "ReleasePart": {
+      "additionalProperties": false,
+      "description": "Один Parquet part release (§9.9).",
+      "properties": {
+        "format": {
+          "description": "Напр. `parquet`.",
+          "minLength": 1,
+          "title": "Format",
+          "type": "string"
+        },
+        "max_effective_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Effective At"
+        },
+        "max_system_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max System At"
+        },
+        "min_effective_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Effective At"
+        },
+        "min_system_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min System At"
+        },
+        "partition": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Ключі партиції.",
+          "title": "Partition",
+          "type": "object"
+        },
+        "row_count": {
+          "minimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "format",
+        "row_count",
+        "sha256",
+        "size_bytes",
+        "uri"
+      ],
+      "title": "ReleasePart",
+      "type": "object"
+    },
+    "ReleaseState": {
+      "description": "Стан dataset release (§9.9).",
+      "enum": [
+        "draft",
+        "building",
+        "validating",
+        "published",
+        "failed",
+        "superseded"
+      ],
+      "title": "ReleaseState",
+      "type": "string"
+    },
+    "ReleaseWatermark": {
+      "additionalProperties": false,
+      "description": "PostgreSQL snapshot/export watermark (§9.5, §9.9).",
+      "properties": {
+        "mongo_cluster_time": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mongo Cluster Time"
+        },
+        "postgres_snapshot": {
+          "description": "LSN або snapshot id транзакції export.",
+          "minLength": 1,
+          "title": "Postgres Snapshot",
+          "type": "string"
+        },
+        "resolution_snapshot_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Snapshot entity resolution, з яким зібрано release (§9.8).",
+          "title": "Resolution Snapshot Id"
+        },
+        "snapshot_at": {
+          "format": "date-time",
+          "title": "Snapshot At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "postgres_snapshot",
+        "snapshot_at"
+      ],
+      "title": "ReleaseWatermark",
+      "type": "object"
+    },
+    "SourceInclusion": {
+      "additionalProperties": false,
+      "description": "Джерело в release та причина, якщо воно excluded/degraded (§9.9).",
+      "properties": {
+        "policy_version": {
+          "minLength": 1,
+          "title": "Policy Version",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "source_id": {
+          "maxLength": 64,
+          "pattern": "^(news|vehicle|catalog)_[a-z]{2}_[a-z0-9]+(_[a-z0-9]+)*$",
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "source_id"
+      ],
+      "title": "SourceInclusion",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/releases/release_manifest.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable manifest dataset release з усіма полями §9.9.",
+  "properties": {
+    "build_command": {
+      "minLength": 1,
+      "title": "Build Command",
+      "type": "string"
+    },
+    "config_hash": {
+      "description": "Hash sanitized config (без секретів).",
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Config Hash",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "degraded_sources": {
+      "items": {
+        "$ref": "#/$defs/SourceInclusion"
+      },
+      "title": "Degraded Sources",
+      "type": "array"
+    },
+    "entity_versions": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/EntityVersionRef"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Повний список пар або None, якщо є partition_index_sha256.",
+      "title": "Entity Versions"
+    },
+    "excluded_sources": {
+      "items": {
+        "$ref": "#/$defs/SourceInclusion"
+      },
+      "title": "Excluded Sources",
+      "type": "array"
+    },
+    "git_commit": {
+      "pattern": "^[0-9a-f]{7,64}$",
+      "title": "Git Commit",
+      "type": "string"
+    },
+    "image_digests": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "image → digest.",
+      "title": "Image Digests",
+      "type": "object"
+    },
+    "included_sources": {
+      "items": {
+        "$ref": "#/$defs/SourceInclusion"
+      },
+      "title": "Included Sources",
+      "type": "array"
+    },
+    "owner": {
+      "minLength": 1,
+      "title": "Owner",
+      "type": "string"
+    },
+    "partition_index_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Hash partition index замість повного списку пар.",
+      "title": "Partition Index Sha256"
+    },
+    "parts": {
+      "items": {
+        "$ref": "#/$defs/ReleasePart"
+      },
+      "title": "Parts",
+      "type": "array"
+    },
+    "previous_release_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Previous Release Id"
+    },
+    "published_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Published At"
+    },
+    "purpose": {
+      "minLength": 1,
+      "title": "Purpose",
+      "type": "string"
+    },
+    "quality_report": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Quality Report"
+    },
+    "reconciliation_result": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reconciliation Result"
+    },
+    "release_id": {
+      "format": "uuid",
+      "title": "Release Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_registry_version": {
+      "minLength": 1,
+      "title": "Source Registry Version",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/ReleaseState",
+      "default": "draft"
+    },
+    "superseding_release_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Superseding Release Id"
+    },
+    "tag": {
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "title": "Tag",
+      "type": "string"
+    },
+    "versions": {
+      "$ref": "#/$defs/ComponentVersions"
+    },
+    "watermark": {
+      "$ref": "#/$defs/ReleaseWatermark"
+    }
+  },
+  "required": [
+    "build_command",
+    "config_hash",
+    "created_at",
+    "git_commit",
+    "owner",
+    "purpose",
+    "release_id",
+    "source_registry_version",
+    "tag",
+    "versions",
+    "watermark"
+  ],
+  "title": "ReleaseManifest",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

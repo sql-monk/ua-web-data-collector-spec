@@ -1,0 +1,38 @@
+{
+  "$id": "https://ua-collector.local/schemas/releases/source_inclusion.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Джерело в release та причина, якщо воно excluded/degraded (§9.9).",
+  "properties": {
+    "policy_version": {
+      "minLength": 1,
+      "title": "Policy Version",
+      "type": "string"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "source_id": {
+      "maxLength": 64,
+      "pattern": "^(news|vehicle|catalog)_[a-z]{2}_[a-z0-9]+(_[a-z0-9]+)*$",
+      "title": "Source Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "policy_version",
+    "source_id"
+  ],
+  "title": "SourceInclusion",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

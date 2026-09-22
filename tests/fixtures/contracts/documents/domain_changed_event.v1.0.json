@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "event_id": "33333333-3333-4333-8333-333333333333",
+  "aggregate_id": "019997c0-0000-7000-8000-000000000001",
+  "aggregate_version": 3,
+  "event_type": "catalog.item.changed",
+  "payload_schema_version": "1.0",
+  "occurred_at": "2026-09-01T12:00:01Z",
+  "projection_task_id": "11111111-1111-4111-8111-111111111111",
+  "previous_state_hash": "v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "result_state_hash": "v1:9f3630a71c70833524455d243af7c1140528f1b5d71141328c35c2f3d0c6166a",
+  "payload": {
+    "latest_state": {
+      "price": {
+        "amount_minor": 259900,
+        "currency": "UAH"
+      },
+      "status": "active"
+    }
+  },
+  "payload_artifact": null
+}

@@ -1,0 +1,36 @@
+{
+  "$id": "https://ua-collector.local/schemas/events/encoded_event.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Ready-to-publish descriptor події: bytes, media type, SHA-256 (§7.3, R-42).",
+  "properties": {
+    "event_bytes": {
+      "format": "base64url",
+      "title": "Event Bytes",
+      "type": "string"
+    },
+    "event_id": {
+      "format": "uuid",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_media_type": {
+      "title": "Event Media Type",
+      "type": "string"
+    },
+    "event_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Event Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_bytes",
+    "event_id",
+    "event_media_type",
+    "event_sha256"
+  ],
+  "title": "EncodedEvent",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

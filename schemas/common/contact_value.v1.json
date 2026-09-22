@@ -1,0 +1,49 @@
+{
+  "$defs": {
+    "ContactKind": {
+      "description": "Тип контактного значення (§5.1 `contacts`).",
+      "enum": [
+        "phone",
+        "email",
+        "url",
+        "messenger",
+        "other"
+      ],
+      "title": "ContactKind",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/common/contact_value.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Контактне значення: тип, вихідний рядок і нормалізована форма (§9.3 п.8).",
+  "properties": {
+    "kind": {
+      "$ref": "#/$defs/ContactKind"
+    },
+    "normalized": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Normalized"
+    },
+    "raw": {
+      "minLength": 1,
+      "title": "Raw",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "raw"
+  ],
+  "title": "ContactValue",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

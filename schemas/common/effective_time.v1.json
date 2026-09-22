@@ -1,0 +1,40 @@
+{
+  "$defs": {
+    "EffectiveAtBasis": {
+      "description": "Джерело `effective_at` в аналітичному контракті (§9.6).",
+      "enum": [
+        "source_event",
+        "source_updated",
+        "observed"
+      ],
+      "title": "EffectiveAtBasis",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/common/effective_time.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Аналітичний fallback (§9.6): `effective_at` з явним `basis` і прапорцем inference.",
+  "properties": {
+    "effective_at": {
+      "format": "date-time",
+      "title": "Effective At",
+      "type": "string"
+    },
+    "effective_at_basis": {
+      "$ref": "#/$defs/EffectiveAtBasis"
+    },
+    "source_time_inferred": {
+      "title": "Source Time Inferred",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "effective_at",
+    "effective_at_basis",
+    "source_time_inferred"
+  ],
+  "title": "EffectiveTime",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

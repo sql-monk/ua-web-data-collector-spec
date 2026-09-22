@@ -1,0 +1,52 @@
+{
+  "$id": "https://ua-collector.local/schemas/releases/release_watermark.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "PostgreSQL snapshot/export watermark (§9.5, §9.9).",
+  "properties": {
+    "mongo_cluster_time": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mongo Cluster Time"
+    },
+    "postgres_snapshot": {
+      "description": "LSN або snapshot id транзакції export.",
+      "minLength": 1,
+      "title": "Postgres Snapshot",
+      "type": "string"
+    },
+    "resolution_snapshot_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Snapshot entity resolution, з яким зібрано release (§9.8).",
+      "title": "Resolution Snapshot Id"
+    },
+    "snapshot_at": {
+      "format": "date-time",
+      "title": "Snapshot At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "postgres_snapshot",
+    "snapshot_at"
+  ],
+  "title": "ReleaseWatermark",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

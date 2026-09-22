@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "decision_id": "00000000-0000-0000-0000-000000000001",
+  "decision_version": 1,
+  "action": "merge",
+  "member_entity_ids": [
+    "019997c0-0000-7000-8000-000000000001",
+    "019997c0-0000-7000-8000-000000000002"
+  ],
+  "canonical_group_id": "44444444-4444-4444-8444-444444444441",
+  "evidence_refs": [
+    "s3://evidence/1"
+  ],
+  "feature_values": {
+    "gtin_match": true,
+    "title_similarity": "0.93"
+  },
+  "score": "0.95",
+  "calibration_version": "cal-1",
+  "rule_or_model_version": "matcher/1.0",
+  "actor": "system:matcher",
+  "reason": "GTIN exact match",
+  "effective_at": "2026-09-01T12:00:00Z",
+  "recorded_at": "2026-09-01T12:01:00Z",
+  "supersedes_decision_id": null
+}

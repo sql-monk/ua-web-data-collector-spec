@@ -1,0 +1,90 @@
+{
+  "schema_version": "1.0",
+  "release_id": "66666666-6666-4666-8666-666666666666",
+  "tag": "2026-09-research-1",
+  "state": "published",
+  "created_at": "2026-09-01T12:00:00Z",
+  "published_at": "2026-09-01T12:05:00Z",
+  "owner": "research-team",
+  "purpose": "monthly research snapshot",
+  "watermark": {
+    "snapshot_at": "2026-09-01T12:00:00Z",
+    "postgres_snapshot": "0/16B3748",
+    "mongo_cluster_time": "1756728000:1",
+    "resolution_snapshot_id": "00000000-0000-0000-0000-000000000009"
+  },
+  "entity_versions": [
+    {
+      "entity_uuid": "019997c0-0000-7000-8000-000000000001",
+      "projection_version": 3
+    },
+    {
+      "entity_uuid": "019997c0-0000-7000-8000-000000000002",
+      "projection_version": 1
+    }
+  ],
+  "partition_index_sha256": null,
+  "source_registry_version": "1",
+  "included_sources": [
+    {
+      "source_id": "catalog_ua_rozetka",
+      "policy_version": "3",
+      "reason": null
+    }
+  ],
+  "excluded_sources": [
+    {
+      "source_id": "news_us_nyt",
+      "policy_version": "2",
+      "reason": "premium paywall"
+    }
+  ],
+  "degraded_sources": [
+    {
+      "source_id": "news_pl_pap",
+      "policy_version": "1",
+      "reason": "sitemap unavailable"
+    }
+  ],
+  "versions": {
+    "schema_version": "1.0",
+    "parser_version": "parsers/1.4.0",
+    "normalizer_version": "norm/1.1.0",
+    "matcher_version": "matcher/1.0.0",
+    "resolution_version": "resolution/1.0.0",
+    "translation_provider": "deepl",
+    "translation_model_version": "2026-08",
+    "glossary_version": "glossary-3"
+  },
+  "git_commit": "7223bec0",
+  "image_digests": {
+    "collector": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "config_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "build_command": "uv run collector release build --watermark test --output .artifacts/release",
+  "parts": [
+    {
+      "uri": "s3://releases/r1/catalog/part-000.parquet",
+      "format": "parquet",
+      "partition": {
+        "domain": "catalog",
+        "month": "2026-09"
+      },
+      "row_count": 1000,
+      "min_effective_at": "2026-08-31T19:20:00Z",
+      "max_effective_at": "2026-09-01T12:00:00Z",
+      "min_system_at": "2026-08-31T21:00:00Z",
+      "max_system_at": "2026-09-01T12:01:00Z",
+      "size_bytes": 123456,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "quality_report": {
+    "gates": "passed"
+  },
+  "reconciliation_result": {
+    "unacknowledged_tasks": 0
+  },
+  "previous_release_id": null,
+  "superseding_release_id": null
+}

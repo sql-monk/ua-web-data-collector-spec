@@ -101,6 +101,12 @@ from collector.contracts.resolution import (
     ResolutionSnapshot,
     project_groups,
 )
+from collector.contracts.schema_export import (
+    EXPORTED_CONTRACTS,
+    check_compatibility,
+    check_schemas,
+    export_schemas,
+)
 from collector.contracts.source_registry import (
     SourceRegistry,
     SourceRegistryError,
@@ -136,6 +142,7 @@ __all__ = [
     "CONTRACTS_VERSION",
     "DOMAIN_CHANGED_MEDIA_TYPE",
     "EVENT_INLINE_LIMIT_BYTES",
+    "EXPORTED_CONTRACTS",
     "RELEASE_TRANSITIONS",
     "STATE_AXES",
     "AppliedProjectionReceipt",
@@ -203,11 +210,14 @@ __all__ = [
     "can_transition",
     "canonical_json_bytes",
     "canonical_sha256",
+    "check_compatibility",
+    "check_schemas",
     "compute_state_hash_v1",
     "decode_event",
     "derive_effective_time",
     "encode_event",
     "entity_id_timestamp",
+    "export_schemas",
     "fetch_idempotency_key",
     "identity_hash_v1",
     "known_source_ids",

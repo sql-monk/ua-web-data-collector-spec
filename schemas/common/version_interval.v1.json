@@ -1,0 +1,73 @@
+{
+  "$defs": {
+    "BitemporalInterval": {
+      "additionalProperties": false,
+      "description": "Напіввідкриті інтервали `[valid_from, valid_to)` і `[known_from, known_to)` (§9.6).",
+      "properties": {
+        "known_from": {
+          "format": "date-time",
+          "title": "Known From",
+          "type": "string"
+        },
+        "known_to": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Known To"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid To"
+        }
+      },
+      "required": [
+        "known_from",
+        "valid_from"
+      ],
+      "title": "BitemporalInterval",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/common/version_interval.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Результат `build_intervals`: версія та її bitemporal-інтервал.",
+  "properties": {
+    "interval": {
+      "$ref": "#/$defs/BitemporalInterval"
+    },
+    "projection_version": {
+      "minimum": 1,
+      "title": "Projection Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "interval",
+    "projection_version"
+  ],
+  "title": "VersionInterval",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

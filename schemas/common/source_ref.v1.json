@@ -1,0 +1,35 @@
+{
+  "$id": "https://ua-collector.local/schemas/common/source_ref.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Блок `source` current document: identity + canonical URL (§9.2).",
+  "properties": {
+    "canonical_url": {
+      "minLength": 1,
+      "title": "Canonical Url",
+      "type": "string"
+    },
+    "source_id": {
+      "description": "ID джерела з docs/research/source-registry.yaml.",
+      "maxLength": 64,
+      "pattern": "^(news|vehicle|catalog)_[a-z]{2}_[a-z0-9]+(_[a-z0-9]+)*$",
+      "title": "Source Id",
+      "type": "string"
+    },
+    "source_item_id": {
+      "description": "Стабільний ID сутності на джерелі.",
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Source Item Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "canonical_url",
+    "source_id",
+    "source_item_id"
+  ],
+  "title": "SourceRef",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

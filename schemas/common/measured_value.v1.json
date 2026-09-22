@@ -1,0 +1,50 @@
+{
+  "$id": "https://ua-collector.local/schemas/common/measured_value.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Значення в SI-одиниці разом із вихідними `raw_value/raw_unit` (§12.2).",
+  "properties": {
+    "raw_unit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Raw Unit"
+    },
+    "raw_value": {
+      "minLength": 1,
+      "title": "Raw Value",
+      "type": "string"
+    },
+    "unit": {
+      "minLength": 1,
+      "title": "Unit",
+      "type": "string"
+    },
+    "value": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+          "type": "string"
+        }
+      ],
+      "title": "Value"
+    }
+  },
+  "required": [
+    "raw_value",
+    "unit",
+    "value"
+  ],
+  "title": "MeasuredValue",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

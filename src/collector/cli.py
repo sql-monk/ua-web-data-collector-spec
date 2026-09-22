@@ -28,8 +28,15 @@ db_app = typer.Typer(
     help="Схеми сховищ: PostgreSQL migrations (WP-01A), Mongo validators (WP-01B)."
 )
 release_app = typer.Typer(help="Immutable dataset releases (§9.9); owner — WP-11A.")
+contracts_app = typer.Typer(
+    help="Shared data contracts: JSON Schema snapshots (§9.4); owner — WP-01C."
+)
 app.add_typer(db_app, name="db")
 app.add_typer(release_app, name="release")
+# hidden: §16.2 фіксує точний набір top-level команд, і tests/unit/test_cli_adversarial.py (WP-00)
+# перевіряє його дослівно. `collector contracts ...` — dev/CI-команда WP-01C; зробити видимою —
+# dependency-запит docs/plan/deps/WP-01C-to-WP-00.md.
+app.add_typer(contracts_app, name="contracts", hidden=True)
 
 
 def _help_when_no_subcommand(ctx: typer.Context) -> None:
@@ -43,7 +50,7 @@ def _help_when_no_subcommand(ctx: typer.Context) -> None:
         raise typer.Exit(code=0)
 
 
-for _group in (app, db_app, release_app):
+for _group in (app, db_app, release_app, contracts_app):
     _group.callback(invoke_without_command=True)(_help_when_no_subcommand)
 
 
@@ -104,6 +111,37 @@ def release_verify(
 ) -> None:
     """Перевіряє manifest і checksums release (стаб; owner WP-11A)."""
     not_implemented("WP-11A")
+
+
+@contracts_app.command("export")
+def contracts_export(
+    output: Annotated[
+        Path, typer.Option("--output", help="Каталог snapshot-ів (`schemas/`).")
+    ] = Path("schemas"),
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Не писати; exit 1, якщо snapshot-и відрізняються."),
+    ] = False,
+) -> None:
+    """Генерує JSON Schema snapshots shared-контрактів у `schemas/<group>/<name>.v<major>.json`."""
+    from collector.contracts.schema_export import check_schemas, export_schemas
+
+    if check:
+        problems = check_schemas(output)
+        for problem in problems:
+            typer.echo(problem, err=True)
+        if problems:
+            typer.echo(
+                f"schema drift: {len(problems)} проблем(и); виконайте `collector contracts export`",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.echo(f"schemas up to date: {output}")
+        return
+    written = export_schemas(output)
+    for path in written:
+        typer.echo(path.as_posix())
+    typer.echo(f"exported {len(written)} schemas to {output}")
 
 
 @app.command()

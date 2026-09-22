@@ -1,0 +1,55 @@
+{
+  "$defs": {
+    "UploadClaimStatus": {
+      "description": "Стан upload claim у artifact store (§10 п.5, R-38/R-41).",
+      "enum": [
+        "leased",
+        "committed",
+        "released",
+        "expired"
+      ],
+      "title": "UploadClaimStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/common/upload_claim.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "PostgreSQL upload claim з lease та монотонною `claim_generation` (§10 п.5, R-41).",
+  "properties": {
+    "claim_generation": {
+      "description": "Монотонний int64 fencing token.",
+      "minimum": 1,
+      "title": "Claim Generation",
+      "type": "integer"
+    },
+    "lease_expires_at": {
+      "format": "date-time",
+      "title": "Lease Expires At",
+      "type": "string"
+    },
+    "object_key": {
+      "minLength": 1,
+      "title": "Object Key",
+      "type": "string"
+    },
+    "owner": {
+      "minLength": 1,
+      "title": "Owner",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/UploadClaimStatus"
+    }
+  },
+  "required": [
+    "claim_generation",
+    "lease_expires_at",
+    "object_key",
+    "owner",
+    "status"
+  ],
+  "title": "UploadClaim",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

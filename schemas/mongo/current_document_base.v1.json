@@ -1,0 +1,260 @@
+{
+  "$defs": {
+    "EntityKind": {
+      "description": "`entity_kind` current document (§9.2); розширюється WP-07/WP-09 через dependency-запит.",
+      "enum": [
+        "catalog_item",
+        "catalog_offer",
+        "vehicle_listing",
+        "seller"
+      ],
+      "title": "EntityKind",
+      "type": "string"
+    },
+    "EntityTime": {
+      "additionalProperties": false,
+      "description": "Блок `time` current document (§9.2): source і system осі в одному об'єкті.\n\nРегресія R-43: `source_event_at`/`source_updated_at`, що точно дорівнюють `fetched_at`,\nвідхиляються — це ознака підміни source time crawler time (§9.6).",
+      "properties": {
+        "fetched_at": {
+          "format": "date-time",
+          "title": "Fetched At",
+          "type": "string"
+        },
+        "ingested_at": {
+          "format": "date-time",
+          "title": "Ingested At",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "source_event_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Event At"
+        },
+        "source_time_inferred": {
+          "default": false,
+          "title": "Source Time Inferred",
+          "type": "boolean"
+        },
+        "source_time_precision": {
+          "$ref": "#/$defs/TimePrecision",
+          "default": "unknown"
+        },
+        "source_timezone_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Timezone Raw"
+        },
+        "source_updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Updated At"
+        }
+      },
+      "required": [
+        "fetched_at",
+        "ingested_at",
+        "observed_at"
+      ],
+      "title": "EntityTime",
+      "type": "object"
+    },
+    "Lineage": {
+      "additionalProperties": false,
+      "description": "Блок `lineage` (§9.2): fetch → raw → parser → projection task.",
+      "properties": {
+        "fetch_id": {
+          "format": "uuid",
+          "title": "Fetch Id",
+          "type": "string"
+        },
+        "parser_version": {
+          "minLength": 1,
+          "title": "Parser Version",
+          "type": "string"
+        },
+        "projection_task_id": {
+          "format": "uuid",
+          "title": "Projection Task Id",
+          "type": "string"
+        },
+        "raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fetch_id",
+        "parser_version",
+        "projection_task_id",
+        "raw_sha256"
+      ],
+      "title": "Lineage",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "description": "Блок `source` current document: identity + canonical URL (§9.2).",
+      "properties": {
+        "canonical_url": {
+          "minLength": 1,
+          "title": "Canonical Url",
+          "type": "string"
+        },
+        "source_id": {
+          "description": "ID джерела з docs/research/source-registry.yaml.",
+          "maxLength": 64,
+          "pattern": "^(news|vehicle|catalog)_[a-z]{2}_[a-z0-9]+(_[a-z0-9]+)*$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_item_id": {
+          "description": "Стабільний ID сутності на джерелі.",
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Source Item Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "canonical_url",
+        "source_id",
+        "source_item_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    },
+    "TimePrecision": {
+      "description": "Точність часу, заявленого джерелом (§9.6).",
+      "enum": [
+        "second",
+        "minute",
+        "hour",
+        "day",
+        "month",
+        "year",
+        "unknown"
+      ],
+      "title": "TimePrecision",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/mongo/current_document_base.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Будь-який `*_current` document (§9.2); `_id` = `entity_uuid` (UUIDv7).",
+  "properties": {
+    "_id": {
+      "description": "entity_uuid; збігається з entity_index.",
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "attributes": {
+      "additionalProperties": true,
+      "description": "Source-specific поля.",
+      "title": "Attributes",
+      "type": "object"
+    },
+    "core": {
+      "additionalProperties": true,
+      "description": "Versioned normalized поля домену.",
+      "title": "Core",
+      "type": "object"
+    },
+    "entity_kind": {
+      "$ref": "#/$defs/EntityKind"
+    },
+    "first_seen_at": {
+      "format": "date-time",
+      "title": "First Seen At",
+      "type": "string"
+    },
+    "identity_hash": {
+      "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+      "title": "Identity Hash",
+      "type": "string"
+    },
+    "last_seen_at": {
+      "format": "date-time",
+      "title": "Last Seen At",
+      "type": "string"
+    },
+    "latest_state": {
+      "additionalProperties": true,
+      "description": "Price/status/mileage summary, якщо застосовно.",
+      "title": "Latest State",
+      "type": "object"
+    },
+    "lineage": {
+      "$ref": "#/$defs/Lineage"
+    },
+    "projection_version": {
+      "description": "Монотонна per-entity_uuid (int64).",
+      "minimum": 1,
+      "title": "Projection Version",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceRef"
+    },
+    "state_hash": {
+      "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+      "title": "State Hash",
+      "type": "string"
+    },
+    "time": {
+      "$ref": "#/$defs/EntityTime"
+    }
+  },
+  "required": [
+    "_id",
+    "core",
+    "entity_kind",
+    "first_seen_at",
+    "identity_hash",
+    "last_seen_at",
+    "lineage",
+    "projection_version",
+    "source",
+    "state_hash",
+    "time"
+  ],
+  "title": "CurrentDocumentBase",
+  "type": "object",
+  "x-contract-version": "1.0"
+}
