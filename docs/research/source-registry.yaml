@@ -1,0 +1,80 @@
+schema_version: 1
+assessed_at: '2026-09-22'
+rating_scale: 0-100
+rating_components:
+  coverage: 25
+  structured_access: 25
+  anonymous_accessibility: 20
+  data_richness: 15
+  stability_observability: 15
+sources:
+  - {id: news_ua_suspilne, kind: news, country: UA, name: 'Суспільне', domains: [suspilne.media], rating: 96, research: news-central-baltic.md}
+  - {id: news_ua_pravda, kind: news, country: UA, name: 'Українська правда', domains: [pravda.com.ua], rating: 85, research: news-central-baltic.md}
+  - {id: news_ua_liga, kind: news, country: UA, name: 'LIGA.net', domains: [liga.net], rating: 94, research: news-central-baltic.md}
+  - {id: news_ua_ukrinform, kind: news, country: UA, name: 'Укрінформ', domains: [ukrinform.ua], rating: 94, research: news-central-baltic.md}
+  - {id: news_lt_lrt, kind: news, country: LT, name: 'LRT', domains: [lrt.lt], rating: 97, research: news-central-baltic.md}
+  - {id: news_lt_15min, kind: news, country: LT, name: '15min', domains: [15min.lt], rating: 92, research: news-central-baltic.md}
+  - {id: news_lt_delfi, kind: news, country: LT, name: 'Delfi LT', domains: [delfi.lt], rating: 89, research: news-central-baltic.md}
+  - {id: news_lv_lsm, kind: news, country: LV, name: 'LSM', domains: [lsm.lv], rating: 98, research: news-central-baltic.md}
+  - {id: news_lv_delfi, kind: news, country: LV, name: 'Delfi LV', domains: [delfi.lv], rating: 90, research: news-central-baltic.md}
+  - {id: news_lv_tvnet, kind: news, country: LV, name: 'TVNET', domains: [tvnet.lv], rating: 89, research: news-central-baltic.md}
+  - {id: news_ee_err, kind: news, country: EE, name: 'ERR', domains: [err.ee], rating: 99, research: news-central-baltic.md}
+  - {id: news_ee_postimees, kind: news, country: EE, name: 'Postimees', domains: [postimees.ee], rating: 86, research: news-central-baltic.md}
+  - {id: news_ee_delfi, kind: news, country: EE, name: 'Delfi EE', domains: [delfi.ee], rating: 86, research: news-central-baltic.md}
+  - {id: news_pl_polskieradio, kind: news, country: PL, name: 'Polskie Radio', domains: [polskieradio.pl], rating: 66, research: news-central-baltic.md}
+  - {id: news_pl_pap, kind: news, country: PL, name: 'PAP', domains: [pap.pl], rating: 32, research: news-central-baltic.md}
+  - {id: news_pl_tvn24, kind: news, country: PL, name: 'TVN24', domains: [tvn24.pl], rating: 82, research: news-central-baltic.md}
+  - {id: news_hu_telex, kind: news, country: HU, name: 'Telex', domains: [telex.hu], rating: 97, research: news-central-baltic.md}
+  - {id: news_hu_hvg, kind: news, country: HU, name: 'HVG', domains: [hvg.hu], rating: 89, research: news-central-baltic.md}
+  - {id: news_hu_444, kind: news, country: HU, name: '444', domains: [444.hu], rating: 91, research: news-central-baltic.md}
+  - {id: news_cz_irozhlas, kind: news, country: CZ, name: 'iROZHLAS', domains: [irozhlas.cz], rating: 69, research: news-central-baltic.md}
+  - {id: news_cz_ct24, kind: news, country: CZ, name: 'ČT24', domains: [ct24.ceskatelevize.cz], rating: 99, research: news-central-baltic.md}
+  - {id: news_cz_seznam, kind: news, country: CZ, name: 'Seznam Zprávy', domains: [seznamzpravy.cz], rating: 94, research: news-central-baltic.md}
+  - {id: news_sk_stvr, kind: news, country: SK, name: 'STVR Správy', domains: [spravy.stvr.sk], rating: 99, research: news-central-baltic.md}
+  - {id: news_sk_aktuality, kind: news, country: SK, name: 'Aktuality.sk', domains: [aktuality.sk], rating: 96, research: news-central-baltic.md}
+  - {id: news_sk_sme, kind: news, country: SK, name: 'SME', domains: [sme.sk], rating: 31, research: news-central-baltic.md}
+  - {id: news_de_tagesschau, kind: news, country: DE, name: 'Tagesschau', domains: [tagesschau.de], rating: 86, research: news-western.md}
+  - {id: news_de_dw, kind: news, country: DE, name: 'Deutsche Welle', domains: [dw.com, rss.dw.com], rating: 94, research: news-western.md}
+  - {id: news_de_zeit, kind: news, country: DE, name: 'ZEIT', domains: [zeit.de, newsfeed.zeit.de], rating: 52, research: news-western.md}
+  - {id: news_fr_france24, kind: news, country: FR, name: 'France 24', domains: [france24.com], rating: 56, research: news-western.md}
+  - {id: news_fr_rfi, kind: news, country: FR, name: 'RFI', domains: [rfi.fr], rating: 56, research: news-western.md}
+  - {id: news_fr_lemonde, kind: news, country: FR, name: 'Le Monde', domains: [lemonde.fr], rating: 76, research: news-western.md}
+  - {id: news_gb_bbc, kind: news, country: GB, name: 'BBC News', domains: [bbc.com, bbc.co.uk, feeds.bbci.co.uk], rating: 98, research: news-western.md}
+  - {id: news_gb_guardian, kind: news, country: GB, name: 'The Guardian', domains: [theguardian.com], rating: 97, research: news-western.md}
+  - {id: news_gb_sky, kind: news, country: GB, name: 'Sky News', domains: [news.sky.com, feeds.skynews.com], rating: 63, research: news-western.md}
+  - {id: news_us_npr, kind: news, country: US, name: 'NPR', domains: [npr.org, googlecrawl.npr.org, feeds.npr.org], rating: 100, research: news-western.md}
+  - {id: news_us_ap, kind: news, country: US, name: 'AP News', domains: [apnews.com], rating: 34, research: news-western.md}
+  - {id: news_us_nyt, kind: news, country: US, name: 'The New York Times', domains: [nytimes.com, rss.nytimes.com], rating: 68, research: news-western.md}
+  - {id: news_be_vrt, kind: news, country: BE, name: 'VRT NWS', domains: [vrt.be, vrtnws.be], rating: 100, research: news-western.md}
+  - {id: news_be_rtbf, kind: news, country: BE, name: 'RTBF Info', domains: [rtbf.be, rss.rtbf.be], rating: 98, research: news-western.md}
+  - {id: news_be_brussels_times, kind: news, country: BE, name: 'The Brussels Times', domains: [brusselstimes.com], rating: 88, research: news-western.md}
+  - {id: news_at_orf, kind: news, country: AT, name: 'ORF News', domains: [orf.at, oesterreich.orf.at, rss.orf.at], rating: 76, research: news-western.md}
+  - {id: news_at_derstandard, kind: news, country: AT, name: 'Der Standard', domains: [derstandard.at], rating: 71, research: news-western.md}
+  - {id: news_at_diepresse, kind: news, country: AT, name: 'Die Presse', domains: [diepresse.com], rating: 91, research: news-western.md}
+  - {id: news_ro_hotnews, kind: news, country: RO, name: 'HotNews', domains: [hotnews.ro], rating: 95, research: news-southern.md}
+  - {id: news_ro_digi24, kind: news, country: RO, name: 'Digi24', domains: [digi24.ro], rating: 94, research: news-southern.md}
+  - {id: news_ro_agerpres, kind: news, country: RO, name: 'Agerpres', domains: [agerpres.ro], rating: 67, research: news-southern.md}
+  - {id: news_si_rtvslo, kind: news, country: SI, name: 'RTV Slovenija', domains: [rtvslo.si, img.rtvslo.si], rating: 91, research: news-southern.md}
+  - {id: news_si_sta, kind: news, country: SI, name: 'STA', domains: [sta.si], rating: 59, research: news-southern.md}
+  - {id: news_si_24ur, kind: news, country: SI, name: '24UR', domains: [24ur.com], rating: 91, research: news-southern.md}
+  - {id: news_hr_hrt, kind: news, country: HR, name: 'HRT Vijesti', domains: [vijesti.hrt.hr], rating: 91, research: news-southern.md}
+  - {id: news_hr_index, kind: news, country: HR, name: 'Index.hr', domains: [index.hr], rating: 80, research: news-southern.md}
+  - {id: news_hr_jutarnji, kind: news, country: HR, name: 'Jutarnji', domains: [jutarnji.hr], rating: 87, research: news-southern.md}
+  - {id: news_it_rainews, kind: news, country: IT, name: 'RaiNews', domains: [rainews.it], rating: 87, research: news-southern.md}
+  - {id: news_it_ansa, kind: news, country: IT, name: 'ANSA', domains: [ansa.it], rating: 92, research: news-southern.md}
+  - {id: news_it_repubblica, kind: news, country: IT, name: 'la Repubblica', domains: [repubblica.it], rating: 77, research: news-southern.md}
+  - {id: news_es_rtve, kind: news, country: ES, name: 'RTVE Noticias', domains: [rtve.es], rating: 94, research: news-southern.md}
+  - {id: news_es_elpais, kind: news, country: ES, name: 'El País', domains: [elpais.com, feeds.elpais.com], rating: 86, research: news-southern.md}
+  - {id: news_es_lavanguardia, kind: news, country: ES, name: 'La Vanguardia', domains: [lavanguardia.com], rating: 88, research: news-southern.md}
+  - {id: vehicle_ua_auto_ria, kind: vehicle, country: UA, name: 'AUTO.RIA', domains: [auto.ria.com], rating: 91, research: ua-marketplaces.md}
+  - {id: vehicle_ua_olx_auto, kind: vehicle, country: UA, name: 'OLX Авто', domains: [olx.ua], rating: 85, research: ua-marketplaces.md}
+  - {id: vehicle_ua_rst, kind: vehicle, country: UA, name: 'RST.ua', domains: [rst.ua], rating: 59, research: ua-marketplaces.md}
+  - {id: vehicle_ua_automoto, kind: vehicle, country: UA, name: 'Automoto.ua', domains: [automoto.ua], rating: 91, research: ua-marketplaces.md}
+  - {id: catalog_ua_prom, kind: catalog, country: UA, name: 'Prom.ua', domains: [prom.ua], rating: 95, research: ua-marketplaces.md}
+  - {id: catalog_ua_rozetka, kind: catalog, country: UA, name: 'Rozetka', domains: [rozetka.com.ua], rating: 91, research: ua-marketplaces.md}
+  - {id: catalog_ua_epicentr, kind: catalog, country: UA, name: 'Епіцентр', domains: [epicentrk.ua], rating: 94, research: ua-marketplaces.md}
+  - {id: catalog_ua_allo, kind: catalog, country: UA, name: 'ALLO', domains: [allo.ua], rating: 88, research: ua-marketplaces.md}
+  - {id: catalog_ua_hotline, kind: catalog, country: UA, name: 'Hotline', domains: [hotline.ua], rating: 96, research: ua-marketplaces.md}
+  - {id: catalog_ua_comfy, kind: catalog, country: UA, name: 'Comfy', domains: [comfy.ua], rating: 90, research: ua-marketplaces.md}
+  - {id: catalog_ua_foxtrot, kind: catalog, country: UA, name: 'Foxtrot', domains: [foxtrot.com.ua], rating: 86, research: ua-marketplaces.md}
+  - {id: catalog_ua_moyo, kind: catalog, country: UA, name: 'MOYO', domains: [moyo.ua], rating: 80, research: ua-marketplaces.md}

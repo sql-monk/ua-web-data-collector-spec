@@ -4,8 +4,8 @@
 
 | Поле | Значення |
 |---|---|
-| Статус | Готово до декомпозиції та реалізації після підтвердження відкритих бізнес-рішень |
-| Версія | 1.0 |
+| Статус | Готово до декомпозиції та реалізації |
+| Версія | 1.1 |
 | Дата | 2026-09-22 |
 | Мова | Українська |
 | Робоча назва системи | UA Web Data Collector |
@@ -24,7 +24,7 @@
 3. «Чехословаччина» у вихідній постановці трактується як дві сучасні країни: Чехія (`CZ`) і Словаччина (`SK`). «Англія» трактується як Велика Британія (`GB`), але регіон England зберігається окремим тегом, якщо його дає джерело.
 4. Збираємо всі поля, які публічно показані на сторінці або повернуті публічним каналом: повний текст, імена, телефони, e-mail, профілі продавців, VIN, характеристики, коментарі, відгуки, URL і метадані медіа.
 5. Для кожної новини зберігаємо незмінений оригінал і машинний переклад українською. Переклад не замінює оригінал і може бути перегенерований іншою моделлю.
-6. Використовуємо лише публічно доступні сторінки/API/RSS/sitemap. Авторизація, приватні кабінети й paywall не входять до системи.
+6. У v1 використовуємо лише сторінки, RSS/Atom, sitemap і source API, які працюють без реєстрації та входу. Авторизація на джерелах, source API keys, приватні кабінети й paywall не входять до v1; credentials внутрішньої інфраструктури та провайдера перекладу належать іншому контуру.
 7. MVP призначений для внутрішнього дослідження; зовнішня публікація даних і UI не входять до MVP.
 8. Інфраструктура MVP працює через Docker Compose на одному Linux-хості; компоненти лишаються горизонтально масштабованими.
 9. Стартовий масштаб: до 5 млн активних сутностей, 30 млн спостережень на місяць, 3 млн новин/рік і до 5 ТБ сирих та очищених даних на рік.
@@ -33,9 +33,7 @@
 
 - Які конкретні дослідницькі задачі будуть першими: ціни, асортимент, продавці, автомобілі, медіамоніторинг, події, тональність або тематичні тренди?
 - Чи треба завантажувати бінарні файли фото/відео, чи достатньо їхніх URL, підписів і технічних метаданих?
-- Які категорії товарів мають найвищий пріоритет для першого пілота?
 - Яка допустима затримка оновлення і бюджет інфраструктури?
-- Чи є API-ключі AUTO.RIA, OLX, Prom.ua, Rozetka, Google Cloud Translation або інших сервісів?
 - Який строк зберігання сирих документів і історії цін?
 - Який місячний бюджет машинного перекладу і який відсоток текстів треба перекладати негайно?
 
@@ -74,11 +72,11 @@
 
 | Показник | Ціль |
 |---|---|
-| Успішні заплановані HTTP/API-запити | не менше 98% за 24 години без урахування контрольованих 304 |
-| Новини: p95 затримки появи оригіналу | до 10 хв для RSS/API-джерел |
+| Успішні заплановані fetch-запити | не менше 98% за 24 години без урахування контрольованих 304 |
+| Новини: p95 затримки появи оригіналу | до 10 хв для RSS/Atom і публічних API |
 | Новини: p95 затримки українського перекладу | до 20 хв після отримання оригіналу |
-| Автобазари: p95 затримки | до 60 хв у межах квоти API |
-| Каталоги: p95 віку останнього спостереження | до 24 год для пріоритетних категорій |
+| Автобазари: p95 затримки | до 60 хв для інкрементального discovery |
+| Каталоги: p95 віку останнього спостереження | до 24 год для запланованого сегмента обходу |
 | Валідність нормалізованих записів | не менше 99.5% за JSON Schema/Pydantic |
 | Дублікати за ключем джерела | 0; семантичні дублікати між джерелами не більше 2% після матчингу |
 | Відтворюваність | кожен запис має `source_id`, `fetch_id`, час, URL і hash сирого об’єкта |
@@ -87,67 +85,72 @@
 ## 3. Операційні правила збору
 
 1. Для кожного джерела обов’язковий `source manifest` із каналом доступу, URL-шаблонами, розкладом, ставкою запитів, cursor і політикою зберігання.
-2. Пріоритет каналів: офіційний API → RSS/Atom → sitemap + HTML → headless browser, коли дані формуються JavaScript.
+2. Порядок вилучення: анонімний офіційний API або RSS/Atom → sitemap + HTML → headless browser, коли те саме публічне представлення формується JavaScript.
 3. `robots.txt` отримується і версіонується як діагностичний артефакт, щоб пояснювати блокування та зміни структури.
-4. 401/403/429, CAPTCHA або різке падіння yield автоматично зупиняють джерело й створюють технічний інцидент; нескінченні повтори заборонені.
+4. 401/403/429, CAPTCHA або різке падіння yield відкривають circuit breaker конкретного каналу/route і створюють технічний інцидент; інші незалежно перевірені routes того самого джерела можуть лишатися `healthy`, а отримані через них items мати `content_access=metadata_only`. Нескінченні повтори заборонені.
 5. User-Agent має бути стабільним, щоб поведінку crawler можна було відрізнити в логах і відтворити.
 6. За замовчуванням: concurrency 1 на origin, не більше 0.2 запиту/с; ліміт підвищується тільки після вимірювання 429, latency й навантаження.
 7. Повний текст новин і всі доступні публічні поля зберігаються. Оригінальні bytes незмінні; очищений текст і переклад є окремими похідними артефактами.
 8. У MVP зберігаються URL, підписи, розміри й хеші медіа. Завантаження оригінальних фото/відео вмикається окремим параметром через значний обсяг.
 9. Контактні дані зберігаються як versioned observations, оскільки продавець може змінити ім’я або телефон.
 10. Denylist доменів і URL дає змогу терміново зупинити збір без перевипуску коду.
+11. Browser fallback дозволений після HTTP 403 лише як перевірка звичайного анонімного JS-rendered представлення, яке людина бачить без додаткових дій. Якщо браузер показує CAPTCHA, challenge, login або paywall замість даних, route зупиняється; fingerprint spoofing, CAPTCHA solving і private-session cookies заборонені.
 
-## 4. Джерела і пріоритети підключення
+## 4. Джерела та їхній технічний рейтинг
 
-Статуси: **P0** — перша хвиля; **P1** — друга хвиля після стабілізації P0; **P2** — розширення покриття. Канал визначається так: RSS/API для discovery, HTML для повного публічного вмісту, sitemap для backfill і контролю повноти.
+Усі записи нижче — просто джерела: немає базових, додаткових або пріоритетних класів. Рейтинг `0–100` не визначає редакційну цінність чи чергу реалізації. Це сума coverage `0–25`, structured access `0–25`, anonymous accessibility `0–20`, data richness `0–15` і stability/observability `0–15`. Рейтинг версіонується разом із датою та доказами; недоступне без реєстрації джерело не активується у v1.
+
+Канонічні `source_id`, display name, домени, country/kind, рейтинг і файл доказів зафіксовані в [source-registry.yaml](docs/research/source-registry.yaml). Адаптери не вигадують альтернативних ID.
 
 ### 4.1. Новини
 
-| Країна | ISO / мови | P0 — базове джерело | P1 — додаткові джерела |
-|---|---|---|---|
-| Україна | `UA` / `uk` | [Суспільне](https://suspilne.media/) | [Українська правда](https://www.pravda.com.ua/rss-info/), [LIGA.net](https://www.liga.net/ua/rss-page), [Укрінформ](https://www.ukrinform.ua/) |
-| Німеччина | `DE` / `de` | [Tagesschau](https://www.tagesschau.de/infoservices/rssfeeds) | [Deutsche Welle](https://www.dw.com/de/), [ZEIT](https://www.zeit.de/) |
-| Франція | `FR` / `fr` | [France 24](https://www.france24.com/fr/) | [RFI](https://www.rfi.fr/fr/), [Le Monde](https://www.lemonde.fr/rss/) |
-| Велика Британія | `GB` / `en` | [BBC News](https://www.bbc.com/news) | [The Guardian](https://www.theguardian.com/help/feeds), [Sky News](https://news.sky.com/) |
-| США | `US` / `en` | [NPR](https://www.npr.org/) | [AP News](https://apnews.com/), [The New York Times](https://www.nytimes.com/) |
-| Литва | `LT` / `lt` | [LRT](https://www.lrt.lt/) | [15min](https://www.15min.lt/), [Delfi LT](https://www.delfi.lt/) |
-| Латвія | `LV` / `lv` | [LSM](https://www.lsm.lv/barotnes/replay.lsm.lv/lv) | [Delfi LV](https://www.delfi.lv/), [TVNET](https://www.tvnet.lv/) |
-| Естонія | `EE` / `et` | [ERR](https://www.err.ee/eesti/rss) | [Postimees](https://www.postimees.ee/), [Delfi EE](https://www.delfi.ee/) |
-| Польща | `PL` / `pl` | [Polskie Radio](https://www.polskieradio.pl/) | [PAP](https://www.pap.pl/), [TVN24](https://tvn24.pl/) |
-| Угорщина | `HU` / `hu` | [Telex](https://telex.hu/) | [HVG](https://hvg.hu/), [444](https://444.hu/) |
-| Румунія | `RO` / `ro` | [HotNews](https://hotnews.ro/ce-este-rss-1654765) | [Digi24](https://www.digi24.ro/), [Agerpres](https://agerpres.ro/) |
-| Чехія | `CZ` / `cs` | [iROZHLAS](https://www.irozhlas.cz/rss) | [ČT24](https://ct24.ceskatelevize.cz/), [Seznam Zprávy](https://www.seznamzpravy.cz/) |
-| Словаччина | `SK` / `sk` | [STVR Správy](https://spravy.stvr.sk/) | [Aktuality.sk](https://www.aktuality.sk/), [SME](https://www.sme.sk/) |
-| Словенія | `SI` / `sl` | [RTV Slovenija](https://www.rtvslo.si/) | [STA](https://www.sta.si/), [24UR](https://www.24ur.com/) |
-| Хорватія | `HR` / `hr` | [HRT Vijesti](https://vijesti.hrt.hr/) | [Index.hr](https://www.index.hr/rss/info), [Jutarnji](https://www.jutarnji.hr/) |
-| Італія | `IT` / `it` | [RaiNews](https://www.rainews.it/rss) | [ANSA](https://www.ansa.it/sito/static/ansa_rss.html), [la Repubblica](https://www.repubblica.it/static/servizi/rss/index.html) |
-| Іспанія | `ES` / `es` | [RTVE Noticias](https://www.rtve.es/noticias/) | [El País](https://elpais.com/info/rss/), [La Vanguardia](https://www.lavanguardia.com/rss) |
-| Бельгія | `BE` / `nl`, `fr`, `de` | [VRT NWS](https://www.vrt.be/vrtnws/) | [RTBF Info](https://www.rtbf.be/archive/info), [The Brussels Times](https://www.brusselstimes.com/) |
-| Австрія | `AT` / `de` | [ORF News](https://orf.at/) | [Der Standard](https://www.derstandard.at/), [Die Presse](https://www.diepresse.com/) |
+| Країна | ISO / мови | Джерела з рейтингом |
+|---|---|---|
+| Україна | `UA` / `uk` | Суспільне 96; Українська правда 85; LIGA.net 94; Укрінформ 94 |
+| Німеччина | `DE` / `de` | Tagesschau 86; Deutsche Welle 94; ZEIT 52 |
+| Франція | `FR` / `fr` | France 24 56; RFI 56; Le Monde 76 |
+| Велика Британія | `GB` / `en` | BBC News 98; The Guardian 97; Sky News 63 |
+| США | `US` / `en` | NPR 100; AP News 34; The New York Times 68 |
+| Литва | `LT` / `lt` | LRT 97; 15min 92; Delfi LT 89 |
+| Латвія | `LV` / `lv` | LSM 98; Delfi LV 90; TVNET 89 |
+| Естонія | `EE` / `et` | ERR 99; Postimees 86; Delfi EE 86 |
+| Польща | `PL` / `pl` | Polskie Radio 66; PAP 32; TVN24 82 |
+| Угорщина | `HU` / `hu` | Telex 97; HVG 89; 444 91 |
+| Румунія | `RO` / `ro` | HotNews 95; Digi24 94; Agerpres 67 |
+| Чехія | `CZ` / `cs` | iROZHLAS 69; ČT24 99; Seznam Zprávy 94 |
+| Словаччина | `SK` / `sk` | STVR Správy 99; Aktuality.sk 96; SME 31 |
+| Словенія | `SI` / `sl` | RTV Slovenija 91; STA 59; 24UR 91 |
+| Хорватія | `HR` / `hr` | HRT Vijesti 91; Index.hr 80; Jutarnji 87 |
+| Італія | `IT` / `it` | RaiNews 87; ANSA 92; la Repubblica 77 |
+| Іспанія | `ES` / `es` | RTVE Noticias 94; El País 86; La Vanguardia 88 |
+| Бельгія | `BE` / `nl`, `fr`, `de` | VRT NWS 100; RTBF Info 98; The Brussels Times 88 |
+| Австрія | `AT` / `de` | ORF News 76; Der Standard 71; Die Presse 91 |
 
-P0 дає по одному національному джерелу з кожної країни, тобто 19 адаптерів. P1 додає різні редакційні перспективи. Сторонній RSS-агрегатор не є першоджерелом: зберігати canonical URL, назву редакції та оригінальну мову. Для multilingual Бельгії країну й мову визначати окремо.
+Детальні live-паспорти з URL, статусами, redirects, RSS/sitemap, URL-схемами, pagination/backfill, JSON-LD/OG, полями, блокуваннями та стратегією адаптера: [UA, Baltics, PL, HU, CZ, SK](docs/research/news-central-baltic.md), [DE, FR, GB, US, BE, AT](docs/research/news-western.md), [RO, SI, HR, IT, ES](docs/research/news-southern.md). Сторонній RSS-агрегатор не є першоджерелом: зберігати canonical URL, назву редакції та оригінальну мову. Для багатомовної Бельгії країну й мову визначати окремо.
 
 ### 4.2. Автобазари
 
-| Пріоритет | Джерело | Канал | Що збираємо | Технічна примітка |
-|---|---|---|---|---|
-| P0 | [AUTO.RIA](https://developers.ria.com/docs/) | API + HTML detail | усі типи авто, довідники, повна публічна картка і контакти | API для discovery/ID, HTML для полів, яких немає в API; квоти рахуються окремо |
-| P0 | [OLX Авто](https://www.olx.ua/uk/transport/legkovye-avtomobili/) | sitemap/category/detail HTML; API якщо доступний | повна публічна картка, продавець, контакти, фото URL | Playwright тільки для полів, які з’являються після JS; 403/429 зупиняє source |
-| P1 | [RST.ua](https://rst.ua/) | sitemap/category/detail HTML | оголошення, контакти, ціна й характеристики | окремий adapter і власний identity key |
-| P1 | [Automoto.ua](https://automoto.ua/) | sitemap/category/detail HTML | агреговані оголошення, контакти, ціна | визначати upstream source і не зливати дублікати без provenance |
+| Джерело | Рейтинг | Канал v1 без реєстрації | Що збираємо |
+|---|---:|---|---|
+| [AUTO.RIA](https://auto.ria.com/uk/legkovie/) | 91 | sitemap, категорії, HTML/JSON-LD | усі типи авто, повна картка, продавець і анонімно доступні контакти |
+| [OLX Авто](https://www.olx.ua/uk/transport/legkovye-avtomobili/) | 85 | sitemap/category, browser detail fallback | повна картка, продавець, контакти після анонімного reveal, media URL |
+| [RST.ua](https://rst.ua/ukr/) | 59 | category/detail legacy HTML | оголошення, продавець, контакти, ціни й характеристики |
+| [Automoto.ua](https://automoto.ua/uk/car) | 91 | sitemap/gzip, HTML/JSON-LD | агреговані оголошення, контакти, ціна й upstream provenance |
 
 ### 4.3. Каталоги і ціни
 
-| Пріоритет | Джерело | Канал | Що збираємо | Технічна примітка |
-|---|---|---|---|---|
-| P0 | [Prom.ua](https://prom.ua/robots.txt) | product sitemap + category/detail HTML | товари, продавці, контакти, відгуки, запитання, ціни, наявність | marketplace-wide discovery через sitemap; seller API не є заміною |
-| P0 | [Rozetka](https://rozetka.com.ua/robots.txt) | sitemap/category/detail HTML | товари, продавці, характеристики, відгуки, запитання, ціни | окремо парсити product identity та offers різних продавців |
-| P0 | [Epicentrk.ua](https://epicentrk.ua/robots.txt) | product/category sitemap + detail HTML | товари Epicentr і marketplace sellers, повні характеристики й ціни | sitemap розділяє власні та marketplace товари |
-| P1 | [Allo](https://allo.ua/robots.txt) | `sitemap.xml`, `ua-sitemap.xml`, detail HTML | товари, характеристики, продавці, ціни, відгуки | JS fallback за виміряною потребою |
-| P1 | [Hotline](https://hotline.ua/robots.txt) | sitemap/category/detail HTML | нормалізовані моделі товарів, магазини, історія пропозицій | корисний як cross-source product matcher |
-| P1 | [Comfy](https://comfy.ua/) | sitemap/detail HTML | електроніка й побутова техніка | використовувати JSON-LD як перший selector |
-| P2 | [Foxtrot](https://www.foxtrot.com.ua/) | sitemap/detail HTML | електроніка й побутова техніка | окремий source rate limit |
-| P2 | [MOYO](https://www.moyo.ua/) | sitemap/detail HTML | електроніка й супутні товари | окремий source rate limit |
+| Джерело | Рейтинг | Канал v1 без реєстрації | Ключова модель |
+|---|---:|---|---|
+| [Prom.ua](https://prom.ua/robots.txt) | 95 | product/model sitemap, HTML/JSON-LD | product + seller offer |
+| [Rozetka](https://rozetka.com.ua/robots.txt) | 91 | category tree, HTML/JSON-LD, browser fallback | product + multi-seller offers |
+| [Епіцентр](https://epicentrk.ua/robots.txt) | 94 | розділені product/category sitemaps, HTML | own/marketplace offers |
+| [Allo](https://allo.ua/robots.txt) | 88 | XML/gzip sitemap, HTML/state | product + own/marketplace offer |
+| [Hotline](https://hotline.ua/robots.txt) | 96 | XML/gzip sitemap, HTML/JSON-LD | normalized model + shop offers |
+| [Comfy](https://comfy.ua/ua/smartfon/) | 90 | sitemap, browser/JSON-LD | product + retailer offer |
+| [Foxtrot](https://www.foxtrot.com.ua/) | 86 | sitemap + categories, HTML/state | product + retailer offer |
+| [MOYO](https://www.moyo.ua/) | 80 | human maps + categories, HTML/state | product + retailer offer |
+
+Повний польовий паспорт цих 12 джерел із прикладами URL, схемами сторінок і переліками полів: [українські каталоги й авторинки](docs/research/ua-marketplaces.md).
 
 Перед реалізацією адаптера агент зберігає датований snapshot RSS/sitemap/robots і 3–10 representative pages. Це технічна база для regression tests і пояснення змін сайту.
 
@@ -185,17 +188,28 @@ P0 дає по одному національному джерелу з кож�
 
 ### 5.4. NewsArticle
 
-`NewsArticle`: source article ID, canonical URL, country, original language, title, lead, full original text, cleaned HTML, author/byline, section/tags, publication/update timestamps, related media URLs, links, source attribution і content hash.
+`NewsArticle`: source article ID, canonical URL, country, original language, `content_access`, title, lead, nullable full original text/cleaned HTML, author/byline, section/tags, publication/update timestamps, related media URLs, links, source attribution і content hash.
 
 `NewsTranslation`: article ID, target language `uk`, translated title/lead/body, provider, model/version, glossary version, source content hash, created_at, status, quality flags і cost/character count. Зміна оригіналу створює нову версію перекладу; старий переклад не перезаписується.
 
 Якщо original language уже `uk`, `NewsTranslation.status = not_required`, а read API повертає оригінальні поля як українське представлення без повторного зберігання тексту. Якщо одна сторінка містить кілька мов, перекладати сегменти, для яких language detector не повернув `uk`.
 
+### 5.5. Розділені осі стану
+
+Незалежні агенти не створюють власних взаємозамінних enum. Використовуються чотири окремі осі:
+
+- `source_state`: `enabled | paused | disabled | blocked_anonymous`; це стан планування всього джерела;
+- `route_state`: `healthy | degraded | circuit_open | unsupported`; це стан конкретного RSS/sitemap/category/detail/browser route;
+- `entity_lifecycle`: `active | inactive | deleted | unknown`; це життєвий цикл товару, оголошення або статті;
+- `content_access`: `full | partial | metadata_only | blocked | challenge | premium | gone | unknown`; це фактична повнота одного fetched item.
+
+`fetch_outcome = success | retryable | permanent_failure` є результатом спроби, а не станом доступу. Мапінг старих позначень у research: `free -> full`; `body_unavailable -> metadata_only`; `retryable` переноситься у `fetch_outcome`; `blocked/challenge/premium/gone` лишаються однойменними. `metadata_only` запис має nullable `body_original_*`, але зберігає доступні title/lead/metadata й ніколи не вважається повнотекстовим.
+
 ## 6. Функціональні вимоги
 
 | ID | Вимога |
 |---|---|
-| FR-001 | Реєстр джерел керує статусом, каналом, розкладом, лімітами, URL-шаблонами і політикою зберігання без зміни коду ядра. |
+| FR-001 | Реєстр джерел керує статусом, рейтингом і його складовими, доказом анонімного доступу, каналом, розкладом, лімітами, URL-шаблонами і політикою зберігання без зміни коду ядра. |
 | FR-002 | Планувальник створює ідемпотентні crawl runs і не запускає два несумісні повні обходи одного джерела одночасно. |
 | FR-003 | Discovery читає API pagination, RSS/Atom і sitemap index/urlset, включно з gzip. |
 | FR-004 | Fetcher підтримує conditional GET (`ETag`, `Last-Modified`), redirects, gzip/brotli, timeout, retry budget і per-origin rate limit. |
@@ -210,7 +224,7 @@ P0 дає по одному національному джерелу з кож�
 | FR-013 | Secrets надходять лише з environment/secret store і ніколи не потрапляють у logs, raw artifacts або fixtures. |
 | FR-014 | URL normalization видаляє tracking-параметри, але зберігає вихідний URL і не об’єднує різні варіанти товару без доказу. |
 | FR-015 | Кожен адаптер має offline fixture tests і контрольований live smoke test, вимкнений у звичайному CI. |
-| FR-016 | Для кожної неукраїномовної новини система створює український переклад заголовка, lead і повного тексту, зберігаючи оригінал. |
+| FR-016 | Для кожної неукраїномовної новини система перекладає українською всі фактично доступні поля, зберігаючи оригінал: title/lead для `metadata_only`, а body лише для `full/partial` із наявним текстом. Відсутній body не генерується. |
 | FR-017 | Translation memory не відправляє повторно незмінні сегменти; ключ містить source language, target language, normalized segment hash, provider/model і glossary version. |
 | FR-018 | Публічні контакти, імена, профілі, VIN та інші доступні поля мають зберігатися разом із provenance і часовою версією. |
 | FR-019 | Кожне джерело має coverage report: відомі типи сторінок, поля, pagination/backfill межі, кількість виявлених і пропущених записів. |
@@ -268,11 +282,11 @@ All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafan
 | Python 3.13 | усі worker/API компоненти | зріла scraping/data екосистема; версію фіксувати через `.python-version` |
 | `uv` + `pyproject.toml` + lockfile | залежності й відтворювані збірки | один lockfile; бот оновлень створює окремі PR |
 | Scrapy 2.13.x | crawl lifecycle, downloader middleware, throttling, sitemap | основний HTTP crawler; selectors тільки в adapters |
-| HTTPX | офіційні JSON API і тестовані клієнти | окремі typed clients для AUTO.RIA та інших API |
+| HTTPX | анонімні публічні JSON API і тестовані HTTP clients | typed client створюється лише для live-перевіреного anonymous endpoint; реєстраційний AUTO.RIA API у v1 не використовується |
 | feedparser | RSS/Atom | зберігати feed entry ID і raw XML |
 | Trafilatura + selectolax/lxml | виділення повного тексту й очищення HTML | site-specific selectors мають пріоритет; generic extractor є fallback |
 | lingua-language-detector або fastText lid.176 | визначення мови | результат з confidence; source-declared language не ігнорувати мовчки |
-| Playwright Python, pinned | JS-rendering як виняток | окремий worker pool; browser binary має відповідати версії пакета; не застосовувати для обходу блокувань |
+| Playwright Python, pinned | звичайне анонімне JS-rendering як виняток | після bounded canary без challenge можна ввімкнути low-rate production route; browser binary pinned; CAPTCHA/challenge/login, fingerprint spoofing і private cookies не обходити |
 | Pydantic v2 + JSON Schema | versioned контракти і валідація | schema snapshots у репозиторії |
 | PostgreSQL 18 | core data, job queue, history, outbox | підтримувана гілка до 2030; JSONB лише для extension fields |
 | SQLAlchemy 2 + Alembic | persistence і міграції | міграції forward-only; downgrade лише де безпечно |
@@ -329,7 +343,7 @@ All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafan
 3. Discovery читає API/RSS/sitemap курсор і створює jobs із priority та idempotency key.
 4. Worker бере lease, перевіряє policy ще раз і виконує conditional request.
 5. Для 200/206 bytes пишуться в raw store; для 304 оновлюється freshness без нового raw object.
-6. 429 поважає `Retry-After`; 5xx/network errors використовують exponential backoff із jitter; 401/403/CAPTCHA не ретраяться нескінченно, а ставлять source incident.
+6. 429 поважає `Retry-After`; 5xx/network errors використовують exponential backoff із jitter; 401/403/CAPTCHA не ретраяться нескінченно, а ставлять channel/route incident. Джерело цілком вимикається лише коли не лишилося корисного анонімного каналу.
 7. Parser читає immutable raw object, видає normalized records та validation report.
 8. Транзакція upsert-ить entity, контакти й observation, додає change event, оновлює cursor та outbox.
 9. Для news article version створюється translation job. Текст сегментується по абзацах/реченнях без розриву HTML-структури, незмінні сегменти беруться з translation memory.
@@ -343,7 +357,7 @@ Retry policy за замовчуванням: максимум 4 спроби д
 
 Кожен адаптер містить:
 
-- `manifest.yaml` із owner, status, country/languages, base URLs, allow/deny patterns, channel, schedule, rate, retention і translation policy;
+- `manifest.yaml` із owner, status, country/languages, rating breakdown/date, anonymous-access evidence, base URLs, allow/deny patterns, channel, schedule, rate, retention і translation policy;
 - discovery implementation із збережуваним cursor;
 - parser(s) з явною `parser_version`;
 - 3–10 raw fixtures без вилучення публічних полів: нормальний запис, contacts, missing optional fields, pagination, changed layout, 404/removed;
@@ -358,6 +372,7 @@ Retry policy за замовчуванням: максимум 4 спроби д
 - зберігати secrets; невідомі публічні поля дозволено зберігати в `attributes` із source path;
 - виконувати browser evaluation для приватних або авторизованих internal API;
 - вважати порожню відповідь доказом видалення.
+- використовувати source endpoint, який вимагає реєстрацію, login, cookie приватної сесії або source API key у v1.
 
 ## 12. Якість, дедуплікація та повнота
 
@@ -417,9 +432,9 @@ Rubric перекладу, шкала 0–2 для кожного критері
 
 ### 14.2. Алерти
 
-- P1: витік secrets, неконтрольований request rate, підозрілий масовий export контактів, недоступність DB/raw store.
-- P2: немає нових P0 news понад 30 хв, translation lag понад 20 хв, queue age понад SLO, parse success <95%, yield drop >50%, 429/403 spike.
-- P3: storage >75%, окремий адаптер деградував, наближення API quota.
+- SEV-1: витік secrets, неконтрольований request rate, підозрілий масовий export контактів, недоступність DB/raw store.
+- SEV-2: немає нових news понад 30 хв для активного джерела, translation lag понад 20 хв, queue age понад SLO, parse success <95%, yield drop >50%, 429/403 spike.
+- SEV-3: storage >75%, окремий адаптер деградував, наближення анонімного rate budget.
 
 Runbook має містити pause source, inspect raw/parse error, restore lease, replay from raw, rotate key, expire/delete raw objects і rollback parser version.
 
@@ -468,9 +483,9 @@ uv run collector e2e --source fixtures --offline
 - відновлення після kill worker і недоступності DB продемонстровано;
 - повторний parse тієї самої raw відповіді не створює дублікати;
 - один source pause зупиняє нові запити не пізніше 60 секунд;
-- видалення API key не ламає інші джерела;
+- відсутність credentials у source runtime не ламає інші джерела й не спричиняє спроб login;
 - lineage від експортованого рядка до raw artifact відкривається за один API/SQL lookup;
-- для кожної з 19 країн працює щонайменше одне P0-джерело, а оригінал і український переклад доступні через API/SQL;
+- кожне джерело з §4.1 має доказаний `source_state`; кожен route — `route_state`, а sample item — `content_access` із §5.5; для кожної з 19 країн щонайменше одне джерело з `source_state=enabled` віддає item із `content_access=full`, оригіналом і українським перекладом через API/SQL;
 - 30 випадкових перекладів на кожну вихідну мову пройшли human QA за rubric, critical meaning errors = 0.
 
 ## 17. План реалізації незалежними агентами
@@ -494,13 +509,13 @@ uv run collector e2e --source fixtures --offline
 | WP-03 | Discovery | WP-01, WP-02 | API/RSS/sitemap streaming, cursors, idempotent jobs; gzip/pagination fixtures green |
 | WP-04 | Translation core | WP-01 | segmenter, provider interface, Google adapter, translation memory, glossary, QA corpus; all language pairs green |
 | WP-05 | News adapter SDK | WP-02–04 | RSS/sitemap/article extraction base, full-text contract, country/language config |
-| WP-06A | News UA/DE/AT | WP-05 | Суспільне, Tagesschau, ORF P0 adapters + translations |
-| WP-06B | News FR/BE | WP-05 | France 24, VRT NWS P0 adapters + `fr/nl -> uk` translations |
-| WP-06C | News GB/US | WP-05 | BBC, NPR P0 adapters + `en -> uk` translations |
-| WP-06D | News Baltics | WP-05 | LRT, LSM, ERR P0 adapters + `lt/lv/et -> uk` translations |
-| WP-06E | News PL/HU/RO | WP-05 | Polskie Radio, Telex, HotNews P0 adapters + translations |
-| WP-06F | News CZ/SK/SI/HR | WP-05 | iROZHLAS, STVR, RTVSLO, HRT P0 adapters + translations |
-| WP-06G | News IT/ES | WP-05 | RaiNews, RTVE P0 adapters + translations |
+| WP-06A | News UA/DE/AT | WP-05 | окремий adapter на кожне джерело цих країн із §4.1 + translations |
+| WP-06B | News FR/BE | WP-05 | окремий adapter на кожне джерело цих країн + `fr/nl/de -> uk` translations |
+| WP-06C | News GB/US | WP-05 | окремий adapter на кожне джерело цих країн + `en -> uk` translations |
+| WP-06D | News Baltics | WP-05 | усі LT/LV/EE джерела + `lt/lv/et -> uk` translations |
+| WP-06E | News PL/HU/RO | WP-05 | усі джерела цих країн + translations |
+| WP-06F | News CZ/SK/SI/HR | WP-05 | усі джерела цих країн + translations |
+| WP-06G | News IT/ES | WP-05 | усі джерела цих країн + translations |
 | WP-07 | Vehicle contracts & matching | WP-01 | vehicle/seller/contact schemas, dictionaries, source matching; golden fixtures |
 | WP-08A–D | Vehicle adapters | WP-03, WP-07 | один незалежний пакет на AUTO.RIA, OLX Авто, RST, Automoto; full public field coverage |
 | WP-09 | Catalog contracts & matching | WP-01 | product/offer/review/question/contact schemas, category mapping, matching benchmark |
@@ -549,11 +564,11 @@ uv run collector e2e --source fixtures --offline
 |---|---|---|---|
 | Q-001 | Який перший дослідницький сценарій? | медіамоніторинг + історія цін | Product owner, до pilot |
 | Q-002 | Завантажувати бінарні фото/відео чи лише URL/метадані? | URL/метадані; binary download off | Product owner, до WP-02 close |
-| Q-003 | Перші 3 категорії товарів? | смартфони, ноутбуки, шини | Product, до WP-06 |
+| Q-003 | Як шардити повний каталог між worker pools? | стабільний hash категорії; збирати всі категорії | Engineering, до WP-03 close |
 | Q-004 | Яку глибину історичного backfill робити? | максимально доступна в sitemap/API, але не старше 5 років | Product, до масового backfill |
 | Q-005 | Retention raw/history? | безстроково з cold tier | Data owner, до pilot |
 | Q-006 | Інфраструктурний бюджет/SLO? | один хост MVP, SLO з §2.4 | Product/DevOps, до WP-00 close |
-| Q-007 | Які API keys уже наявні? | відсутні; HTML/RSS first | Product, до відповідного adapter |
+| Q-007 | Чи переходить login/API-key канал у майбутню версію? | ні; v1 завжди anonymous-only | Product, після v1 |
 | Q-008 | Місячний бюджет Google Cloud Translation? | character budget конфігурується; backfill paused без ліміту | Product, до WP-04 live |
 | Q-009 | Перекладати оновлену статтю повністю чи лише змінені сегменти? | лише змінені сегменти, потім збирати повну version | Product, до WP-04 close |
 
@@ -601,22 +616,35 @@ name: AUTO.RIA used vehicles
 domain: vehicles
 owner: data-acquisition
 status: enabled
-channel: official_api
+channel: sitemap_html
 country_codes: [UA]
 source_languages: [uk, ru]
 base_urls:
-  - https://developers.ria.com/
+  - https://auto.ria.com/
 allowed_url_patterns:
-  - '^https://developers\.ria\.com/auto/'
+  - '^https://auto\.ria\.com/uk/auto_[^/]+_[0-9]+\.html$'
 denied_url_patterns: []
+access:
+  registration_required: false
+  login_required: false
+  anonymous_verified_at: '2026-09-22T00:00:00Z'
+  anonymous_status: ok
+rating:
+  total: 91
+  coverage: 24
+  structured_access: 22
+  anonymous_accessibility: 18
+  data_richness: 15
+  stability_observability: 12
+  assessed_at: '2026-09-22'
 schedule: '*/30 * * * *'
 rate_limit:
   requests_per_second: 0.2
   concurrency: 1
-  daily_quota: null              # fill from actual API plan
+  daily_request_budget: 10000
 policy:
-  robots_url: null               # API channel; HTML adapter has its own manifest
-  stop_on_status: [401, 403, 429]
+  robots_url: https://auto.ria.com/robots.txt
+  open_route_circuit_on_status: [401, 403, 429]
   collect_all_public_fields: true
 translation:
   enabled: false                 # vehicle records are normalized, not translated in MVP
