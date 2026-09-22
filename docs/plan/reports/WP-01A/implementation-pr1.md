@@ -7,7 +7,7 @@
 | Картка | `docs/plan/cards/WP-01A.md` — «Спільні вимоги» + «PR1» |
 | Розділи ТЗ | §5.5, §7.2, §7.6, §9.1 (рядки PR1), §9.3, §13, §15, §18; REVIEW.md R-27, R-28, R-32, R-53 |
 | Середовище | Windows 11, uv 0.12.13, CPython 3.13, Docker 29.8, PostgreSQL 18 (`postgres:18@sha256:86c951e0…`) |
-| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2) |
+| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2); після gate 3 — `fix(wp-01a)` (H-1, M-1…M-5, 7 low) |
 
 ## Що зроблено
 
@@ -389,6 +389,96 @@ gate 2: **587 passed, 1 skipped** у `-m "not live"`, з них 75 integration (
 | I-2 | index не обслуговує `ORDER BY` у `claim` | fixed (міграція `0002_claim_index`, вимір 331 мс → 0.18 мс) |
 | I-3 | heartbeat у межах простроченого lease | accepted — контракт зафіксовано тестом тестувальника |
 | I-4 | ідемпотентність `audit_log` — best effort | accepted — дія ідемпотентна через unique `scale_commands.idempotency_key` |
+
+## Відповіді на код-рев'ю
+
+Вердикт gate 3 — `changes_requested` (`docs/plan/reports/WP-01A/code-review-pr1.md`: 1 high,
+5 medium, 9 low, 4 informational). Нижче — відповідь на кожну знахідку. Коміт із виправленнями:
+`fix(wp-01a): code review findings (high DSN, partitions UTC+default, drain heartbeat, enum
+drift test, block_origin refill)`.
+
+| # | Знахідка | Статус | Що зроблено / обґрунтування |
+|---|---|---|---|
+| H-1 | integration-тест падає з `TypeError` на беспарольному admin-DSN (конфігурація власного CI job) | **fixed** | `_assert_no_password_in_output` більше не порівнює `None` з рядком: при `trust`-auth маскувати нічого й тест це визнає явно. Щоб гарантія «пароль не в логах» не зникла саме там, де потрібна, додано `test_db_migrate_never_prints_password_even_when_dsn_has_one` — підставляє синтетичний пароль у той самий DSN і перевіряє, що у виводі його немає, є маркер `***` і немає traceback. Увесь набір прогнано з DSN **без** пароля (103 passed), з паролем (103) і через testcontainers (103). |
+| M-1 | межі партицій залежать від `TimeZone` сесії DDL (overlap або діра) | **fixed** | `MonthPartition.create_sql` формує `timestamptz`-межі з явним `+00`. Тести: `test_month_partition_bounds_are_utc_regardless_of_session_timezone` (UTC / Europe/Kyiv / America/Los_Angeles — межі в `pg_class` однакові) і `test_partitions_created_from_different_timezones_neither_overlap_nor_leave_gaps` (сусідні місяці з різних сесій; рядки `2034-03-31T22:00Z` і `2034-04-01T00:00Z` потрапляють у правильні партиції). Виправлено **до PR2**, як і просив рев'юер, бо helper успадкують `fetches`/`raw_objects`/`change_events`/`outbox_events`. |
+| M-2 | heartbeat «оживляє» `draining` instance у `ready` | **fixed** | Намір drain винесено в окрему колонку `worker_instances.drain_requested_at` (міграція `0003`): `heartbeat_instance` повертає `stale → draining`, якщо drain запитаний, і лише інакше в `ready`. Скасувати drain може тільки явний `mark_ready` (він і чистить колонку); для цього дозволено перехід `draining → ready` — це зняття drain-барʼєра для survivors (§7.6). Тест `test_heartbeat_does_not_resurrect_draining_instance` відтворює сценарій рев'ю разом із перевіркою `observed_capacity`. |
+| M-3 | `alembic check` не бачить розходження CHECK-ів і предиката partial index із контрактами | **fixed** | Новий `tests/integration/postgres/test_schema_contract.py` (15 тестів): читає `pg_get_constraintdef` для 12 CHECK-констрейнтів і `pg_indexes.indexdef` для `ix_crawl_jobs_claimable_order` **з живої БД** і порівнює множини значень із `collector.contracts.enums`/`WorkerRole`/константами коду; додатково INSERT кожного значення `SourceState` (саме цей розрив рев'юер відтворив) і мутаційний тест `test_drifted_check_constraint_is_detected`, який підміняє CHECK у транзакції й перевіряє, що порівняння червоніє. |
+| M-4 | `block_origin` не скидає refill → повний burst після зняття 429 | **fixed** | `block_origin` виставляє `available_tokens = 0` і `last_refill_at = until`, тож після зняття блоку видача починається «з нуля» за звичайним refill. Тест `test_block_origin_resets_refill_so_there_is_no_burst_after_unblock`; два наявні тести (мій і тестувальника) оновлено під новий контракт — у момент `until` дозволу ще немає, він зʼявляється після refill. |
+| M-5 | `audit_log` без DEFAULT-партиції: пропущене обслуговування зупиняє audited дії | **fixed** | Міграція `0003` створює `audit_log_default`. Тести: рядок далекого місяця потрапляє в DEFAULT (`test_audit_log_default_partition_accepts_rows_without_monthly_partition`) і чистий `alembic upgrade head` без жодного `db migrate` дозволяє писати audit (`test_fresh_upgrade_head_without_maintenance_can_write_audit`). Додано `partitions.default_partition_row_count` як джерело метрики «партиції відстають» із TODO(WP-12) і описом процедури перенесення рядків (поки вони в DEFAULT, місячну партицію того самого періоду створити не можна). Контракт «зрозуміла помилка замість auto-create» для таблиць без DEFAULT збережено окремим тестом. |
+| L-1 | `request_scale` не ідемпотентна під конкуренцією | **fixed** | Після невдалого захоплення pool з `expected_revision` ключ ідемпотентності перечитується — конкурент, що вже створив команду, дає повтор, а не `StaleRevisionError`. Тест `test_request_scale_stays_idempotent_when_pool_revision_moved` (два паралельні виклики → один `command_id`, один audit, `revision=2`). |
+| L-2 | сирі `IntegrityError` повз типізовані помилки (`upsert_pool` create, `create_source`) | **fixed** | Обидві гілки перевіряють наявність рядка до вставки й кидають `ConflictError`; транзакція викликача лишається живою. Тест `test_creating_existing_pool_raises_conflict_not_integrity_error`. |
+| L-3 | `collector db roles` віддає traceback замість типізованої помилки | **fixed** | `apply_roles` транслює помилки asyncpg у `DBAPIError`, а CLI `_run_async` додатково розпізнає їх за модулем (asyncpg без `py.typed`) — це покрило й помилки connect/auth, які SQLAlchemy не обгортає. Тести: `test_db_roles_translates_driver_errors_without_traceback` і `test_postgres_error_predicate_covers_driver_and_sqlalchemy_errors` (сторонні винятки, як `ValueError`, не ковтаються). |
+| L-4 | `db migrate --check` не є read-only | **fixed (формулювання)** | Docstring `migrate_database` і help `--check` тепер кажуть прямо: схема не змінюється, але команда потребує тих самих прав, що й міграції (не read-only роль), бо `MigrationContext` створює `alembic_version` у транзакції, яка відкочується. Поведінку не змінював: робити `--check` доступним для `collector_api_ro` означало б окремий шлях без `MigrationContext`. |
+| L-5 | `release_permit` не перевіряє власника | **fixed** | Доданий опційний `owner_instance` додає предикат власника; sweeper (власника не знає) працює як раніше. Тест `test_release_permit_with_owner_does_not_free_foreign_slot`. Параметр опційний навмисно — WP-01D передаватиме його у воркерах. |
+| L-6 | jitter поверх cap → фактичний максимум `maximum*(1+ratio)` | **fixed** | Cap застосовується після jitter. Тест `test_backoff_never_exceeds_maximum_even_with_jitter` (40 attempt-ів). |
+| L-7 | `upsert_cursor` перезаписує курсор без монотонної перевірки | **accepted (wp-implementer WP-01A, 2026-09-22)** | Напрямок відкату безпечний (повторний обхід, не пропуск), а правильна семантика монотонності залежить від типу курсора: ETag/Last-Modified не впорядковані, page token не порівнюваний, watermark — порівнюваний. Вибір належить власнику discovery (WP-01D): або `expected_revision`, або `GREATEST` для часових курсорів. Винесу рішення у PR2 разом із рештою cursor/watermark-семантики і передам вимогу власнику discovery (WP-01D). |
+| L-8 | `enqueue` мовчки повертає термінальний job для повторно використаного ключа | **fixed (docstring)** | Docstring `enqueue` явно попереджає: ключ — це ідентичність job, тож без дискримінатора вікна (§9.3 п.3 `planned_at_bucket`) джерело після першого успішного обходу більше не фетчиться; статус повернутого job перевіряє викликач. Поведінку не змінював — «той самий job, без дубля» є контрактом картки, а рішення «перезапустити роботу» належить планувальнику (WP-01D). |
+| L-9 | `set_instance_status` не ідемпотентна | **fixed** | Повтор того самого статусу — no-op. Тест `test_instance_status_transitions_are_idempotent` (повторні `mark_ready`/`mark_draining`/`mark_stopped`; `drain_requested_at` не «оновлюється» повтором). |
+| I-1 | дві реалізації lease; queue-варіант варто параметризувати до PR2 | **accepted (wp-implementer WP-01A, 2026-09-22)** | Погоджуюсь по суті, але параметризація черги — зміна публічного API репозиторію, яку не можна зробити «наосліп» до появи справжнього другого споживача: `projection_tasks` мають власні поля (`entity_uuid`, `projection_version`, unique artifact key) і власну транзакцію ack. Виконаю на початку PR2 — першим кроком, до написання `claim_projection_tasks`, щоб копії не зʼявилося. |
+| I-2 | дрібне дублювання (`_raise_stale_or_missing*`, `EXPECTED_TABLES`/`ALLOWED_JSONB` у двох тестах) | **accepted (wp-implementer WP-01A, 2026-09-22)** | Два хелпери відрізняються таблицею, типом ключа і текстом повідомлення; спільна generic-версія на два виклики додала б параметризацію замість шести рядків. Константи в тестах дублюються навмисно: unit-перевірка метаданих і integration-перевірка живої схеми мають лишатись незалежними джерелами істини (спільна константа зробила б обидва тести зеленими при одній помилці). Перегляну, коли PR2 додасть третього споживача. |
+| I-3 | тривалість транзакції викликача нічим не обмежена | **accepted (wp-implementer WP-01A, 2026-09-22)** | Правильне місце для запобіжника — воркер (WP-01D): `statement_timeout`/`idle_in_transaction_session_timeout` на runtime-ролях і заборона мережевих викликів усередині транзакції. Репозиторій не може цього гарантувати, не забравши в викликача право писати результат у тій самій транзакції (саме це потрібно для outbox у PR2). Вимогу передам у картку WP-01D; docstring кожної операції вже містить явне «commit одразу». |
+| I-4 | обидва index-и на `crawl_jobs` виправдані (підтвердження виміру gate 2) | **not applicable** | Підтвердження без дії: рев'юер незалежно відтворив `Index Scan using ix_crawl_jobs_claimable_order` і збіг предиката з `CLAIMABLE_JOB_STATUSES`; ризик розходження закритий у M-3. |
+
+### Команди після виправлень gate 3
+
+```text
+$ uv sync --frozen
+Checked 60 packages in 5ms
+
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src
+All checks passed!
+153 files already formatted
+Success: no issues found in 60 source files
+exit=0
+
+$ uv run alembic upgrade head && uv run alembic check          # чиста БД `gate3`
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001_control_queue, …
+INFO  [alembic.runtime.migration] Running upgrade 0001_control_queue -> 0002_claim_index, …
+INFO  [alembic.runtime.migration] Running upgrade 0002_claim_index -> 0003_default_partition, …
+No new upgrade operations detected.
+exit=0
+# downgrade base (3 кроки) → upgrade head (3 кроки) → check: No new upgrade operations detected.
+
+$ uv run collector db migrate && uv run collector db migrate --check && uv run collector db roles
+migrated postgresql+asyncpg://collector:***@127.0.0.1:55434/gate3: 0003_default_partition -> 0003_default_partition
+partition created: audit_log_y2026m09 … audit_log_y2026m12
+schema up to date: revision=0003_default_partition
+roles applied to …/gate3 from roles.sql: collector_migrate, collector_scheduler, collector_fetcher, collector_parser, collector_projector, collector_translation, collector_api_ro, collector_export_ro
+exit=0
+
+$ uv run pytest -m "not live"
+SKIPPED [1] tests\unit\test_network_blocked.py:27: Windows: loopback потрібен asyncio
+621 passed, 1 skipped, 6 warnings in 261.39s (0:04:21)
+
+$ COLLECTOR_TEST_POSTGRES_ADMIN_DSN=postgresql://collector_ci@127.0.0.1:55435/postgres \
+  COLLECTOR_TEST_REQUIRE_DOCKER=1 uv run pytest -m integration tests/integration/postgres
+103 passed in 237.02s (0:03:57)          # DSN БЕЗ пароля — точна конфігурація CI job (H-1)
+
+$ COLLECTOR_TEST_POSTGRES_ADMIN_DSN=postgresql://collector:***@127.0.0.1:55434/postgres \
+  COLLECTOR_TEST_REQUIRE_DOCKER=1 uv run pytest -m integration tests/integration/postgres
+103 passed in 255.83s (0:04:15)          # DSN з паролем
+
+$ uv run pytest -m integration tests/integration/postgres    # testcontainers
+103 passed in 205.66s (0:03:25)
+
+$ uv run pre-commit run --all-files
+… усі 11 hooks Passed
+```
+
+Тестів після gate 3: **621 passed, 1 skipped** у `-m "not live"` — з них 103 integration
+(було 75) і 44 unit persistence. Розподіл integration за файлами: `test_adversarial.py` 18,
+`test_role_connections.py` 17, `test_schema_contract.py` 15 (новий), `test_migrations.py` 11,
+`test_pools.py` 11, `test_limiter.py` 9, `test_queue.py` 9, `test_roles.py` 5,
+`test_cli_db.py` 4, `test_control_plane.py` 4. Три шляхи integration (без пароля, з паролем, testcontainers) — 0 failed.
+
+### Статус знахідок gate 3
+
+| Severity | Усього | fixed | accepted | not applicable |
+|---|---:|---:|---:|---:|
+| high | 1 | 1 | 0 | 0 |
+| medium | 5 | 5 | 0 | 0 |
+| low | 9 | 7 | 2 | 0 |
+| informational | 4 | 0 | 3 | 1 |
 
 ## Що не перевірено
 

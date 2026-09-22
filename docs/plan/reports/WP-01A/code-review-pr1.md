@@ -130,8 +130,9 @@ burst**
   одразу отримує повний сплеск. Поведінка формально «як у простійного token bucket», але
   суперечить призначенню `block_origin` (§7.6/FR-033 ввічливість після 429/`Retry-After`).
 - verdict: **CONFIRMED**.
-- рекомендація: у `block_origin` виставляти `last_refill_at = until` (або `available_tokens = 0`
-  + `last_refill_at = until`), щоб після блокування видача починалася «з нуля».
+- рекомендація: у `block_origin` виставляти `last_refill_at = until` (або одночасно
+  `available_tokens = 0` і `last_refill_at = until`), щоб після блокування видача починалася
+  «з нуля».
 
 **M-5 — `audit_log` без DEFAULT-партиції: пропущене обслуговування зупиняє всі audited дії
 control plane**
