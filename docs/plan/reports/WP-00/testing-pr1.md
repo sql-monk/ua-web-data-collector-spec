@@ -9,11 +9,13 @@
 | Розділи ТЗ | §7.6, §8, §16.1 (рівні 1, 14), §16.2, §17.1, §17.3, §18 |
 | Середовище | Windows 11, uv 0.12.13, CPython 3.13.9 (uv-managed), Node 24.19.0, gitleaks 8.30.1, `actionlint` відсутній |
 | Тестувальник | wp-tester; `implementation-pr1.md` прочитано лише після власного прогону (крок 5) |
-| Доданий commit | `fcb5601 test(wp-00): adversarial tests for network block, CLI contract and foundation config` |
+| Додані commits | `fcb5601 test(wp-00): adversarial tests …`; `7e83a44` (звіт, gate 2: fail); re-verification після `52c4166`/`345d001` — розділ 10 |
 
 ## Вердикт
 
-**`fail`** — одна знахідка **high**: на Windows (основна платформа розробки) блокування мережі не покриває
+**Фінальний (після повторної верифікації, розділ 10): `pass`.** Первинний вердикт gate 2 нижче збережено як історію.
+
+**Первинний: `fail`** — одна знахідка **high**: на Windows (основна платформа розробки) блокування мережі не покриває
 асинхронний шлях (`asyncio.open_connection`, `httpx.AsyncClient`): звичайний unit-тест встановлює реальне
 TCP-з'єднання з не-loopback host. Інваріант картки «socket-з'єднання у звичайному тесті кидає виняток» і
 твердження `tests/conftest.py` («будь-який інший host кидає `SocketConnectBlockedError`») на цій платформі
@@ -391,3 +393,121 @@ E  AssertionError: collector.adapters: docstring без owner-WP
 - Повне блокування socket на POSIX і поведінка доданих тестів у Linux — лише за аналізом коду pytest-socket
   (`disable_socket` патчить `socket.socket`, `getaddrinfo`, `gethostbyname`).
 - Acceptance «чистий clone» — через `git clean -xfd` у worktree, не окремий `git clone`.
+
+## 10. Повторна верифікація (після `52c4166`, `345d001`)
+
+| Поле | Значення |
+|---|---|
+| Інкремент | `git diff fcb5601..HEAD` — `.pre-commit-config.yaml` (+9), `pyproject.toml`/`uv.lock` (`types-pyyaml` у dev), `src/collector/adapters/__init__.py`, `tests/conftest.py` (+21), `tests/unit/test_cli.py` (літерал 2), `docs/plan/deps/WP-00-to-repo-config.md` (resolved), `implementation-pr1.md` |
+| Прогін | чистий стан (`git clean -xfd` → `uv sync --frozen`), Windows 11, uv 0.12.13, CPython 3.13.9, `PYTHONUTF8=1` |
+| Mutation-перевірка | не повторювалась (за вказівкою координатора); тести тестувальника (`fcb5601`) не змінювались |
+
+### Вердикт повторної верифікації: **`pass`**
+
+### 10.1. Команди картки
+
+```text
+$ git clean -xfd && uv sync --frozen
+Installed 45 packages in 609ms
+ + types-pyyaml==6.0.12.20260906
+exit=0
+
+$ uv run ruff check .
+All checks passed!
+exit=0
+
+$ uv run ruff format --check .
+54 files already formatted
+exit=0
+
+$ uv run mypy src
+Success: no issues found in 24 source files
+exit=0
+
+$ uv run mypy tests
+Success: no issues found in 7 source files
+exit=0
+
+$ PYTHONUTF8=1 uv run pytest -m "not live"
+collected 107 items
+
+tests\unit\test_cli.py .........................                         [ 23%]
+tests\unit\test_cli_adversarial.py ..................................... [ 57%]
+......                                                                   [ 63%]
+tests\unit\test_foundation_config.py ...........................         [ 88%]
+tests\unit\test_logging.py ..                                            [ 90%]
+tests\unit\test_network_block_adversarial.py ......                      [ 96%]
+tests\unit\test_network_blocked.py .s..                                  [100%]
+
+SKIPPED [1] tests\unit\test_network_blocked.py:27: Windows: loopback потрібен asyncio
+================= 106 passed, 1 skipped, 5 warnings in 3.22s ==================
+exit=0
+
+$ PYTHONUTF8=1 uv run collector --help
+(без змін; усі 8 команд §16.2)
+exit=0
+
+$ PYTHONUTF8=1 uv run pre-commit run --all-files
+fix end of files.........................................................Passed
+trim trailing whitespace.................................................Passed
+check yaml...............................................................Passed
+check toml...............................................................Passed
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+detect private key.......................................................Passed
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+Detect hardcoded secrets.................................................Passed
+Detect hardcoded secrets (git history)...................................Passed
+markdownlint-cli2........................................................Passed
+exit=0
+```
+
+### 10.2. Знахідка 1 (high) — async блок мережі
+
+Раніше червоні `test_network_block_adversarial.py::test_asyncio_open_connection_to_non_loopback_is_blocked`
+і `::test_httpx_async_client_to_non_loopback_is_blocked` — **зелені** (loop під hook —
+`_WindowsSelectorEventLoop`; зонд: `hook loop raised: SocketConnectBlockedError` при connect до
+не-loopback listener на власній адресі хоста).
+
+POSIX (аналіз коду, не прогін): hook `pytest_asyncio_loop_factories` повертає `asyncio.SelectorEventLoop`,
+що на Unix і так є loop `DefaultEventLoopPolicy`; для звичайних тестів там діє повний `disable_socket`
+(`socket.socket` → `GuardedSocket`, `getaddrinfo`/`gethostbyname` заглушені), тому `open_connection` кидає
+`SocketBlockedError` ще на створенні socket незалежно від типу loop. Виправлення блок на POSIX не послаблює.
+Hook `pytest_asyncio_loop_factories` присутній у pytest-asyncio 1.4.0 (`plugin.py:92`).
+
+Додатковий обхід за запитом координатора — явний `ProactorEventLoop` усередині тесту (тимчасовий зонд,
+listener на не-loopback адресі хоста, не закомічено):
+
+```text
+explicit ProactorEventLoop (asyncio.ProactorEventLoop().run_until_complete(open_connection)) -> CONNECTED (BYPASS)
+asyncio.run(...) у sync-тесті (default policy = Proactor на win32)                        -> CONNECTED (BYPASS)
+ProactorEventLoop.sock_connect                                                              -> CONNECTED (BYPASS)
+async-тест під hook (SelectorEventLoop)                                                     -> SocketConnectBlockedError
+```
+
+Кандидат на закриття перевірено зондом: після `asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())`
+`asyncio.run(open_connection(...))` іде через `_WindowsSelectorEventLoop` і кидає `SocketConnectBlockedError`.
+Класифікація — див. знахідку R1 нижче.
+
+### 10.3. Решта знахідок
+
+| # | Було | Перевірка | Стан |
+|---|---|---|---|
+| 2 medium | `test_cli.py:73` порівняння з константою | `assert result.exit_code == 2  # контракт картки…`, імпорт `NOT_IMPLEMENTED_EXIT_CODE` прибрано | closed |
+| 3 low | межі allow-hosts (`connect_ex`, UDP, `getaddrinfo`, subprocess) | задокументовано в docstring `tests/conftest.py`; коду не змінено (обмеження інструмента) | accepted, задокументовано |
+| 4 low | docstring `collector.adapters` без WP-XX | «news (SDK WP-05, WP-06A–G), vehicles (WP-08A–D), catalogs (WP-10A–H)»; `test_appendix_a_package_exists_with_owner_docstring[collector.adapters]` зелений | closed |
+| 5 low | hook `gitleaks` лише `--staged` | новий hook alias `gitleaks-history` (`gitleaks git --redact --no-banner --verbose`, `always_run`). `pre-commit run gitleaks-history --all-files --verbose` → `15 commits scanned … no leaks found`. Негативний тест: тимчасовий commit із фейковим `ghp_…` → hook `Failed`, `RuleID: github-pat`, `Fingerprint: d7f353e…:tests/fixtures/leak_probe.txt:github-pat:1`; commit знято `git reset --hard HEAD~1`, дерево чисте | closed |
+| 6 info | dependency-запит «open» | стан `resolved` із посиланням на `b3dafd8` | closed |
+| 7 info | «Typer поверх Click» | звіт виправлено: typer 0.27 не залежить від click | closed |
+| 8–11 info | код 2 у usage-помилках; `PYTHONUTF8`; перенос у help; major-теги Actions | без змін коду, передано docs-writer/WP-13 (зафіксовано у звіті реалізатора) | accepted |
+
+Звірка з доповненим `implementation-pr1.md`: виводи команд, кількість тестів (106/1 skip Windows), поведінка
+hooks збігаються з моїм прогоном. Linux-паритет (107 passed у контейнері) не відтворювався — потребує мережі.
+
+### 10.4. Залишкові знахідки
+
+| # | Severity | Місце | Опис |
+|---|---|---|---|
+| R1 | low | `tests/conftest.py` (`pytest_asyncio_loop_factories`) | Hook покриває лише тести, які виконує pytest-asyncio. Sync-тест, що викликає `asyncio.run(...)` (звичайний патерн для helper-коду), на Windows отримує `ProactorEventLoop` з default policy і **обходить блок** (зонд: CONNECTED). Явне `asyncio.ProactorEventLoop()` — свідомий обхід, приймається як задокументована межа. Для `asyncio.run` рекомендовано додатково у conftest на `win32` встановити `asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())` на старті сесії (перевірено зондом: `asyncio.run` → Selector → `SocketConnectBlockedError`; policy API deprecated з 3.14, але проєкт pinned на 3.13). CI (Linux) не постраждає. Не блокує PR: у CI блок повний, у docstring conftest межа має бути дописана. |
+| R2 | info | `tests/conftest.py` docstring | Межа «asyncio.run у sync-тесті на Windows» у docstring відсутня (перелічено лише `connect_ex`, UDP, `getaddrinfo`, subprocess) — дописати разом із R1. |
