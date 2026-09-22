@@ -11,13 +11,13 @@
 | WP-00 | PR1 python+CI | `wp/00-1-python-ci` | merged 7223bec | docs done: `reports/WP-00/docs-pr1.md`; ADR-0001 | CLI = Typer; 127 tests; Linux-паритет підтверджено в Docker |
 | WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | in_progress (fix after gate 2) | тестування pass + H-1 mongo boot race: `reports/WP-00/testing-pr2.md`; 210 tests | worktree `.worktrees/wp-00-2` |
 | WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | pending | — | після merge PR2 |
-| WP-01C | — | `wp/01c-contracts` | docs | пострев'ю accept (0 missing, 8 partial → інші WP/етапи): `reports/WP-01C/spec-review.md`; 476 tests | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
+| WP-01C | — | `wp/01c-contracts` | merged 1f2fbc8 (PR #1) | docs done; ADR-0003/0004; CI green | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
 
 ## Хвиля 1
 
 | WP | Стан | Примітка |
 |---|---|---|
-| WP-01A | pending | після WP-00, WP-01C |
+| WP-01A | in_progress (PR1) | картка `docs/plan/cards/WP-01A.md`; worktree `.worktrees/wp-01a` |
 | WP-01B | pending | після WP-01A |
 | WP-01D | pending | після WP-00, WP-01A |
 | WP-02 | pending | після WP-01A |
