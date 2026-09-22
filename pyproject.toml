@@ -1,0 +1,78 @@
+[project]
+name = "collector"
+version = "0.1.0"
+description = "UA Web Data Collector — платформа збору публічних даних українських каталогів, автобазарів і новин 19 країн"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+authors = [{ name = "UA Web Data Collector team" }]
+# Foundation-залежності (WP-00). Наступні WP додають свої залежності самостійно
+# в алфавітному порядку та перегенеровують uv.lock (docs/plan/cards/WP-00.md).
+dependencies = [
+  "pydantic>=2.11,<3",
+  "structlog>=25.4",
+  "typer>=0.27",
+]
+
+[project.scripts]
+collector = "collector.cli:app"
+
+[dependency-groups]
+dev = [
+  # httpx — лише для тестів мережевої політики (tests/unit/test_network_block_adversarial.py);
+  # як runtime-залежність його додає WP-02 у [project.dependencies].
+  "httpx>=0.28",
+  "mypy>=1.17",
+  "pre-commit>=4.3",
+  "pytest>=8.4",
+  "pytest-asyncio>=1.1",
+  "pytest-socket>=0.7",
+  # pyyaml — tests/unit/test_foundation_config.py читає ci.yml.
+  "pyyaml>=6.0",
+  "respx>=0.22",
+  "ruff>=0.13",
+  "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "collector"
+module-root = "src"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# У тестах дозволені лише assert (S101) і subprocess без shell (S603, S607);
+# решта S-правил (hardcoded passwords S105–S107, yaml.load S506, ...) діє і для tests.
+"tests/**" = ["S101", "S603", "S607"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["collector"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Мережа заблокована за замовчуванням (pytest-socket); --allow-unix-socket потрібен asyncio
+# на POSIX. Loopback для integration/e2e (і для Windows) додає tests/conftest.py.
+addopts = "--disable-socket --allow-unix-socket --strict-markers --import-mode=importlib -ra"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "live: тести, що звертаються до реальних джерел; виконуються лише з дозволу користувача (-m live)",
+  "integration: тести проти локальних сервісів (PostgreSQL/MongoDB/MinIO); мережа лише 127.0.0.1/::1",
+  "e2e: наскрізні тести проти Docker stack або offline fixtures",
+]

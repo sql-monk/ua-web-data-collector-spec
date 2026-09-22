@@ -1,0 +1,48 @@
+# Локальні hooks = ті самі перевірки, що й у CI (.github/workflows/ci.yml).
+# Встановлення: uv run pre-commit install; повний прогін: uv run pre-commit run --all-files
+minimum_pre_commit_version: "4.0.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.8
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      # Staged-зміни при кожному commit (upstream entry: gitleaks git --pre-commit --staged).
+      - id: gitleaks
+      # Уся доступна git-історія — лише вручну (лінійна вартість від історії; у CI shallow
+      # checkout, повний скан історії робить job `secrets` з fetch-depth: 0):
+      #   uv run pre-commit run --hook-stage manual gitleaks-history
+      - id: gitleaks
+        alias: gitleaks-history
+        name: Detect hardcoded secrets (git history)
+        entry: gitleaks git --redact --no-banner --verbose
+        pass_filenames: false
+        always_run: true
+        stages: [manual]
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.23.3
+    hooks:
+      - id: markdownlint-cli2
+        files: \.md$
+        # .claude/agents/*.md — промпти субагентів з frontmatter, не документація (MD041).
+        exclude: ^\.claude/
