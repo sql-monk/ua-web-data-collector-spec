@@ -98,12 +98,26 @@ x-healthcheck-budget: &healthcheck-budget
 
 # Worker pool (§7.5/§7.6): масштабується `--scale`, тому без container_name/ports/volumes;
 # stop_grace_period ≥ 90 с — довший за bounded task shutdown (drain по SIGTERM).
+#
+# WP-01D PR1: команда `collector worker <role>` — реальний runtime (claim/lease/heartbeat/drain),
+# тому worker-у потрібен DSN. Тимчасово це той самий secret `postgres_dsn`, що й у
+# `migrate-postgres`: окремих LOGIN-ролей на компонент ще немає (§13 описує їх як group-ролі
+# NOLOGIN) — запит на них у docs/plan/deps/WP-01D-to-WP-01A.md. Rollback до placeholder-процесу
+# WP-00 без перебудови image: COLLECTOR_WORKER_PLACEHOLDER=1.
 x-worker: &worker
   <<: *collector-runtime
   profiles: [workers]
   restart: unless-stopped
   stop_grace_period: 120s
   stop_signal: SIGTERM
+  environment:
+    <<: *collector-env
+    COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn
+    # Drain має вміститись у stop_grace_period контейнера (120 с) із запасом на SIGKILL.
+    COLLECTOR_WORKER_STOP_GRACE_SECONDS: "90"
+    COLLECTOR_WORKER_PLACEHOLDER: ${COLLECTOR_WORKER_PLACEHOLDER:-0}
+  secrets:
+    - postgres_dsn
   networks:
     - backend
   labels:
@@ -390,13 +404,20 @@ services:
     deploy: *limits-medium
 
   scheduler:
-    # Singleton (§7.5): 1 replica, не масштабується (label collector.scalable=false);
-    # advisory lease — WP-01D. У WP-00 placeholder-процес.
+    # Singleton (§7.5): 1 replica, не масштабується (label collector.scalable=false).
+    # WP-01D PR1: singleton забезпечує PostgreSQL advisory lease у самому процесі, тому навіть
+    # при тимчасових двох контейнерах (recreate) планує рівно один.
     <<: *collector-runtime
     profiles: [core]
     restart: unless-stopped
     command: ["collector", "scheduler"]
     stop_grace_period: 90s
+    environment:
+      <<: *collector-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn
+      COLLECTOR_WORKER_PLACEHOLDER: ${COLLECTOR_WORKER_PLACEHOLDER:-0}
+    secrets:
+      - postgres_dsn
     networks:
       - backend
     labels:

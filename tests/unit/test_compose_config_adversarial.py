@@ -38,9 +38,21 @@ SECRET_CONSUMERS: dict[str, set[str]] = {
     "mongo_keyfile": {"mongo"},
     "minio_root_user": {"minio"},
     "minio_root_password": {"minio"},
-    # DSN міграційної ролі — лише one-shot `migrate-postgres` (approved dependency WP-01A;
-    # §13: migration role не використовується runtime-процесами).
-    "postgres_dsn": {"migrate-postgres"},
+    # DSN PostgreSQL: one-shot `migrate-postgres` + runtime-процеси, яким WP-01D PR1 дав
+    # реальний claim/lease (`scheduler`, усі `*-worker`). §13 хоче окремі per-component DSN —
+    # LOGIN-ролей ще немає, запит у docs/plan/deps/WP-01D-to-WP-01A.md.
+    "postgres_dsn": {
+        "migrate-postgres",
+        "scheduler",
+        "discovery-worker",
+        "fetch-worker",
+        "parse-worker",
+        "projector-worker",
+        "translation-worker",
+        "export-worker",
+        "maintenance-worker",
+        "browser-worker",
+    },
 }
 COMPONENT_NAMES = ("postgres", "mongo", "minio")
 ONE_SHOTS = {"migrate-postgres", "ensure-mongo"}
@@ -74,13 +86,22 @@ def test_each_secret_has_exactly_documented_consumers(services: dict[str, dict[s
     assert consumers == SECRET_CONSUMERS
 
 
-def test_api_and_workers_have_no_secrets_in_wp00(services: dict[str, dict[str, Any]]) -> None:
-    """У WP-00 api/workers не мають DB credentials (§13: ролі per-component додають WP-01A/B)."""
+def test_api_has_no_secrets_and_runtime_has_only_the_dsn(
+    services: dict[str, dict[str, Any]],
+) -> None:
+    """`api` без DB credentials (owner WP-11A); worker/scheduler — рівно один secret: DSN.
+
+    WP-01D PR1 замінив placeholder-процеси на runtime, який читає чергу, тому DSN їм потрібен;
+    жодних інших credentials (Mongo/MinIO) вони не отримують — це залишається least privilege.
+    """
     for name, svc in services.items():
-        if name == "api" or name.endswith("-worker") or name == "scheduler":
+        env = svc.get("environment", {})
+        if name == "api":
             assert not _secret_names(svc), f"{name}: секрети без потреби"
-            env = svc.get("environment", {})
             assert not [k for k in env if k.endswith("_FILE")], f"{name}: *_FILE без secret"
+        elif name.endswith("-worker") or name == "scheduler":
+            assert _secret_names(svc) == {"postgres_dsn"}, f"{name}: зайві секрети"
+            assert [k for k in env if k.endswith("_FILE")] == ["COLLECTOR_POSTGRES_DSN_FILE"], name
 
 
 def test_secret_file_env_points_to_mounted_secret(services: dict[str, dict[str, Any]]) -> None:

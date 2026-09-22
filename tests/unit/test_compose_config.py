@@ -362,20 +362,26 @@ def test_postgres_init_scripts_are_mounted_read_only_for_wp_01a(
         assert forbidden not in statements, forbidden
 
 
-def test_migration_dsn_secret_is_scoped_to_the_one_shot(
+def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
     compose: dict[str, Any], services: dict[str, dict[str, Any]]
 ) -> None:
-    """DSN міграційної ролі — лише у `migrate-postgres` (§13: migration role не у runtime)."""
+    """DSN отримують лише ті, хто справді ходить у PostgreSQL: one-shot міграцій і runtime.
+
+    WP-01D PR1: `scheduler` (advisory lease + maintenance) і `*-worker` (claim/lease/heartbeat)
+    читають чергу, тому DSN їм потрібен. `api`, stateful і Mongo-one-shot його не бачать.
+    Окремі per-component DSN (§13) чекають на LOGIN-ролі —
+    docs/plan/deps/WP-01D-to-WP-01A.md.
+    """
     assert "postgres_dsn" in compose["secrets"]
     migrate = services["migrate-postgres"]
     assert migrate["secrets"] == ["postgres_dsn"]
     assert migrate["environment"]["COLLECTOR_POSTGRES_DSN_FILE"] == "/run/secrets/postgres_dsn"
+    allowed = {"migrate-postgres", "scheduler"} | WORKERS
     for name, svc in services.items():
-        if name == "migrate-postgres":
-            continue
-        assert "postgres_dsn" not in [
+        holds_dsn = "postgres_dsn" in [
             s if isinstance(s, str) else s["source"] for s in svc.get("secrets", [])
-        ], name
+        ]
+        assert holds_dsn == (name in allowed), name
     # `collector db roles` ще немає в main — у compose лише коментар-нагадування.
     assert migrate["command"] == ["collector", "db", "migrate"]
     assert "collector db roles" in COMPOSE_PATH.read_text(encoding="utf-8")

@@ -54,7 +54,7 @@ Parse/projector/export/maintenance/scheduler/one-shots — лише `backend`, �
 | `mongo_root_password` | `mongo` (`MONGO_INITDB_ROOT_PASSWORD_FILE`), `ensure-mongo` |
 | `mongo_keyfile` | `mongo` (`--keyFile`, копія в tmpfs 0400) |
 | `minio_root_user`, `minio_root_password` | `minio` (`MINIO_ROOT_*_FILE`) |
-| `postgres_dsn` | `migrate-postgres` (`COLLECTOR_POSTGRES_DSN_FILE`) — DSN міграційної ролі; будується з `postgres_password` (§13: migration role не у runtime-процесах) |
+| `postgres_dsn` | `migrate-postgres`, `scheduler` і `*-worker` (`COLLECTOR_POSTGRES_DSN_FILE`); будується з `postgres_password`. **Тимчасово спільний:** §13 хоче окремі per-component DSN, але LOGIN-ролей ще немає — запит у `docs/plan/deps/WP-01D-to-WP-01A.md` (WP-01D PR1) |
 
 ## Override для розробки
 
