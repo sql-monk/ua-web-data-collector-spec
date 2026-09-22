@@ -7,7 +7,7 @@
 | Картка | `docs/plan/cards/WP-00.md`, розділ «PR2» + «Спільні правила» |
 | Розділи ТЗ | §1 п.8/10, §7.5, §7.6, §8, §13, §16.1 п.14, §16.2, §16.3, FR-030, FR-035; REVIEW.md R-51, R-55; ADR-0001 |
 | Середовище | Windows 11, Docker Desktop 29.8.0 (Linux containers), Compose v5.5.1, uv 0.12.13, CPython 3.13.9; Docker Scout 1.24 (SBOM/CVE локально); `syft`/`trivy` локально відсутні |
-| Commits | `d0360e3 feat(wp-00): Docker image collector, Compose profiles, health stub, one-shots (PR2)` + `f6ae1c2 docs(wp-00): PR2 implementation report, compose render skip message` |
+| Commits | `d0360e3 feat(wp-00): Docker image collector, Compose profiles, health stub, one-shots (PR2)` + `f6ae1c2 docs(wp-00): PR2 implementation report, compose render skip message`; після gate 2 — `71f5903 fix(wp-00): gate 2 — mongo healthcheck init-phase, trivy CRITICAL, COPY chmod, profiles docs` |
 
 ## Що зроблено
 
