@@ -15,3 +15,10 @@ build/
 
 # orchestration worktrees
 .worktrees/
+
+# WP-00 PR1: Python/uv артефакти та локальні виходи команд §16.2
+*.egg-info/
+.coverage
+htmlcov/
+.artifacts/
+.uv-cache/

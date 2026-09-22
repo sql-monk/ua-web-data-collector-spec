@@ -1,0 +1,102 @@
+# CI = команди-контракт §16.2 ТЗ. Локально ті самі команди виконує pre-commit і розробник.
+# Secrets — лише з GitHub Environments/Actions Secrets; у файлі нічого не hardcode.
+name: ci
+
+on:
+  push:
+    branches: [main, "wp/**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_FROZEN: "1"
+  PYTHONUTF8: "1"
+  COLLECTOR_GIT_SHA: ${{ github.sha }}
+
+jobs:
+  python:
+    name: python lint/type/test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python from .python-version
+        run: uv python install
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: mypy src
+        run: uv run mypy src
+
+      - name: pytest (без live)
+        run: uv run pytest -m "not live"
+
+      - name: collector --help (контракт §16.2)
+        run: uv run collector --help
+
+      - name: collector version
+        run: uv run collector version
+
+  pre-commit:
+    name: pre-commit (ruff, markdownlint, hygiene)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python from .python-version
+        run: uv python install
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: pre-commit run --all-files
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+  secrets:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE потрібен лише для org-репозиторіїв; задається в GitHub Environments.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
