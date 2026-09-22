@@ -8,7 +8,7 @@
 | Розділи ТЗ | §5.1, §5.4, §5.5, §7.3, §9.2, §9.3, §9.4, §9.6, §9.8, §9.9, §10 п.5–10 (+ §12.2, §16.1, §18) |
 | REVIEW.md | R-18, R-20, R-27, R-30, R-36, R-37, R-38, R-41, R-42, R-43, R-45, R-46, R-49 |
 | Середовище | Windows 11, uv 0.12.13, CPython 3.13.9, pydantic 2.13.5, phonenumbers 9.0.39 |
-| Commits | `dc60f45` identity/temporal/enums/values · `7a2696f` artifacts/projection/events/current · `3e65442` resolution/release · `6aca83c` schema export/CLI/snapshots/docs (+ commit зі звітом) |
+| Commits | `dc60f45` identity/temporal/enums/values · `7a2696f` artifacts/projection/events/current · `3e65442` resolution/release · `6aca83c` schema export/CLI/snapshots/docs · `6945057` звіт · `98add4b` fix dependency/schema_version (див. останній розділ) |
 | Обсяг | ~2 460 рядків у `src/collector/contracts/**` (12 модулів), ~2 370 рядків тестів/fixtures, 32 JSON Schema snapshots |
 
 Продуктивний код > 800 рядків, тому — один branch, чотири логічні коміти; кожен проміжний коміт
@@ -266,3 +266,64 @@ Skip і 6 warnings — успадковані від WP-00 PR1 (Windows-відх
 Поза owned files WP-01C свідомо **не** створено ADR-0003 «Canonical event serialization»
 (`docs/decisions/` не в owned files; матеріал для нього — `docs/contracts.md` §6 і docstring
 `collector/contracts/canonical.py`) — це етап 5 (docs) за карткою.
+
+## Виправлення dependency/schema_version (після рішення оркестратора)
+
+Dependency-запит `docs/plan/deps/WP-01C-to-WP-00.md` схвалено як approved dependency change;
+зміни застосовано у `wp/01c-contracts` (WP-00 PR1 злитий, owner-агент завершив), коміт
+`98add4b fix(wp-01c): approved dependency changes and int schema_version for current document`:
+
+1. **CLI**: `hidden=True` для групи `contracts` прибрано — `collector --help` показує `contracts`.
+   `tests/unit/test_cli_adversarial.py`: `FOUNDATION_EXTENSIONS = frozenset({"contracts"})` з
+   коментарем, що §16.2 — контракт CI-команд, а не вичерпний список CLI; перевірка
+   `top_level == SPEC_16_2_TOP_LEVEL | FOUNDATION_EXTENSIONS`. `tests/unit/test_cli.py`:
+   `FOUNDATION_EXTENSIONS = ("contracts",)` у перевірці `--help`.
+2. **`collector version`**: `src/collector/core/version.py` імпортує
+   `collector.contracts.CONTRACTS_VERSION` (`"1.0"`) замість `SCHEMA_VERSION_PLACEHOLDER`
+   (константу видалено); тести `test_cli.py`/`test_cli_adversarial.py` порівнюють із
+   `CONTRACTS_VERSION`. Вивід: `schema_version=1.0`.
+3. **CI**: `.github/workflows/ci.yml` job `python` — крок
+   `contracts JSON Schema snapshots без drift (WP-01C)`: `uv run collector contracts export --check`
+   після pytest.
+4. Стан запиту: `resolved (п.1–3 у wp/01c-contracts за рішенням оркестратора; п. Dockerfile → WP-00 PR2)`.
+5. **`CurrentDocumentBase.schema_version` → `int`** (major) за YAML §9.2 (`schema_version: 1`):
+   модель тепер наслідує `ContractModel` (не `VersionedDocument`), поле
+   `schema_version: int = Field(default=1, ge=1, strict=True)`; validator вимагає рівності major з
+   `contract_version` класу (`"1.0"` → 1). `CONTRACTS_VERSION` та snapshots лишаються `major.minor`
+   (`x-contract-version: "1.0"`). Оновлено: `schemas/mongo/current_document_base.v1.json`
+   (`type: integer`, `default: 1`, `minimum: 1`), fixture `documents/current_document_base.v1.0.json`
+   (`"schema_version": 1`), `factories.py`, `test_current.py` (відхилення `2` і рядка `"1.0"`),
+   `test_compatibility.py` (int major для current document; fixture обов'язковий і для нього),
+   `docs/contracts.md` §2/§3. Попереднє відхилення від ТЗ знято.
+
+Поза owned files лишаються згадки placeholder у `README.md` (рядок 69, «schema version placeholder»)
+та `docs/decisions/0001-foundation-stack.md` (рядок 56) — owner WP-00; рекомендація для етапу docs:
+замінити на «`schema_version` = `collector.contracts.CONTRACTS_VERSION`».
+
+Повторний прогін після виправлень (Windows, `PYTHONUTF8=1`):
+
+```text
+$ uv run ruff check .
+All checks passed!
+$ uv run ruff format --check .
+94 files already formatted
+$ uv run mypy src
+Success: no issues found in 38 source files
+$ uv run pytest -m "not live" -q
+SKIPPED [1] tests/unit/test_network_blocked.py:27: Windows: loopback потрібен asyncio
+334 passed, 1 skipped, 6 warnings in 16.35s
+$ uv run collector contracts export --check
+schemas up to date: schemas
+$ uv run collector --help | grep contracts
+  contracts   Shared data contracts: JSON Schema snapshots (§9.4); owner...
+$ uv run collector version
+package_version=0.1.0
+git_sha=unknown
+schema_version=1.0
+$ uv run pre-commit run --all-files
+(усі hooks Passed)
+```
+
+334 замість 335: `test_model_rejects_other_major` параметризований лише `VersionedDocument` (7 → 6);
+відхилення іншого major для current document покриває
+`test_current.py::test_current_document_matches_spec_9_2_shape`.
