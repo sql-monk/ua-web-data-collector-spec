@@ -125,7 +125,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Секрети для Compose з *.example (лише CI/локальна розробка)
-        run: ./deploy/compose/secrets/init-secrets.sh
+        run: bash ./deploy/compose/secrets/init-secrets.sh
 
       - name: docker compose config --quiet
         run: docker compose config --quiet
