@@ -4,7 +4,7 @@
 |---|---|
 | Від | WP-01A PR1 (`wp/01a-1-control-queue`) |
 | До | WP-00 (owner `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `docker-compose.yml`/`Dockerfile` PR2) |
-| Файли | `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `tests/unit/test_foundation_config.py` (змінено в branch WP-01A за прецедентом WP-01C), `docker-compose.yml` (запит), `Dockerfile` (запит) |
+| Файли | `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `tests/unit/test_foundation_config.py`, а після rebase на WP-00 PR2 ще `tests/unit/test_cli_compose_commands.py`, `tests/unit/test_health_adversarial.py`, `tests/unit/test_compose_config.py` (змінено в branch WP-01A за прецедентом WP-01C), `docker-compose.yml` (запит), `Dockerfile` (запит) |
 | Стан | п.1 — **resolved**: підтверджено оркестратором на gate 2 як owner-рішення (звіт `docs/plan/reports/WP-01A/testing-pr1.md`, знахідка L-3); п.2–3 — open, для WP-00 PR2 |
 
 ## 1. CLI-контракт: `db migrate` більше не стаб, група `db` має підкоманду `roles`
@@ -26,6 +26,30 @@
 Зміни мінімальні (5 рядків + коментарі з посиланням на цей файл) і зроблені прямо у branch
 WP-01A за прецедентом `docs/plan/deps/WP-01C-to-WP-00.md` (п.1–2 «resolved у branch за
 рішенням оркестратора»), щоб `uv run pytest -m "not live"` лишався зеленим.
+
+### Доповнення після rebase на WP-00 PR2 (ті самі підстави, п.1)
+
+WP-00 PR2 додав власні тести навколо стаба `db migrate` (TCP-проба + рядок
+«no migrations yet; owner WP-01A») і навколо порожнього каталогу init-скриптів. Після того як
+WP-01A PR1 замінив тіло команди на Alembic, три тести описували вже неіснуючий контракт:
+
+| Тест | Був | Став |
+|---|---|---|
+| `test_cli_compose_commands.py::test_db_migrate_exits_0_with_owner_message_when_postgres_reachable` | exit 0 + `no migrations yet; owner WP-01A` | `…::test_db_migrate_requires_dsn_and_is_no_longer_a_tcp_stub` — без DSN exit 1 і явне повідомлення, без stub-рядка |
+| `test_cli_compose_commands.py::test_db_migrate_exits_1_when_postgres_unreachable` | недоступність через monkeypatch `check_postgres` | реальний закритий порт у DSN → exit 1, порожній stdout, `postgres error` у stderr, без traceback |
+| `test_health_adversarial.py::test_db_migrate_never_prints_stub_line_nor_reads_secrets` | exit 0 + `owner WP-01A` | відсутній secret-файл DSN → exit 1 з назвою env, без stub-рядка і без traceback |
+| `test_compose_config.py::test_postgres_init_scripts_are_mounted_read_only_for_wp_01a` | `init/` не містить `*.sql` (WP-00 їх не копіює) | `init/` містить рівно `01-roles.sql`, і у виконуваному SQL немає GRANT/паролів/DDL таблиць — тобто перевіряється саме те, що туди не можна класти |
+
+Жодну перевірку не послаблено: кожен тест зберіг свій інваріант (немає stub-рядка, немає
+traceback, секрети не витікають, у initdb немає GRANT/паролів) і лише перевів його на реальну
+поведінку команди. Монтування `./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro`
+і `COLLECTOR_POSTGRES_DSN_FILE` для one-shot `migrate-postgres` WP-00 PR2 уже зробив — п.2
+цього запиту закритий.
+
+**Відкрите для WP-00:** `docker-compose.yml` (forbidden для WP-01A) у коментарі до
+`migrate-postgres` уже передбачає «+ collector db roles після merge WP-01A PR1» — команду
+one-shot варто змінити на `collector db migrate && collector db roles`, інакше GRANT для нових
+таблиць доведеться застосовувати вручну.
 
 **Стан п.1 — `resolved`.** Незалежне тестування (gate 2) винесло ці зміни окремою знахідкою
 L-3 («процесна, не технічна: жоден тест не послаблено — навпаки, додано покриття

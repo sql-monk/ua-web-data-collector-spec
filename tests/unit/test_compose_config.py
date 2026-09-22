@@ -325,13 +325,26 @@ def test_named_volumes_only_for_stateful(compose: dict[str, Any]) -> None:
 def test_postgres_init_scripts_are_mounted_read_only_for_wp_01a(
     services: dict[str, dict[str, Any]],
 ) -> None:
-    """Approved dependency WP-01A: NOLOGIN group-ролі §13 при першому старті кластера."""
+    """Approved dependency WP-01A: NOLOGIN group-ролі §13 при першому старті кластера.
+
+    Після merge WP-01A PR1 каталог містить `01-roles.sql` (створення ролей). Тест стежить, щоб
+    у initdb не потрапило те, що туди не можна: GRANT (потребує таблиць, які зʼявляються лише
+    після `collector db migrate`) і будь-які паролі/LOGIN-ролі.
+    """
     mounts = [str(v) for v in services["postgres"]["volumes"]]
     assert "./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro" in mounts
     init_dir = REPO_ROOT / "deploy" / "compose" / "postgres" / "init"
     assert init_dir.is_dir() and (init_dir / "README.md").is_file()
-    # SQL-файли ролей належать WP-01A — WP-00 їх не копіює.
-    assert not list(init_dir.glob("*.sql"))
+    scripts = sorted(path.name for path in init_dir.glob("*.sql"))
+    assert scripts == ["01-roles.sql"], scripts
+    body = (init_dir / "01-roles.sql").read_text(encoding="utf-8")
+    assert "CREATE ROLE %I NOLOGIN" in body
+    # Перевіряємо виконуваний SQL, не коментарі (вони пояснюють, де живе повний скрипт).
+    statements = " ".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("--")
+    ).replace("NOLOGIN", "")
+    for forbidden in ("GRANT", "PASSWORD", "ALTER TABLE", "ALTER FUNCTION"):
+        assert forbidden not in statements, forbidden
 
 
 def test_migration_dsn_secret_is_scoped_to_the_one_shot(

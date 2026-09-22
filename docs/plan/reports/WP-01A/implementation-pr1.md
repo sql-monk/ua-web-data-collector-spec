@@ -7,7 +7,7 @@
 | Картка | `docs/plan/cards/WP-01A.md` — «Спільні вимоги» + «PR1» |
 | Розділи ТЗ | §5.5, §7.2, §7.6, §9.1 (рядки PR1), §9.3, §13, §15, §18; REVIEW.md R-27, R-28, R-32, R-53 |
 | Середовище | Windows 11, uv 0.12.13, CPython 3.13, Docker 29.8, PostgreSQL 18 (`postgres:18@sha256:86c951e0…`) |
-| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2); після gate 3 — `fix(wp-01a)` (H-1, M-1…M-5, 7 low); після пострев'ю — `fix(wp-01a)` (S-1…S-4) |
+| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2); після gate 3 — `fix(wp-01a)` (H-1, M-1…M-5, 7 low); після пострев'ю — `fix(wp-01a)` (S-1…S-4); rebase на main (WP-00 PR2 + WP-01C) |
 
 ## Що зроблено
 
@@ -530,6 +530,96 @@ API-шару:
 патерном, що й `request_scale` (обовʼязкові `actor`/`reason`, `append_audit` у тій самій
 транзакції), щоб гарантія §13 не залежала від дисципліни викликача. Рядок додано до картки
 `docs/plan/cards/WP-01A.md`, розділ PR2.
+
+## Rebase на main (WP-00 PR2 + WP-01C)
+
+Гілку `wp/01a-1-control-queue` (14 комітів) перебазовано на `main`, куди після старту PR1
+злито WP-00 PR2 (Docker image, Compose profiles, one-shots, health-стаб API, placeholder-процеси)
+і PR #1 (shared contracts). Принцип розвʼязання конфліктів — **«main + функціональність
+WP-01A»**: жодна поведінка, додана WP-00 PR2, не втрачена.
+
+### Розвʼязані конфлікти
+
+| Файл | Конфлікт | Рішення |
+|---|---|---|
+| `pyproject.toml`, `uv.lock` | обидві сторони додали залежності | обʼєднано обидві групи, lock перегенеровано (розвʼязав оркестратор до передачі) |
+| `src/collector/cli.py` | main: реальні `db ensure-mongo` (replica set), `api` (uvicorn + health), `scheduler`/`worker` із SIGTERM-drain, TCP-стаб `db migrate`; WP-01A: Alembic `db migrate` + `db roles` | збережено **все** з main; замінено лише тіло `db migrate` і додано `db roles` + хелпери `_postgres_settings`/`_run_async`/`_is_postgres_error`. Імпорти обʼєднані (`asyncio`, `os`, `signal`, `threading`, `time`, `Coroutine`, `TYPE_CHECKING`, `Any`); docstring модуля описує обидва набори команд із owner-ами |
+| `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py` | обидві сторони правили списки стабів і набір підкоманд `db` | `STUBS`/`STUB_ARGV` — без жодної підкоманди `db` (фактичний стан коду: `ensure-mongo` реальна з PR2, `migrate`/`roles` реальні з PR1); набір групи `db` = `{ensure-mongo, migrate, roles}`; top-level = §16.2 + `contracts` |
+| `tests/unit/test_foundation_config.py` | main забороняв `sqlalchemy`/`alembic`/`asyncpg`; WP-01A забороняв `pymongo`/`fastapi` | `FORBIDDEN_FOUNDATION_DEPS = ("scrapy", "httpx", "psycopg")`: PR2 легітимно додав `fastapi`/`pymongo`, PR1 — `sqlalchemy[asyncio]`/`alembic`/`asyncpg`; `psycopg` лишається забороненим, бо runtime підтримує лише драйвер asyncpg |
+| `deploy/compose/postgres/init/README.md` | add/add: WP-00 описав механіку монтування, WP-01A — сам скрипт ролей | обʼєднано: механіка initdb з main + опис `01-roles.sql` із правильними іменами восьми ролей §13 |
+| `docs/acceptance/traceability.md` | обидві сторони дописали рядки матриці | збережено обидва набори (6 рядків WP-00 PR2 + 5 рядків WP-01A PR1) |
+
+### Тести WP-00, що описували старий контракт `db migrate`
+
+WP-00 PR2 закріпив стаб `db migrate` (TCP-проба + рядок «no migrations yet; owner WP-01A») і
+порожній каталог init-скриптів власними тестами. Після заміни тіла команди на Alembic три з них
+описували вже неіснуючий контракт — оновлено на тих самих підставах, що й п.1
+`docs/plan/deps/WP-01A-to-WP-00.md` (owner-рішення оркестратора), з таблицею «було → стало» у
+самому dependency-файлі:
+
+- `test_cli_compose_commands.py::test_db_migrate_requires_dsn_and_is_no_longer_a_tcp_stub`
+  (колишній `…exits_0_with_owner_message…`) — без DSN exit 1 з назвою env, без stub-рядка;
+- `test_cli_compose_commands.py::test_db_migrate_exits_1_when_postgres_unreachable` — тепер
+  реальний закритий порт у DSN: exit 1, порожній stdout, `postgres error` у stderr, без traceback;
+- `test_health_adversarial.py::test_db_migrate_never_prints_stub_line_nor_reads_secrets` —
+  відсутній secret-файл DSN → exit 1 з назвою env, без stub-рядка і traceback;
+- `test_compose_config.py::test_postgres_init_scripts_are_mounted_read_only_for_wp_01a` —
+  перевіряє, що `init/` містить рівно `01-roles.sql` і що у **виконуваному** SQL немає GRANT,
+  паролів чи DDL таблиць (GRANT потребує таблиць, тож йому місце лише в `collector db roles`).
+
+Жоден інваріант не послаблено — кожен тест зберіг свою гарантію і лише перевів її на реальну
+поведінку команди.
+
+### Що вже готове в main і не потребує змін від WP-01A
+
+- сервіс `postgres` у `docker-compose.yml` з тим самим pinned digest
+  (`postgres:18@sha256:86c951e0…`), що в CI job `integration-postgres` і в testcontainers-фікстурі;
+- монтування `./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro`;
+- secret `postgres_dsn` і `COLLECTOR_POSTGRES_DSN_FILE` для one-shot `migrate-postgres` — саме
+  той механізм, який читає `PostgresSettings.from_env()` (п.2 dependency-запиту закритий);
+- `alembic.ini`/`migrations/` у образі — перевірено, що `collector db migrate` знаходить їх
+  через пошук угору від cwd (п.3 запиту лишається актуальним лише як явний `COLLECTOR_ALEMBIC_INI`).
+
+**Відкрите для WP-00:** команда one-shot `migrate-postgres` у `docker-compose.yml` (forbidden
+для WP-01A) — коментар там уже передбачає «+ collector db roles після merge WP-01A PR1»;
+без цього GRANT для нових таблиць доведеться застосовувати вручну.
+
+### Прогін після rebase (усе з 0 failed)
+
+```text
+$ uv sync --frozen
+Checked 66 packages in 6ms
+
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src
+All checks passed!
+180 files already formatted
+Success: no issues found in 62 source files
+exit=0
+
+$ uv run alembic upgrade head && uv run alembic check       # чиста БД, 3 ревізії
+No new upgrade operations detected.
+exit=0
+
+$ uv run collector db migrate && uv run collector db roles
+partition created: audit_log_y2026m09 … audit_log_y2026m12
+roles applied to postgresql+asyncpg://collector:***@127.0.0.1:55437/collector from roles.sql: …
+
+$ docker compose config --quiet
+exit=0
+
+$ uv run pytest -m "not live"
+SKIPPED [1] tests\unit\test_network_blocked.py:27: Windows: loopback потрібен asyncio
+734 passed, 1 skipped, 8 warnings in 236.48s (0:03:56)
+
+$ uv run pytest -m integration tests/integration/postgres      # testcontainers
+104 passed in 291.99s (0:04:51)
+
+$ uv run pre-commit run --all-files
+… усі 11 hooks Passed
+```
+
+Зростання `-m "not live"` з 622 до 734 тестів — це тести WP-00 PR2 (Compose config, health,
+placeholder-процеси), що прийшли з `main`; 104 integration — набір WP-01A без змін.
 
 ## Що не перевірено
 

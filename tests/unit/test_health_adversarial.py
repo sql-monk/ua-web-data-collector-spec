@@ -308,7 +308,7 @@ def test_db_ensure_mongo_cli_exit_1_when_set_name_mismatch(
     assert "topsecret" not in result.output
 
 
-def test_db_migrate_never_prints_stub_line_nor_reads_secrets(
+def test_db_migrate_never_prints_stub_line_nor_reads_secrets(  # noqa: D103 — див. тіло
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -317,10 +317,16 @@ def test_db_migrate_never_prints_stub_line_nor_reads_secrets(
         lambda *a, **k: ComponentStatus(name="postgres", ok=True, latency_ms=0.1, detail="tcp"),
     )
     monkeypatch.setenv("COLLECTOR_POSTGRES_PASSWORD_FILE", "/definitely/absent")
+    monkeypatch.setenv("COLLECTOR_POSTGRES_DSN_FILE", "/definitely/absent")
+    monkeypatch.delenv("COLLECTOR_POSTGRES_DSN", raising=False)
     result = runner.invoke(app, ["db", "migrate"])
-    assert result.exit_code == 0
+    # Після WP-01A PR1 команда реальна: відсутній secret-файл DSN — явна помилка конфігурації
+    # (exit 1), а не stub-рядок; сам шлях до секрету не читається як пароль і не логується.
+    assert result.exit_code == 1
     assert "not implemented" not in result.output
-    assert "owner WP-01A" in result.stdout
+    assert "no migrations yet" not in result.output
+    assert "COLLECTOR_POSTGRES_DSN_FILE" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_ensure_replica_set_does_not_initiate_on_non_94_status_error() -> None:
