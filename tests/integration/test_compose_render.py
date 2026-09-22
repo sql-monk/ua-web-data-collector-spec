@@ -26,7 +26,23 @@ SECRETS_DIR = REPO_ROOT / "deploy" / "compose" / "secrets"
 PROFILES = ("core", "workers", "browser")
 
 
+def _compose_plugin_available() -> bool:
+    proc = subprocess.run(
+        ["docker", "compose", "version"], cwd=REPO_ROOT, capture_output=True, check=False
+    )
+    return proc.returncode == 0
+
+
 def _compose_config(*files: str) -> dict[str, Any]:
+    """Рендер проєкту. Відсутній Compose plugin → skip; помилка валідації → FAIL.
+
+    Adversarial (wp-tester): `container_name` на масштабованому worker робить проєкт
+    невалідним («can't set container_name and … replicas»). Раніше це перетворювалося на
+    skip і мутація ставала невидимою для integration-рівня; тепер невалідний проєкт —
+    червоний тест.
+    """
+    if not _compose_plugin_available():
+        pytest.skip("docker compose plugin відсутній")
     args = ["docker", "compose"]
     for file in files:
         args += ["-f", file]
@@ -34,8 +50,7 @@ def _compose_config(*files: str) -> dict[str, Any]:
         args += ["--profile", profile]
     args += ["config", "--format", "json"]
     proc = subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        pytest.skip(f"docker compose config недоступний: {proc.stderr.strip()[:300]}")
+    assert proc.returncode == 0, f"docker compose config невалідний: {proc.stderr.strip()[:500]}"
     data: dict[str, Any] = json.loads(proc.stdout)
     return data
 
