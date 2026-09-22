@@ -9,7 +9,12 @@ authors = [{ name = "UA Web Data Collector team" }]
 # Foundation-залежності (WP-00). Наступні WP додають свої залежності самостійно
 # в алфавітному порядку та перегенеровують uv.lock (docs/plan/cards/WP-00.md).
 dependencies = [
+  # idna, phonenumbers, pyyaml — WP-01C shared contracts (§9.3 п.8 нормалізація контактів;
+  # read-only loader docs/research/source-registry.yaml для валідації source_id).
+  "idna>=3.10",
+  "phonenumbers>=9.0",
   "pydantic>=2.11,<3",
+  "pyyaml>=6.0",
   "structlog>=25.4",
   "typer>=0.27",
 ]
@@ -27,8 +32,6 @@ dev = [
   "pytest>=8.4",
   "pytest-asyncio>=1.1",
   "pytest-socket>=0.7",
-  # pyyaml — tests/unit/test_foundation_config.py читає ci.yml.
-  "pyyaml>=6.0",
   "respx>=0.22",
   "ruff>=0.13",
   "types-pyyaml>=6.0",
