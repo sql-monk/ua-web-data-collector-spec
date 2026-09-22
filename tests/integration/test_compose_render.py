@@ -1,9 +1,9 @@
-"""`docker compose config --format json` — рендер із інтерполяцією/merge (WP-00 PR2; §16.1 п.14).
+"""`docker compose config --format json` — рендер із інтерполяцією/merge (WP-00 PR2/PR3).
 
 Потребує docker CLI з Compose plugin (daemon не потрібен), тому маркер `integration` і skip
 без docker. Інваріанти дублюють tests/unit/test_compose_config.py на вже відрендереному
-проєкті: без container_name у workers, без docker.sock, без published ports у base-файлі,
-application services read-only/non-root, replicas §7.6, secrets — файли.
+проєкті: без container_name у workers, без docker.sock, публічний порт лише у gui,
+контейнери read-only/non-root, replicas §7.6, secrets — файли.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ pytestmark = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROFILES = ("core", "workers", "browser")
+PROFILES = ("core", "workers", "browser", "gui")
 
 
 def _compose_plugin_available() -> bool:
@@ -88,11 +88,28 @@ def test_workers_have_no_container_name_ports_or_volumes(rendered: dict[str, Any
         )
 
 
-def test_no_docker_socket_and_no_published_ports(rendered: dict[str, Any]) -> None:
+def test_no_docker_socket_and_only_gui_publishes_a_port(rendered: dict[str, Any]) -> None:
+    published = set()
     for name, svc in rendered["services"].items():
         for volume in svc.get("volumes", []):
             assert "docker.sock" not in json.dumps(volume), name
-        assert not svc.get("ports"), f"{name}: base-файл не публікує портів"
+        if svc.get("ports"):
+            published.add(name)
+    assert published == {"gui"}, "публічний ingress — лише gui (§7.5)"
+    gui_ports = rendered["services"]["gui"]["ports"]
+    assert [(p["published"], p["target"]) for p in gui_ports] == [("80", 8080)], gui_ports
+
+
+def test_gui_sees_only_api_and_api_left_ingress(rendered: dict[str, Any]) -> None:
+    """Gate 3 CR-14/SEC L-2: у `ingress` лише gui; gui↔api — internal-мережа frontend."""
+    networks = rendered["networks"]
+    assert networks["frontend"]["internal"] is True
+    on_ingress = {
+        name for name, svc in rendered["services"].items() if "ingress" in svc.get("networks", {})
+    }
+    assert on_ingress == {"gui"}
+    assert set(rendered["services"]["gui"]["networks"]) == {"ingress", "frontend"}
+    assert set(rendered["services"]["api"]["networks"]) == {"backend", "frontend"}
 
 
 def test_dev_override_binds_loopback_only(rendered_dev: dict[str, Any]) -> None:
@@ -101,8 +118,10 @@ def test_dev_override_binds_loopback_only(rendered_dev: dict[str, Any]) -> None:
         for name, svc in rendered_dev["services"].items()
         if svc.get("ports")
     }
-    assert set(published) == {"postgres", "mongo", "minio", "api"}
+    assert set(published) == {"postgres", "mongo", "minio", "api", "gui"}
     for name, host_ips in published.items():
+        if name == "gui":
+            continue  # єдиний свідомо публічний порт стека (§7.5)
         assert all(ip == "127.0.0.1" for ip in host_ips), name
 
 
@@ -111,7 +130,8 @@ def test_application_services_read_only_non_root(rendered: dict[str, Any]) -> No
         if name in {"postgres", "mongo", "minio"}:
             continue
         assert svc["read_only"] is True, name
-        assert svc["user"] == "10001:10001", name
+        # gui — окремий image nginx-unprivileged (uid 101), решта — image `collector`.
+        assert svc["user"] == ("101:101" if name == "gui" else "10001:10001"), name
         assert svc["cap_drop"] == ["ALL"], name
         # S108: це не шлях tmp у тесті, а перевірка tmpfs-монтування контейнера.
         assert any(t.startswith("/tmp") for t in svc["tmpfs"]), name  # noqa: S108

@@ -1,4 +1,4 @@
-"""Unit-тести Compose/Docker-конфігурації як артефакту (WP-00 PR2; §7.5, §13, R-51/R-55, §16.1).
+"""Unit-тести Compose/Docker-конфігурації як артефакту (WP-00 PR2/PR3; §7.5, §13, R-51/R-55).
 
 Без Docker daemon і без docker CLI: читаємо `docker-compose.yml` через PyYAML (merge keys
 `<<` резолвляться), `Dockerfile`, `.dockerignore`, `deploy/compose/dev.override.yml` і
@@ -22,7 +22,7 @@ DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
 DEV_OVERRIDE_PATH = REPO_ROOT / "deploy" / "compose" / "dev.override.yml"
 SECRETS_DIR = REPO_ROOT / "deploy" / "compose" / "secrets"
 
-# §7.5 таблиця profiles → services (gui/observability/tools ще без сервісів у PR2).
+# §7.5 таблиця profiles → services (observability/tools ще без сервісів).
 SPEC_7_5_PROFILES: dict[str, set[str]] = {
     "core": {"postgres", "mongo", "minio", "migrate-postgres", "ensure-mongo", "api", "scheduler"},
     "workers": {
@@ -35,11 +35,19 @@ SPEC_7_5_PROFILES: dict[str, set[str]] = {
         "maintenance-worker",
     },
     "browser": {"browser-worker"},
+    "gui": {"gui"},
 }
 WORKERS = SPEC_7_5_PROFILES["workers"] | SPEC_7_5_PROFILES["browser"]
 STATEFUL = {"postgres", "mongo", "minio"}
 ONE_SHOTS = {"migrate-postgres", "ensure-mongo"}
-SPEC_7_5_NETWORKS = {"ingress", "backend", "source-egress", "provider-egress", "telemetry"}
+SPEC_7_5_NETWORKS = {
+    "ingress",
+    "frontend",
+    "backend",
+    "source-egress",
+    "provider-egress",
+    "telemetry",
+}
 # §7.6 default replicas.
 SPEC_7_6_REPLICAS = {
     "discovery-worker": 1,
@@ -104,7 +112,7 @@ def test_services_match_spec_7_5_profile_table(services: dict[str, dict[str, Any
 
 def test_reserved_profiles_are_documented(compose: dict[str, Any]) -> None:
     text = COMPOSE_PATH.read_text(encoding="utf-8")
-    for profile in ("gui", "observability", "tools"):
+    for profile in ("observability", "tools"):
         assert re.search(rf"^#.*\b{profile}\b", text, re.MULTILINE), profile
 
 
@@ -143,8 +151,11 @@ def test_no_docker_socket_mount_anywhere() -> None:
         assert "docker.sock" not in path.read_text(encoding="utf-8"), path.name
 
 
-def test_base_compose_publishes_no_ports(services: dict[str, dict[str, Any]]) -> None:
-    assert not [name for name, svc in services.items() if "ports" in svc]
+def test_only_gui_publishes_a_port(services: dict[str, dict[str, Any]]) -> None:
+    """§7.5/§13: єдиний публічний ingress стека — gui; решта портів лише у dev.override.yml."""
+    assert [name for name, svc in services.items() if "ports" in svc] == ["gui"]
+    ports = services["gui"]["ports"]
+    assert ports == ["${GUI_PORT:-80}:8080"], ports
 
 
 def test_dev_override_binds_only_loopback() -> None:
@@ -205,7 +216,8 @@ def test_application_services_are_read_only_non_root_with_tmpfs(
     services: dict[str, dict[str, Any]],
 ) -> None:
     app_services = {name for name, svc in services.items() if _is_application(svc)}
-    assert app_services == set(services) - STATEFUL
+    # gui — окремий image (nginx), його інваріанти перевіряє test_gui_* нижче.
+    assert app_services == set(services) - STATEFUL - {"gui"}
     for name in app_services:
         svc = services[name]
         assert svc["read_only"] is True, name
@@ -273,11 +285,14 @@ def test_service_network_placement(services: dict[str, dict[str, Any]]) -> None:
     assert _networks(services["translation-worker"]) == {"backend", "provider-egress"}
     for name in ("parse-worker", "projector-worker", "export-worker", "maintenance-worker"):
         assert _networks(services[name]) == {"backend"}, name
-    assert _networks(services["api"]) == {"backend", "ingress"}
+    # gate 3 CR-14/SEC L-2: api без ingress; gui↔api — окрема internal-мережа frontend.
+    assert _networks(services["api"]) == {"backend", "frontend"}
+    assert _networks(services["gui"]) == {"ingress", "frontend"}
     for name in STATEFUL | ONE_SHOTS | {"scheduler"}:
         assert _networks(services[name]) == {"backend"}, name
     on_ingress = {name for name, svc in services.items() if "ingress" in _networks(svc)}
-    assert on_ingress == {"api"}, "у ingress лише api (gui — PR3)"
+    assert on_ingress == {"gui"}, "у ingress лише gui — єдиний публічний сервіс"
+    assert "backend" not in _networks(services["gui"]), "gui не бачить БД/object store"
 
 
 # --- stateful (§7.5, §8): pinned digests, named volumes ------------------------------------
@@ -545,3 +560,128 @@ def test_ci_python_job_shows_skips() -> None:
     ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
     runs = [s.get("run", "") for s in ci["jobs"]["python"]["steps"]]
     assert any('pytest -m "not live" -rs' in r for r in runs)
+
+
+# --- GUI (WP-00 PR3; §7.7, §8, §13) ----------------------------------------------------------
+
+GUI_DOCKERFILE_PATH = REPO_ROOT / "web" / "Dockerfile"
+GUI_NGINX_CONF_PATH = REPO_ROOT / "deploy" / "compose" / "gui" / "nginx.conf"
+
+
+def test_gui_container_is_non_root_read_only_without_secrets(
+    compose: dict[str, Any], services: dict[str, dict[str, Any]]
+) -> None:
+    """§13: єдиний публічний сервіс має найжорсткіший runtime-профіль."""
+    gui = services["gui"]
+    assert gui["profiles"] == ["gui"]
+    assert gui["user"] == "101:101", "uid nginx-unprivileged, не root"
+    assert gui["read_only"] is True
+    assert gui["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in gui["security_opt"]
+    assert gui["init"] is True
+    assert "volumes" not in gui, "конфіг nginx зашитий в image, не bind-mount"
+    assert "secrets" not in gui, "gui не отримує жодного secret"
+    assert "environment" not in gui
+    # read-only rootfs: усе, що пише nginx, — у tmpfs з uid worker-а.
+    tmpfs = {str(entry).split(":", 1)[0] for entry in gui["tmpfs"]}
+    assert tmpfs == {"/tmp", "/var/cache/nginx"}  # noqa: S108 — tmpfs mounts
+    assert any("uid=101,gid=101" in str(entry) for entry in gui["tmpfs"])
+
+
+def test_gui_is_the_only_ingress_and_depends_on_api(
+    services: dict[str, dict[str, Any]],
+) -> None:
+    gui = services["gui"]
+    assert gui["depends_on"]["api"]["condition"] == "service_healthy"
+    assert set(gui["depends_on"]) == {"api"}, "gui залежить лише від api"
+    assert gui["deploy"]["resources"]["limits"]["pids"] == 256
+    assert _seconds(gui["stop_grace_period"]) >= 30
+    # Healthcheck: процес (nginx) + критична dependency (api через proxy) (§7.5).
+    assert gui["healthcheck"]["test"][0] == "CMD", "exec-форма, без shell"
+    test = " ".join(map(str, gui["healthcheck"]["test"]))
+    assert "http://127.0.0.1:8080/api/v1/health/components" in test
+
+
+def test_gui_image_is_multistage_pinned_non_root() -> None:
+    text = GUI_DOCKERFILE_PATH.read_text(encoding="utf-8")
+    image_args = dict(re.findall(r"^ARG (\w+_IMAGE)=(\S+)$", text, re.MULTILINE))
+    assert set(image_args) == {"NODE_IMAGE", "NGINX_IMAGE"}
+    for value in image_args.values():
+        assert PINNED_IMAGE.match(value), value
+    assert image_args["NODE_IMAGE"].startswith("node:24."), "Node 24 LTS (.nvmrc)"
+    assert image_args["NGINX_IMAGE"].startswith("nginxinc/nginx-unprivileged:")
+    assert re.search(r"^FROM \$\{NODE_IMAGE\} AS builder$", text, re.MULTILINE)
+    assert re.search(r"^FROM \$\{NGINX_IMAGE\} AS runtime$", text, re.MULTILINE)
+    assert "npm ci" in text, "збірка строго за package-lock.json"
+    assert re.search(r"^USER 101:101$", text, re.MULTILINE)
+    assert re.search(r"^HEALTHCHECK ", text, re.MULTILINE)
+    assert "org.opencontainers.image.revision" in text
+    for line in text.splitlines():
+        if line.startswith(("ARG ", "ENV ")):
+            assert not SECRET_ENV_KEY.search(line.split("=", 1)[0]), line
+    # Node у runtime-шарі не лишається: копіюється лише зібрана статика.
+    assert "COPY --from=builder" in text and "/build/dist /usr/share/nginx/html" in text
+
+
+def test_gui_build_uses_web_context_and_deploy_conf(services: dict[str, dict[str, Any]]) -> None:
+    build = services["gui"]["build"]
+    assert build["context"] == "./web"
+    assert build["dockerfile"] == "Dockerfile"
+    assert build["additional_contexts"]["gui-conf"] == "./deploy/compose/gui"
+    assert GUI_NGINX_CONF_PATH.is_file()
+    assert (REPO_ROOT / "web" / ".nvmrc").read_text(encoding="utf-8").strip() == "24"
+
+
+def test_gui_nginx_has_restrictive_csp_and_security_headers() -> None:
+    """§13: restrictive CSP і security headers; same-origin proxy /api → api:8000."""
+    conf = GUI_NGINX_CONF_PATH.read_text(encoding="utf-8")
+    csp = re.search(r'add_header Content-Security-Policy "([^"]+)" always;', conf)
+    assert csp, "немає CSP"
+    directives = dict((part.split(" ", 1) + [""])[:2] for part in csp.group(1).split("; ") if part)
+    assert directives["default-src"] == "'none'"
+    assert directives["script-src"] == "'self'", "жодного inline/CDN-скрипта"
+    assert directives["connect-src"] == "'self'", "fetch/SSE лише same-origin"
+    assert directives["frame-ancestors"] == "'none'"
+    assert directives["base-uri"] == "'none'"
+    assert directives["object-src"] == "'none'"
+    for header, value in (
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Cross-Origin-Opener-Policy", "same-origin"),
+        ("Cross-Origin-Resource-Policy", "same-origin"),
+    ):
+        assert f'add_header {header} "{value}" always;' in conf, header
+    assert "Permissions-Policy" in conf and "Strict-Transport-Security" in conf
+    assert "server_tokens off;" in conf
+
+
+def test_gui_nginx_proxies_api_same_origin_and_hides_health_detail() -> None:
+    conf = GUI_NGINX_CONF_PATH.read_text(encoding="utf-8")
+    assert "listen 8080;" in conf and "listen 80;" not in conf, "non-root не слухає <1024"
+    assert "set $api_upstream http://api:8000;" in conf
+    assert "resolver 127.0.0.11" in conf, "docker DNS: перестворення api не ламає proxy"
+    assert "proxy_pass $api_upstream$request_uri;" in conf
+    # SPA fallback: маршрути React Router віддають index.html, а не 404.
+    assert "try_files $uri $uri/ /index.html;" in conf
+    # §13/CR-14: детальний звіт компонентів назовні не віддається до OIDC (WP-11A).
+    assert "auth_request /internal-api-health;" in conf
+    assert '{"status":"ready"}' in conf and '{"status":"not_ready"}' in conf
+    health_block = conf.split("location = /api/v1/health/components {", 1)[1].split("}", 1)[0]
+    assert "proxy_pass" not in health_block, "публічний health не проксіює тіло звіту"
+
+
+def test_ci_runs_web_pipeline_from_spec_16_2() -> None:
+    """§16.2: `npm ci && npm run lint && npm run test && npm run build && npm run test:e2e`."""
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    web = ci["jobs"]["web"]
+    runs = " ".join(step.get("run", "") for step in web["steps"])
+    for command in ("npm ci", "npm run lint", "npm run test", "npm run build", "npm run test:e2e"):
+        assert command in runs, command
+    setup_node = [s for s in web["steps"] if "setup-node" in (s.get("uses") or "")]
+    assert setup_node, "немає actions/setup-node"
+    assert setup_node[0]["with"]["cache"] == "npm", "кеш npm обов'язковий"
+    assert setup_node[0]["with"]["node-version-file"] == "web/.nvmrc"
+    # GUI image збирається і перевіряється на non-root у job docker.
+    docker_runs = " ".join(step.get("run", "") for step in ci["jobs"]["docker"]["steps"])
+    assert "--profile gui" in docker_runs, "clean-host acceptance §16.2 включає gui"

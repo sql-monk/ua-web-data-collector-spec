@@ -101,6 +101,28 @@ docker compose up -d --wait
 rollback-вікна поверніть робочу копію: `git checkout HEAD -- docker-compose.yml
 deploy/compose` (або змерджіть потрібну гілку).
 
+## Image `collector-gui` (WP-00 PR3)
+
+GUI має власний image, тому й власну ручку версії — `COLLECTOR_GUI_IMAGE` (default
+`collector-gui:dev`, CI — `collector-gui:ci`). Процедура та сама, з трьома відмінностями:
+
+```bash
+docker inspect collector-gui:dev --format   '{{index .Config.Labels "org.opencontainers.image.revision"}}'   # 1. поточна версія
+COLLECTOR_GUI_IMAGE=collector-gui:dev docker compose build gui     # 2. ребілд (лише gui)
+docker compose up -d --wait gui                                    # 3. заміна контейнера
+```
+
+1. `ua.collector.schema-version` у GUI-image немає: він не несе схеми даних; версію API
+   фіксує generated OpenAPI client (WP-11C), а не label.
+2. Збирати треба саме `docker compose build gui`, а не `docker build ./web`: image
+   використовує additional build context `gui-conf` (`deploy/compose/gui/nginx.conf`).
+3. GUI не має named volumes і стану — відкат безпечний у будь-який момент; єдиний видимий
+   наслідок — коротка недоступність публічного порту, поки контейнер перестворюється.
+
+Відкат лише конфігурації nginx (CSP, proxy) без відкату застосунку — це `git checkout
+<commit> -- deploy/compose/gui` і `docker compose build gui && docker compose up -d gui`:
+конфіг зашитий в image, тому без ребілду зміна не застосується.
+
 ## Обмеження / не покриває цей runbook
 
 - Rollback схеми БД (PostgreSQL migrations, MongoDB validators/indexes) — forward-only у PR2
@@ -109,3 +131,5 @@ deploy/compose` (або змерджіть потрібну гілку).
   `docker-compose.yml`, той самий крок 3 (без ребілду).
 - Автоматизований release/registry rollback (`collector release verify`, digest з registry
   у GUI-керованому процесі) — WP-11A/WP-14, поза PR2.
+- Те саме обмеження mutable tag стосується і `collector-gui`: у registry він ще не
+  публікується (owner WP-14).

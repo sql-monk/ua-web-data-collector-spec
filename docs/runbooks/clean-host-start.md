@@ -1,8 +1,8 @@
 # Runbook: clean-host start (Docker Compose, single host)
 
 Мета: підняти стек UA Web Data Collector на чистому Linux-хості однією документованою
-командою (§16.2, §16.3, R-51). Стан на WP-00 PR2: profiles `core` + `workers`; `gui`
-додається у PR3 (тоді команда стає `--profile core --profile workers --profile gui`).
+командою (§16.2, §16.3, R-51). Стан на WP-00 PR3: profiles `core` + `workers` + `gui` —
+повна команда §16.2.
 
 ## Передумови
 
@@ -25,7 +25,7 @@ git clone <repo> collector && cd collector
 ./deploy/compose/secrets/init-secrets.sh
 
 # 2. Профілі за замовчуванням для всіх наступних команд
-export COMPOSE_PROFILES=core,workers
+export COMPOSE_PROFILES=core,workers,gui
 export COLLECTOR_GIT_SHA="$(git rev-parse HEAD)"
 
 # 3. Перевірка конфігурації та збірка image `collector`
@@ -38,8 +38,15 @@ docker compose ps
 ```
 
 Очікуваний результат `docker compose ps`: `postgres`, `mongo`, `minio`, `api`,
-`scheduler` і всі `*-worker` — `Up (healthy)`; `migrate-postgres` та `ensure-mongo` —
-`Exited (0)`. Перевірка health API зсередини мережі (порт назовні не публікується):
+`scheduler`, `gui` і всі `*-worker` — `Up (healthy)`; `migrate-postgres` та `ensure-mongo` —
+`Exited (0)`. `gui` — єдиний контейнер з published port (`0.0.0.0:80->8080/tcp`):
+
+```bash
+curl -sI http://localhost/                          # сторінка + CSP/security headers
+curl -s  http://localhost/api/v1/health/components  # {"status":"ready"} через proxy gui→api
+```
+
+Перевірка health API зсередини мережі (порт api назовні не публікується):
 
 ```bash
 docker compose exec api python -m collector.api.health
@@ -99,4 +106,6 @@ docker compose down -v         # + видалення volumes (усі дані!)
 | `mongo` не стає healthy, у логах «permissions on … keyfile are too open» | keyfile копіюється в tmpfs з 0400 entrypoint-ом; перевірте, що `deploy/compose/secrets/mongo_keyfile` існує і readable |
 | `ensure-mongo` `Exited (1)`, `Authentication failed` | `mongo_root_password` змінено після першої ініціалізації volume; скиньте `down -v` або оновіть пароль у Mongo |
 | `api` `unhealthy` | `python -m collector.api.health` у контейнері покаже, який компонент `error` |
+| `gui` `unhealthy`, але `curl http://localhost/` віддає сторінку | healthcheck `gui` перевіряє ще й `api` через proxy: `curl -s http://localhost/api/v1/health/components` → `not_ready` означає проблему в `api`, не в nginx; після відновлення `api` gui стає healthy сам (перевірено — ~20 с) |
+| порт 80 на хості зайнятий | `GUI_PORT=8081 docker compose up -d --wait` |
 | secret file `Permission denied` у контейнері | файли секретів мають бути readable для uid 10001/999 (`chmod 0644`) |

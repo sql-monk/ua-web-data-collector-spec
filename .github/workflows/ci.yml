@@ -144,6 +144,53 @@ jobs:
       - name: pre-commit run --all-files
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
+  web:
+    # WP-00 PR3 (§7.7, §8, §16.2): ланцюжок `cd web && npm ci && npm run lint && npm run test
+    # && npm run build && npm run test:e2e`. E2E — окремим кроком: він потребує browser binary
+    # Playwright, який ставиться лише після успішних lint/test/build.
+    name: web (lint, test, build, e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: npm run lint (ESLint + Prettier)
+        run: npm run lint
+
+      - name: npm run test (Vitest + Testing Library)
+        run: npm run test
+
+      - name: npm run build (tsc strict + vite)
+        run: npm run build
+
+      # Версія browser binary береться з package-lock.json (@playwright/test pinned) — оновлення
+      # Playwright автоматично оновлює й binary (§8).
+      - name: Playwright browser (chromium)
+        run: npx playwright install --with-deps chromium
+
+      - name: npm run test:e2e (Playwright проти vite preview)
+        run: npm run test:e2e
+
+      - name: Playwright report як artifact (лише при падінні)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7
+
   secrets:
     name: gitleaks (secret scan)
     runs-on: ubuntu-latest
@@ -165,14 +212,16 @@ jobs:
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   docker:
-    # WP-00 PR2 (§7.5, §16.1 п.14, §16.2): compose config, build image `collector`, SBOM (syft),
-    # vulnerability scan (trivy; CRITICAL блокує — §13), clean-host start core+workers з --wait.
+    # WP-00 PR2/PR3 (§7.5, §16.1 п.14, §16.2): compose config, build images `collector` і
+    # `collector-gui`, SBOM (syft), trivy (CRITICAL блокує — §13), clean-host start
+    # core+workers+gui з --wait — це acceptance усього WP-00 (§16.3).
     name: docker (compose config, build, sbom, scan, up --wait)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      COMPOSE_PROFILES: core,workers
+      COMPOSE_PROFILES: core,workers,gui
       COLLECTOR_IMAGE: collector:ci
+      COLLECTOR_GUI_IMAGE: collector-gui:ci
     steps:
       - uses: actions/checkout@v5
 
@@ -183,7 +232,9 @@ jobs:
         run: docker compose config --quiet
 
       - name: docker compose config (усі profiles, валідність)
-        run: docker compose --profile core --profile workers --profile browser config --quiet
+        run: >-
+          docker compose --profile core --profile workers --profile browser --profile gui
+          config --quiet
 
       - name: docker build collector
         run: |
@@ -192,6 +243,13 @@ jobs:
             --build-arg COLLECTOR_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -t "$COLLECTOR_IMAGE" .
           docker inspect "$COLLECTOR_IMAGE" --format 'User={{.Config.User}}' | grep -q 'User=10001:10001'
+
+      # GUI image (WP-00 PR3): node builder → nginx-unprivileged. Збирається через compose,
+      # бо використовує additional build context (deploy/compose/gui).
+      - name: docker compose build gui
+        run: |
+          docker compose build gui
+          docker inspect "$COLLECTOR_GUI_IMAGE" --format 'User={{.Config.User}}' | grep -q 'User=101:101'
 
       - name: SBOM (syft, SPDX JSON як artifact)
         uses: anchore/sbom-action@v0.24.2
@@ -224,8 +282,19 @@ jobs:
           exit-code: "1"
           skip-setup-trivy: true
 
-      - name: docker compose up core+workers --wait (clean host, §16.3)
+      # §16.2/§16.3 clean-host acceptance усього WP-00: core + workers + gui однією командою.
+      - name: docker compose up core+workers+gui --wait (clean host, §16.3)
         run: docker compose up -d --wait --wait-timeout 300
+
+      - name: GUI віддає сторінку, security headers і проксі /api (§7.7, §13)
+        run: |
+          curl -fsS http://localhost/ | grep -q '<div id="root">'
+          headers="$(curl -fsSI http://localhost/)"
+          echo "$headers"
+          printf '%s' "$headers" | grep -qi "content-security-policy: default-src 'none'"
+          printf '%s' "$headers" | grep -qi 'x-content-type-options: nosniff'
+          printf '%s' "$headers" | grep -qi 'x-frame-options: DENY'
+          curl -fsS http://localhost/api/v1/health/components | grep -q '"status":"ready"'
 
       - name: docker compose ps + health
         # Регресійний assert (gate 3, CR-2): кожен контейнер або running+healthy, або one-shot

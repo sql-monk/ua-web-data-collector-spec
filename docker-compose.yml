@@ -4,7 +4,7 @@
 #   core          postgres, mongo, minio, one-shot migrate-postgres/ensure-mongo, api, scheduler
 #   workers       discovery/fetch/parse/projector/translation/export/maintenance-worker
 #   browser       browser-worker (0 replicas за замовчуванням; окремий image — WP-02 PR3)
-#   gui           gui (WP-00 PR3 — сервіс ще не оголошено; профіль зарезервовано)
+#   gui           gui (React SPA + nginx reverse proxy /api; єдиний публічний порт стека)
 #   observability OpenTelemetry Collector, Prometheus, Grafana, Loki (WP-12 — ще не оголошено)
 #   tools         one-shot admin, release verifier, DuckDB research (WP-11A/WP-14 — ще не оголошено)
 #
@@ -18,7 +18,7 @@
 # Інваріанти (перевіряються tests/unit/test_compose_config.py):
 #   - worker services без container_name, host ports і local persistent state;
 #   - жодного Docker socket mount; application services read_only + non-root + tmpfs /tmp;
-#   - публічних портів у base-файлі немає (лише dev.override.yml → 127.0.0.1; gui — PR3);
+#   - публічний порт публікує лише gui (решта — dev.override.yml → 127.0.0.1);
 #   - секрети лише через Docker secrets/files (deploy/compose/secrets/), не ARG/ENV.
 
 name: collector
@@ -333,13 +333,13 @@ services:
       COLLECTOR_API_PORT: "8000"
     expose:
       - "8000"
-    # §7.5 «API — лише OIDC egress»: `ingress` не internal (публічний порт gui у PR3), тому api
-    # поки має default route назовні. Прийнято (gate 3 CR-14/SEC L-2, owner WP-00 PR3 / WP-11A):
-    # PR3 переводить gui↔api в окрему internal-мережу, `ingress` лишається лише gui; egress
-    # api до OIDC — окрема мережа/allowlist разом з OIDC у WP-11A.
+    # §7.5 «API — лише OIDC egress» (gate 3 CR-14/SEC L-2, виконано у PR3): api більше не в
+    # `ingress` — лише `backend` (internal) і `frontend` (internal, спільна з gui). Публічний
+    # порт має єдиний сервіс — gui. Egress api до OIDC — окрема мережа/allowlist разом з
+    # OIDC у WP-11A.
     networks:
       - backend
-      - ingress
+      - frontend
     depends_on:
       postgres:
         condition: service_healthy
@@ -536,19 +536,87 @@ services:
       <<: *limits-large
       replicas: 0
 
-  # gui (profile gui) — WP-00 PR3: nginx-unprivileged, публікує 80/443 в ingress, бачить лише api.
+  # -------------------------------------------------------------------------------------------
+  # GUI (profile gui): єдиний публічний ingress стека (§7.7, §8, §13)
+  # -------------------------------------------------------------------------------------------
+
+  gui:
+    # React SPA + nginx reverse proxy /api → api:8000 (same-origin). Образ окремий від
+    # `collector`: node builder → nginxinc/nginx-unprivileged (pinned digest), без Node у
+    # runtime. Конфіг nginx приходить окремим build-контекстом, бо належить deploy-шару.
+    image: ${COLLECTOR_GUI_IMAGE:-collector-gui:dev}
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      additional_contexts:
+        gui-conf: ./deploy/compose/gui
+      args:
+        COLLECTOR_GIT_SHA: ${COLLECTOR_GIT_SHA:-unknown}
+        COLLECTOR_VERSION: ${COLLECTOR_VERSION:-0.1.0}
+        COLLECTOR_CREATED: ${COLLECTOR_CREATED:-1970-01-01T00:00:00Z}
+    profiles: [gui]
+    restart: unless-stopped
+    read_only: true
+    user: "101:101"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *logging
+    stop_grace_period: 30s
+    # read-only rootfs: усе, що nginx пише, — у tmpfs. `/tmp` тримає nginx.pid (образ
+    # nginx-unprivileged), `/var/cache/nginx` — proxy/client temp paths; nginx створює
+    # підкаталоги на старті, тому потрібні uid/gid worker-а.
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+      - /var/cache/nginx:mode=0700,uid=101,gid=101,size=32m
+    # Єдиний публічний порт усього стека (§7.5). 80 на хості → 8080 у контейнері (non-root
+    # nginx не може слухати <1024). TLS termination — WP-13.
+    ports:
+      - "${GUI_PORT:-80}:8080"
+    # `ingress` — назовні; `frontend` — internal, лише до api. Мережі `backend` gui не бачить:
+    # у нього немає доступу ні до postgres/mongo/minio, ні до workers (§13).
+    networks:
+      - ingress
+      - frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # Процес + критична dependency (§7.5) одним запитом: відповідь на цей шлях доводить, що
+      # nginx живий, а auth_request до api повернув 2xx. Це узагальнений ready/not-ready
+      # (деталі компонентів назовні не виходять до OIDC, WP-11A). Статику перевіряє крок CI
+      # `curl http://localhost/` — тут exec-форма CMD без shell (інваріант PR2).
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - http://127.0.0.1:8080/api/v1/health/components
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy: *limits-small
+
   # observability (profile observability) — WP-12: otel-collector, prometheus, grafana, loki у
   #   мережі telemetry.
   # tools (profile tools) — WP-11A/WP-14: one-shot admin, release verifier, DuckDB research.
 
 # ---------------------------------------------------------------------------------------------
-# Мережі (§7.5): backend/telemetry — internal (без egress); source/provider egress — окремі;
-# ingress — єдина публічна (gui у PR3).
+# Мережі (§7.5): backend/frontend/telemetry — internal (без egress); source/provider egress —
+# окремі; ingress — єдина публічна, і в ній лише gui.
 # ---------------------------------------------------------------------------------------------
 
 networks:
   ingress:
     name: collector_ingress
+  # gui↔api (§7.5, gate 3 CR-14/SEC L-2): internal, без egress. Окремо від `backend`, щоб gui
+  # не мав мережевого доступу до postgres/mongo/minio і до workers.
+  frontend:
+    name: collector_frontend
+    internal: true
   backend:
     name: collector_backend
     internal: true
