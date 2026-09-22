@@ -7,17 +7,17 @@
 | Картка | `docs/plan/cards/WP-01A.md` — «Спільні вимоги» + «PR1» |
 | Розділи ТЗ | §5.5, §7.2, §7.6, §9.1 (рядки PR1), §9.3, §13, §15, §18; REVIEW.md R-27, R-28, R-32, R-53 |
 | Середовище | Windows 11, uv 0.12.13, CPython 3.13, Docker 29.8, PostgreSQL 18 (`postgres:18@sha256:86c951e0…`) |
-| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI |
+| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2) |
 
 ## Що зроблено
 
 ### Схема і міграції (`migrations/postgres/**`, `alembic.ini`, `models/**`)
 
-Одна forward-only ревізія `0001_control_queue` створює всі 13 таблиць PR1 (§9.1): `sources`,
+Forward-only ревізії: `0001_control_queue` створює всі 13 таблиць PR1 (§9.1): `sources`,
 `source_policy_versions`, `source_routes`, `source_cursors`, `crawl_runs`, `crawl_jobs`,
 `dead_letters`, `origin_rate_buckets`, `origin_rate_permits`, `worker_pools`,
 `worker_instances`, `scale_commands`, `audit_log`. `downgrade` реалізовано повністю (початкова
-ревізія), тож `downgrade base → upgrade head` тестується.
+ревізія), тож `downgrade base → upgrade head` тестується. Після gate 2 додано `0002_claim_index` — partial index під hot path `claim` (розділ «Виправлення після gate 2»).
 
 - **Enum-колонки — TEXT + CHECK** зі значень shared-контрактів (`SourceState`, `RouteState`,
   `DataDomain`, `WorkerRole`), не PG enum — еволюція без `ALTER TYPE`; `enum_check()` будує
@@ -228,6 +228,168 @@ unit від WP-01A; решта — WP-00/WP-01C).
 | жодного JSONB payload (R-27) | `test_metadata.py::test_no_domain_jsonb_and_all_timestamps_are_timestamptz`, `test_migrations.py::test_models_match_card_contracts` |
 | ролі й GRANT задокументовані | `src/collector/persistence/postgres/sql/roles.sql` (таблиця ролей у шапці), `deploy/compose/postgres/init/README.md` |
 
+## Виправлення після gate 2
+
+Вердикт gate 2 — `pass` (`docs/plan/reports/WP-01A/testing-pr1.md`; тестувальник додав 35 тестів
+у `1cab61e`). Закрито чотири знахідки; L-3 підтверджено оркестратором як owner-рішення.
+
+### L-1 — `request_scale`/`upsert_pool` кидали сирий `IntegrityError` замість `errors.*`
+
+Додано `errors.InvalidValueError` (аргумент порушує інваріант ресурсу) і перевірку **до першого
+запису**:
+
+- `PoolDesiredState.validate()` — `min_replicas >= 0`, `max >= min`, `desired` у діапазоні,
+  `desired_concurrency >= 1`, `mode` з `POOL_MODES`; викликається з `upsert_pool`;
+- `request_scale` — `requested_replicas >= 0` і `requested_concurrency >= 1` до будь-якого
+  запиту, а після row lock на pool ще й `requested_replicas` у межах `[min_replicas,
+  max_replicas]` (межі відомі лише після читання pool).
+
+CHECK-константи у схемі не чіпались — вони лишаються другим рубежем для прямої зміни рядка в
+обхід репозиторію. Практичний наслідок: транзакція викликача більше не «мертва» після
+невалідного виклику (порушений CHECK ламав її повністю), і в тесті це зафіксовано явно — після
+трьох відхилених `request_scale` та сама транзакція успішно виконує валідний.
+
+Тести: `test_pools.py::test_invalid_scale_values_raise_domain_error_without_writes` (перевіряє
+також, що не з'явилось ні команди, ні audit-запису, ні зміни revision),
+`test_pools.py::test_invalid_pool_desired_state_is_rejected_before_write`,
+`test_policies.py::test_pool_desired_state_validation_rejects_invalid_values` (unit, 5 варіантів)
+і `…_accepts_scale_to_zero` (scale-to-zero лишається дозволеним).
+
+### L-2 — ідемпотентність `enqueue` залежить від READ COMMITTED
+
+Docstring `enqueue` тепер явно вимагає READ COMMITTED і пояснює механізм. Під час написання
+тесту з'ясувалась **точніша** поведінка, ніж передбачала знахідка: у `REPEATABLE READ` падає не
+наступний `SELECT`, а сам `INSERT … ON CONFLICT DO NOTHING` — PostgreSQL кидає `could not
+serialize access due to concurrent update`. Тобто режим відмови гучний, а не тихий, і дубля не
+виникає; docstring описує саме його. Повідомлення `NotFoundError` у залишковій гілці теж
+переписано так, щоб воно вказувало на isolation level.
+
+Тест: `test_queue.py::test_enqueue_outside_read_committed_fails_loudly_without_duplicating`
+(REPEATABLE READ → `DBAPIError`; далі READ COMMITTED на тому самому ключі ідемпотентний, у
+таблиці рівно один рядок). `docs/persistence/postgres.md` за карткою створюється у PR3 — вимогу
+до isolation level перенести туди разом із рештою transaction boundaries.
+
+### I-2 — index під `ORDER BY` у `claim`: **додано index** (рішення з виміром)
+
+Обрано не «зафіксувати свідомий вибір», а додати index, бо вимір показав не деградацію, а обвал
+плану. На 400 000 pending jobs (PostgreSQL 18, той самий запит `claim`, `LIMIT 3`):
+
+```text
+-- лише обов'язковий index картки (status, not_before, priority, job_id)
+ Limit (actual time=328.878..328.888 rows=3.00 loops=1)
+   ->  LockRows
+         ->  Sort  Sort Key: priority DESC, not_before, job_id
+               Sort Method: external merge  Disk: 18800kB
+               ->  Seq Scan on crawl_jobs (rows=400000)
+ Execution Time: 331.638 ms
+```
+
+Причина: `status IN ('pending','retry')` на **провідній** колонці не дає PostgreSQL читати index
+у порядку `priority DESC` — доводиться сортувати всю чергу. Тому status винесено у предикат
+partial index-у (міграція `0002_claim_index`):
+
+```sql
+CREATE INDEX ix_crawl_jobs_claimable_order ON crawl_jobs (priority DESC, not_before, job_id)
+    WHERE status IN ('pending', 'retry');
+```
+
+```text
+ Limit (actual time=0.133..0.163 rows=3.00 loops=1)
+   ->  LockRows
+         ->  Index Scan using ix_crawl_jobs_claimable_order on crawl_jobs
+               Index Cond: (not_before <= now())
+ Execution Time: 0.182 ms
+```
+
+331 мс → 0.18 мс (≈1800×). Обов'язковий index картки **лишається** (R-32: операторські вибірки і
+фільтри за `(status, not_before)`). Ціна нового index-у — запис у ще один btree на найгарячішій
+таблиці; вона обмежена тим, що index partial: рядок зникає з нього щойно job переходить у
+`leased/succeeded/quarantined`, тож розмір тримається на рівні глибини черги, а не історії (на
+тому ж наборі — 24 МБ проти 29 МБ у повного index-у при 400 k pending).
+
+Предикат будується з `CLAIMABLE_JOB_STATUSES` (константа `CLAIMABLE_PREDICATE`), тож index і
+`claim` не можуть розійтися; це зафіксовано unit-тестом
+`test_metadata.py::test_claimable_predicate_matches_statuses_used_by_claim` і перевіркою порядку
+колонок index-у в `test_mandatory_indexes_present`.
+
+### I-1 — mutation gap: `SKIP LOCKED` тепер має власний тест
+
+`test_queue.py::test_claim_uses_skip_locked_and_does_not_block_on_rows_locked_by_another_claimer`
+перевіряє дві незалежні половини:
+
+1. **текст SQL** — через `before_cursor_execute` збирається фактичний statement claim-у, і кожен
+   `FOR UPDATE` у ньому має містити `SKIP LOCKED`;
+2. **поведінку** — перший claimer тримає відкриту транзакцію із залоченим рядком, другий під
+   `SET LOCAL lock_timeout = '3s'` має одразу отримати **інші** jobs, а не чекати.
+
+Обидві половини перевірено мутацією `.with_for_update(skip_locked=True)` → `.with_for_update()`:
+перша дає `AssertionError` на тексті SQL, друга (з тимчасово вимкненою першою) —
+`LockNotAvailableError: canceling statement due to lock timeout`. Знахідку I-1 закрито: втрата
+`SKIP LOCKED` тепер червоніє assertion-ом, а не лише зростанням латентності.
+
+### Супутнє (не знахідка)
+
+Тести більше не зашивають номер head-ревізії: `migrations.head_revision()` читає його зі script
+directory, і `test_migrations.py`, `test_adversarial.py`, `test_cli_db.py` користуються ним —
+інакше кожна нова міграція (як `0002`) ламала б чужі тести.
+
+### Команди після виправлень
+
+```text
+$ uv sync --frozen
+Checked 60 packages in 4ms
+
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src
+All checks passed!
+150 files already formatted
+Success: no issues found in 60 source files
+exit=0
+
+$ uv run alembic upgrade head && uv run alembic check          # чиста БД `gate2`
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001_control_queue, WP-01A PR1: control plane, job queue, origin limiter, worker pools, audit log.
+INFO  [alembic.runtime.migration] Running upgrade 0001_control_queue -> 0002_claim_index, WP-01A PR1 (gate 2, I-2): partial index під hot path `claim` (§7.2).
+No new upgrade operations detected.
+exit=0
+
+$ uv run collector db migrate && uv run collector db migrate --check && uv run collector db roles
+migrated postgresql+asyncpg://collector:***@127.0.0.1:55433/gate2: 0002_claim_index -> 0002_claim_index
+partition created: audit_log_y2026m09
+partition created: audit_log_y2026m10
+partition created: audit_log_y2026m11
+partition created: audit_log_y2026m12
+No new upgrade operations detected.
+schema up to date: revision=0002_claim_index
+roles applied to postgresql+asyncpg://collector:***@127.0.0.1:55433/gate2 from roles.sql: collector_migrate, collector_scheduler, collector_fetcher, collector_parser, collector_projector, collector_translation, collector_api_ro, collector_export_ro
+exit=0
+
+$ uv run pytest -m "not live"
+SKIPPED [1] tests\unit\test_network_blocked.py:27: Windows: loopback потрібен asyncio
+587 passed, 1 skipped, 6 warnings in 73.90s (0:01:13)
+
+$ uv run pytest -m integration tests/integration/postgres            # testcontainers
+75 passed in 72.68s (0:01:12)
+
+$ COLLECTOR_TEST_POSTGRES_ADMIN_DSN=postgresql://collector:***@127.0.0.1:55433/postgres \
+  COLLECTOR_TEST_REQUIRE_DOCKER=1 uv run pytest -m integration tests/integration/postgres
+75 passed in 67.88s (0:01:07)
+```
+
+`downgrade base → upgrade head → check` пройдено на обох ревізіях без drift. Тестів після
+gate 2: **587 passed, 1 skipped** у `-m "not live"`, з них 75 integration (36 мої + 35
+тестувальника + 4 нові за знахідками) і 38 unit persistence.
+
+### Статус знахідок gate 2
+
+| # | Знахідка | Статус |
+|---|---|---|
+| L-1 | сирий `IntegrityError` з `request_scale` | fixed (`InvalidValueError` + 4 тести) |
+| L-2 | ідемпотентність `enqueue` вимагає READ COMMITTED | fixed (docstring + тест; уточнено режим відмови) |
+| L-3 | зміни у трьох тестових файлах WP-00 | resolved — owner-рішення оркестратора, зафіксовано у `docs/plan/deps/WP-01A-to-WP-00.md` |
+| I-1 | втрату `SKIP LOCKED` не ловив жоден assertion | fixed (тест із двох половин; обидві перевірені мутацією) |
+| I-2 | index не обслуговує `ORDER BY` у `claim` | fixed (міграція `0002_claim_index`, вимір 331 мс → 0.18 мс) |
+| I-3 | heartbeat у межах простроченого lease | accepted — контракт зафіксовано тестом тестувальника |
+| I-4 | ідемпотентність `audit_log` — best effort | accepted — дія ідемпотентна через unique `scale_commands.idempotency_key` |
+
 ## Що не перевірено
 
 - **CI job `integration-postgres` не запускався** — гілка не push-иться (правило 7 ролі). Job
@@ -259,8 +421,10 @@ unit від WP-01A; решта — WP-00/WP-01C).
 4. **testcontainers піднімає Ryuk** (`testcontainers/ryuk:0.8.1`) — ще один образ, який CI/dev
    тягне з Docker Hub. У CI обраний шлях без testcontainers (service container), тож ризик
    стосується лише локальних прогонів; `TESTCONTAINERS_RYUK_DISABLED=true` вимикає його.
-5. **`SET ROLE`-тести ролей** перевіряють GRANT, але не реальні login-користувачі (їх створює
-   оператор). Якщо оператор створить login поза членством у ролі, тести цього не спіймають.
+5. ~~**`SET ROLE`-тести ролей** перевіряють GRANT, але не реальні login-користувачі.~~
+   **Закрито на gate 2:** `tests/integration/postgres/test_role_connections.py` (тестувальник)
+   перевіряє всі 8 ролей через окремі login-з'єднання, включно з матрицею
+   `has_table_privilege` по всіх 13 таблицях.
 
 ## Як вимкнути або відкотити
 

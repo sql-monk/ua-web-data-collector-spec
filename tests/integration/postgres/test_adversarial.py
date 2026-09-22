@@ -39,6 +39,7 @@ from collector.persistence.postgres.errors import (
 from collector.persistence.postgres.migrations import (
     check_no_drift,
     current_revision,
+    head_revision,
     upgrade_to_head,
 )
 from collector.persistence.postgres.models import (
@@ -575,7 +576,7 @@ async def test_upgrade_head_twice_in_a_row_is_idempotent(
         async with engine.begin() as conn:
             await upgrade_to_head(conn)
         async with engine.connect() as conn:
-            assert await current_revision(conn) == "0001_control_queue"
+            assert await current_revision(conn) == head_revision()
             assert await check_no_drift(conn) == []
     finally:
         await engine.dispose()

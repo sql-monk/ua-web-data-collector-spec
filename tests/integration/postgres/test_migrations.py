@@ -15,6 +15,7 @@ from collector.persistence.postgres.migrations import (
     check_no_drift,
     current_revision,
     downgrade_to_base,
+    head_revision,
     upgrade_to_head,
 )
 from collector.persistence.postgres.models import Base
@@ -61,7 +62,7 @@ async def test_upgrade_check_downgrade_cycle_on_clean_database(
         async with engine.begin() as conn:
             await upgrade_to_head(conn)
         async with engine.connect() as conn:
-            assert await current_revision(conn) == "0001_control_queue"
+            assert await current_revision(conn) == head_revision()
             assert await check_no_drift(conn) == []
         assert EXPECTED_TABLES <= await _table_names(engine)
 

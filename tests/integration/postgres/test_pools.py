@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from collector.contracts import new_entity_id
 from collector.persistence.postgres.errors import (
     InvalidTransitionError,
+    InvalidValueError,
     NotFoundError,
     StaleRevisionError,
 )
@@ -272,3 +273,88 @@ async def test_instance_lifecycle_and_stale_detection(pg_session: AsyncSession) 
             await pools.heartbeat_instance(
                 pg_session, instance_id, slots_active=0, active_leases=0, pool_revision=1, now=late
             )
+
+
+async def test_invalid_scale_values_raise_domain_error_without_writes(
+    pg_session: AsyncSession,
+) -> None:
+    """L-1: невалідні значення → `InvalidValueError` до першого запису, не сирий
+    `IntegrityError` на CHECK; desired state, audit і команди лишаються незмінними."""
+    await _fetch_pool(pg_session)
+    bad_values = [
+        {"requested_replicas": 2, "requested_concurrency": 0},  # CHECK concurrency >= 1
+        {"requested_replicas": -1, "requested_concurrency": 8},  # CHECK replicas >= 0
+        {"requested_replicas": 99, "requested_concurrency": 8},  # поза max_replicas pool
+    ]
+    async with pg_session.begin():
+        for index, values in enumerate(bad_values):
+            with pytest.raises(InvalidValueError):
+                await pools.request_scale(
+                    pg_session,
+                    WorkerRole.FETCH,
+                    expected_revision=1,
+                    actor="op",
+                    reason="bad",
+                    idempotency_key=f"bad-{index}",
+                    now=T0,
+                    **values,
+                )
+        # Транзакція жива (не IntegrityError) — можна працювати далі в ній же.
+        pool = await pools.get_pool(pg_session, WorkerRole.FETCH)
+        assert pool is not None
+        assert (pool.revision, pool.desired_replicas, pool.desired_concurrency) == (1, 2, 8)
+        assert await pg_session.scalar(select(func.count()).select_from(ScaleCommand)) == 0
+        assert await pg_session.scalar(select(func.count()).select_from(AuditLog)) == 0
+
+        # Валідне значення після відхилених — проходить у тій самій транзакції.
+        ok = await pools.request_scale(
+            pg_session,
+            WorkerRole.FETCH,
+            expected_revision=1,
+            requested_replicas=3,
+            requested_concurrency=4,
+            actor="op",
+            reason="ok",
+            idempotency_key="ok",
+            now=T0,
+        )
+    assert (ok.status, ok.requested_replicas) == ("requested", 3)
+
+
+async def test_invalid_pool_desired_state_is_rejected_before_write(
+    pg_session: AsyncSession,
+) -> None:
+    """`upsert_pool` валідовує desired state (ті самі інваріанти, що й CHECK) до запису."""
+    invalid = [
+        pools.PoolDesiredState(desired_replicas=1, desired_concurrency=0, max_replicas=4),
+        pools.PoolDesiredState(desired_replicas=9, desired_concurrency=1, max_replicas=4),
+        pools.PoolDesiredState(
+            desired_replicas=1, desired_concurrency=1, max_replicas=0, min_replicas=2
+        ),
+        pools.PoolDesiredState(
+            desired_replicas=1, desired_concurrency=1, max_replicas=4, mode="turbo"
+        ),
+    ]
+    async with pg_session.begin():
+        for state in invalid:
+            with pytest.raises(InvalidValueError):
+                await pools.upsert_pool(
+                    pg_session,
+                    WorkerRole.PARSE,
+                    state,
+                    actor="op",
+                    reason="bad",
+                    expected_revision=None,
+                    now=T0,
+                )
+        assert await pools.get_pool(pg_session, WorkerRole.PARSE) is None
+        created = await pools.upsert_pool(
+            pg_session,
+            WorkerRole.PARSE,
+            pools.PoolDesiredState(desired_replicas=2, desired_concurrency=4, max_replicas=4),
+            actor="op",
+            reason="ok",
+            expected_revision=None,
+            now=T0,
+        )
+    assert created.revision == 1

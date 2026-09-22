@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from collector.contracts.enums import RouteState, SourceState
 from collector.persistence.postgres.models import Base
+from collector.persistence.postgres.models.queue import CLAIMABLE_JOB_STATUSES, CLAIMABLE_PREDICATE
 from collector.persistence.postgres.partitions import PARTITIONED_TABLES
 from collector.workers.roles import WorkerRole
 
@@ -62,6 +63,14 @@ def test_mandatory_indexes_present() -> None:
         actual = {tuple(c.name for c in ix.columns) for ix in table.indexes}
         assert expected <= actual, table_name
     crawl_jobs = Base.metadata.tables["crawl_jobs"]
+    claim_ix = next(ix for ix in crawl_jobs.indexes if ix.name == "ix_crawl_jobs_claimable_order")
+    # I-2: порядок колонок index-у має дослівно збігатися з ORDER BY у `claim`.
+    assert [str(e).removeprefix("crawl_jobs.") for e in claim_ix.expressions] == [
+        "priority DESC",
+        "not_before",
+        "job_id",
+    ]
+    assert str(claim_ix.dialect_options["postgresql"]["where"]) == CLAIMABLE_PREDICATE
     lease_ix = next(ix for ix in crawl_jobs.indexes if ix.name == "ix_crawl_jobs_lease_expires_at")
     assert "status = 'leased'" in str(lease_ix.dialect_options["postgresql"]["where"])
     assert "uq_crawl_jobs_idempotency_key" in {c.name for c in crawl_jobs.constraints}
@@ -85,6 +94,16 @@ def test_partitioned_tables_declare_partition_by_and_pk_includes_key() -> None:
         table = Base.metadata.tables[name]
         assert "created_at" in table.dialect_options["postgresql"]["partition_by"]
         assert "created_at" in {c.name for c in table.primary_key.columns}
+
+
+def test_claimable_predicate_matches_statuses_used_by_claim() -> None:
+    """Предикат partial index і статуси, які бере `claim`, не можуть розійтися (I-2)."""
+    for status in CLAIMABLE_JOB_STATUSES:
+        assert f"'{status}'" in CLAIMABLE_PREDICATE
+    assert CLAIMABLE_PREDICATE.startswith("status IN (")
+    assert "succeeded" not in CLAIMABLE_PREDICATE
+    assert "quarantined" not in CLAIMABLE_PREDICATE
+    assert "leased" not in CLAIMABLE_PREDICATE
 
 
 def test_revision_columns_on_versioned_resources() -> None:

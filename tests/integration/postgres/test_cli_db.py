@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from collector.cli import app
 from collector.persistence.postgres.config import PostgresSettings
+from collector.persistence.postgres.migrations import head_revision
 
 pytestmark = pytest.mark.integration
 
@@ -31,17 +32,17 @@ def test_db_migrate_check_and_roles_from_env(pg_empty_database: PostgresSettings
 
     migrate = runner.invoke(app, ["db", "migrate", "--partitions-ahead", "1"], env=env)
     assert migrate.exit_code == 0, migrate.output
-    assert "empty -> 0001_control_queue" in migrate.output
+    assert f"empty -> {head_revision()}" in migrate.output
     assert migrate.output.count("partition created: audit_log_y") == 2
     assert pg_empty_database.url.password not in migrate.output
 
     check_after = runner.invoke(app, ["db", "migrate", "--check"], env=env)
     assert check_after.exit_code == 0, check_after.output
-    assert "schema up to date: revision=0001_control_queue" in check_after.output
+    assert f"schema up to date: revision={head_revision()}" in check_after.output
 
     again = runner.invoke(app, ["db", "migrate"], env=env)
     assert again.exit_code == 0, again.output
-    assert "0001_control_queue -> 0001_control_queue" in again.output
+    assert f"{head_revision()} -> {head_revision()}" in again.output
 
     roles = runner.invoke(app, ["db", "roles"], env=env)
     assert roles.exit_code == 0, roles.output
@@ -59,7 +60,7 @@ def test_db_migrate_reads_dsn_file_over_inline(
     }
     result = runner.invoke(app, ["db", "migrate"], env=env)
     assert result.exit_code == 0, result.output
-    assert "-> 0001_control_queue" in result.output
+    assert f"-> {head_revision()}" in result.output
 
 
 def test_db_migrate_unreachable_server_exits_1_without_traceback() -> None:

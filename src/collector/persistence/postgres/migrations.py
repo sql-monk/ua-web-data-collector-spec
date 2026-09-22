@@ -89,6 +89,18 @@ async def check_no_drift(conn: AsyncConnection, *, ini_path: Path | None = None)
     return problems
 
 
+def head_revision(*, ini_path: Path | None = None) -> str:
+    """Ідентифікатор `head` зі script directory — щоб тести й діагностика не зашивали номер
+    останньої міграції (кожна нова ревізія інакше ламала б чужі перевірки)."""
+    from alembic.script import ScriptDirectory
+
+    revision = ScriptDirectory.from_config(alembic_config(ini_path)).get_current_head()
+    if revision is None:  # pragma: no cover - versions/ ніколи не порожній
+        msg = "у migrations/postgres/versions немає жодної ревізії"
+        raise MigrationsNotFoundError(msg)
+    return revision
+
+
 async def current_revision(conn: AsyncConnection) -> str | None:
     """Поточна ревізія з `alembic_version` (None — порожня БД)."""
     from alembic.runtime.migration import MigrationContext

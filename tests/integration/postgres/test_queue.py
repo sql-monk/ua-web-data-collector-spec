@@ -10,8 +10,9 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import event, func, select, text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from collector.persistence.postgres.errors import LeaseNotOwnedError
 from collector.persistence.postgres.models import CrawlJob, DeadLetter
@@ -20,6 +21,10 @@ from collector.persistence.postgres.repositories import queue
 pytestmark = pytest.mark.integration
 
 T0 = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
+
+
+class _RollbackProbe(Exception):
+    """Вихід із `session.begin()` без commit — транзакція після serialization error мертва."""
 
 
 async def _enqueue_many(sessions: async_sessionmaker[AsyncSession], count: int) -> list[UUID]:
@@ -217,3 +222,86 @@ async def test_operator_quarantine_and_complete_are_terminal(pg_session: AsyncSe
     async with pg_session.begin():
         with pytest.raises(LeaseNotOwnedError):
             await queue.heartbeat(pg_session, done.job_id, "w", 30, now=T0)
+
+
+async def test_claim_uses_skip_locked_and_does_not_block_on_rows_locked_by_another_claimer(
+    pg_engine: AsyncEngine,
+    pg_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """§7.2 вимагає саме `FOR UPDATE SKIP LOCKED` (мутація `SKIP LOCKED` → `FOR UPDATE` має
+    червоніти): другий claimer не чекає на рядок, заблокований відкритою транзакцією першого.
+
+    Перевіряється двома незалежними способами — текстом виконаного SQL і реальною поведінкою
+    під `lock_timeout` (без `SKIP LOCKED` другий claim впав би у `lock_not_available`).
+    """
+    await _enqueue_many(pg_sessions, 2)
+    statements: list[str] = []
+
+    async with pg_sessions() as holder, pg_sessions() as other:
+
+        def _record(conn: object, cursor: object, statement: str, *args: object) -> None:
+            statements.append(statement)
+
+        event.listen(pg_engine.sync_engine, "before_cursor_execute", _record)
+        try:
+            await holder.begin()
+            [first] = await queue.claim(holder, ["fetch"], "holder", 60, limit=1, now=T0)
+        finally:
+            event.remove(pg_engine.sync_engine, "before_cursor_execute", _record)
+
+        claim_sql = [s for s in statements if "FOR UPDATE" in s.upper()]
+        assert claim_sql, statements
+        assert all("SKIP LOCKED" in s.upper() for s in claim_sql), claim_sql
+
+        # Транзакція holder відкрита — рядок `first` під row lock.
+        async with other.begin():
+            await other.execute(text("SET LOCAL lock_timeout = '3s'"))
+            claimed = await queue.claim(other, ["fetch"], "other", 60, limit=5, now=T0)
+        assert [job.job_id for job in claimed] != []
+        assert first.job_id not in {job.job_id for job in claimed}
+        assert all(job.lease_owner == "other" for job in claimed)
+        await holder.rollback()
+
+
+async def test_enqueue_outside_read_committed_fails_loudly_without_duplicating(
+    pg_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Контракт docstring `enqueue`: ідемпотентність вимагає READ COMMITTED (L-2).
+
+    У `REPEATABLE READ` конкурентний commit того самого ключа робить `ON CONFLICT DO NOTHING`
+    несеріалізовним: PostgreSQL кидає `could not serialize access due to concurrent update`.
+    Важливо, що це гучна помилка транзакції, а не тихий дубль і не «зниклий» рядок — і що в
+    таблиці лишається рівно один job.
+    """
+    async with pg_sessions() as first, pg_sessions() as second:
+        try:
+            async with second.begin():
+                await second.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+                # Зафіксувати snapshot до чужого INSERT.
+                await second.execute(text("SELECT 1 FROM crawl_jobs LIMIT 1"))
+
+                async with first.begin():
+                    await queue.enqueue(
+                        first, queue.NewJob(job_type="fetch", idempotency_key="rr"), now=T0
+                    )
+
+                with pytest.raises(DBAPIError, match="could not serialize"):
+                    await queue.enqueue(
+                        second, queue.NewJob(job_type="fetch", idempotency_key="rr"), now=T0
+                    )
+                raise _RollbackProbe
+        except _RollbackProbe:
+            pass
+
+    # READ COMMITTED (default) на тому самому ключі — тихо й ідемпотентно.
+    async with pg_sessions() as third, third.begin():
+        again = await queue.enqueue(
+            third, queue.NewJob(job_type="fetch", idempotency_key="rr"), now=T0
+        )
+    assert again.idempotency_key == "rr"
+
+    async with pg_sessions() as session:
+        total = await session.scalar(
+            select(func.count()).select_from(CrawlJob).where(CrawlJob.idempotency_key == "rr")
+        )
+    assert total == 1

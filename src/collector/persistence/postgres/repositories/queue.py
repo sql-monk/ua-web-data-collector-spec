@@ -8,6 +8,14 @@ Transaction boundaries:
 - `retry`/`quarantine` пишуть `dead_letters` у тій самій транзакції, що й зміну статусу;
 - решта — один UPDATE із предикатом owner; викликач може об'єднувати їх з іншими записами.
 
+Claim і indexes: `claim` читає `ix_crawl_jobs_claimable_order` — partial index
+`(priority DESC, not_before, job_id) WHERE status IN ('pending','retry')` у точному порядку
+`ORDER BY` (міграція `0002_claim_index`); обов'язковий за карткою
+`ix_crawl_jobs_status_not_before_priority` лишається для операторських вибірок за
+`(status, not_before)`. `FOR UPDATE SKIP LOCKED` — не оптимізація, а вимога §7.2: без нього
+claimers серіалізуються на зайнятих рядках (тест `test_queue.py::
+test_claim_uses_skip_locked_and_does_not_block_on_rows_locked_by_another_claimer`).
+
 Lease-семантика: `heartbeat`/`complete`/`retry` виконуються лише для `status='leased' AND
 lease_owner=:owner`. Прострочений, але ще не відновлений lease власник може продовжити
 (нікому іншому job не належить); після `recover_expired_leases` або claim іншим worker owner
@@ -74,7 +82,18 @@ class BackoffPolicy:
 
 async def enqueue(session: AsyncSession, job: NewJob, *, now: datetime | None = None) -> CrawlJob:
     """Ставить job у чергу; повторний виклик з тим самим `idempotency_key` повертає існуючий
-    job без дубля (`INSERT ... ON CONFLICT DO NOTHING` + SELECT). Transaction boundary: викликач."""
+    job без дубля (`INSERT ... ON CONFLICT DO NOTHING` + SELECT).
+
+    Transaction boundary: викликач. **Вимога до isolation level: READ COMMITTED** (default
+    PostgreSQL). Ідемпотентність тримається на тому, що після `ON CONFLICT DO NOTHING` наступний
+    `SELECT` бере свіжий snapshot і бачить рядок, закомічений конкурентною транзакцією. У
+    `REPEATABLE READ`/`SERIALIZABLE` конкурентний commit того самого ключа робить
+    `ON CONFLICT DO NOTHING` несеріалізовним і PostgreSQL кидає `could not serialize access due
+    to concurrent update` — транзакцію доведеться повторити цілком. Дубля при цьому не
+    виникає, але викликач не має відкривати транзакцію з enqueue у вищому рівні ізоляції
+    (перевірено `test_queue.py::
+    test_enqueue_outside_read_committed_fails_loudly_without_duplicating`).
+    """
     current = resolve_now(now)
     values = {
         "job_id": new_entity_id(),
@@ -105,8 +124,11 @@ async def enqueue(session: AsyncSession, job: NewJob, *, now: datetime | None = 
         .where(CrawlJob.idempotency_key == job.idempotency_key)
         .execution_options(populate_existing=True)
     )
-    if existing is None:  # pragma: no cover - неможливо без DELETE між statement-ами
-        msg = f"job з idempotency_key={job.idempotency_key!r} зник між INSERT і SELECT"
+    if existing is None:
+        msg = (
+            f"job з idempotency_key={job.idempotency_key!r} не видно після ON CONFLICT: "
+            "транзакція має бути READ COMMITTED (див. docstring enqueue)"
+        )
         raise NotFoundError(msg)
     return existing
 

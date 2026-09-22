@@ -25,10 +25,12 @@ from collector.contracts import JsonObject, new_entity_id
 from collector.persistence.postgres.clock import resolve_now
 from collector.persistence.postgres.errors import (
     InvalidTransitionError,
+    InvalidValueError,
     NotFoundError,
     StaleRevisionError,
 )
 from collector.persistence.postgres.models import (
+    POOL_MODES,
     SCALE_COMMAND_TERMINAL,
     SCALE_COMMAND_TRANSITIONS,
     ScaleCommand,
@@ -57,6 +59,29 @@ class PoolDesiredState:
     mode: str = "manual"
     resource_profile: str = "default"
 
+    def validate(self) -> None:
+        """Ті самі інваріанти, що й CHECK `worker_pools` — але до першого запису (L-1)."""
+        if self.min_replicas < 0:
+            msg = f"min_replicas має бути >= 0, отримано {self.min_replicas}"
+            raise InvalidValueError(msg)
+        if self.max_replicas < self.min_replicas:
+            msg = (
+                f"max_replicas ({self.max_replicas}) має бути >= min_replicas ({self.min_replicas})"
+            )
+            raise InvalidValueError(msg)
+        if not self.min_replicas <= self.desired_replicas <= self.max_replicas:
+            msg = (
+                f"desired_replicas ({self.desired_replicas}) поза діапазоном "
+                f"[{self.min_replicas}, {self.max_replicas}]"
+            )
+            raise InvalidValueError(msg)
+        if self.desired_concurrency < 1:
+            msg = f"desired_concurrency має бути >= 1, отримано {self.desired_concurrency}"
+            raise InvalidValueError(msg)
+        if self.mode not in POOL_MODES:
+            msg = f"mode має бути одним із {POOL_MODES}, отримано {self.mode!r}"
+            raise InvalidValueError(msg)
+
 
 @dataclass(frozen=True, slots=True)
 class ObservedCapacity:
@@ -78,7 +103,11 @@ async def upsert_pool(
     now: datetime | None = None,
 ) -> WorkerPool:
     """Створює pool (`expected_revision=None`, revision=1) або оновлює desired state з
-    optimistic revision (`StaleRevisionError` при розбіжності)."""
+    optimistic revision (`StaleRevisionError` при розбіжності).
+
+    Невалідний desired state → `InvalidValueError` до будь-якого запису (L-1).
+    """
+    state.validate()
     current = resolve_now(now)
     if expected_revision is None:
         pool = WorkerPool(
@@ -307,12 +336,20 @@ async def request_scale(
     команд role + `audit_log` + `scale_commands(requested)`.
 
     Повторний виклик з тим самим `idempotency_key` повертає існуючу команду без змін;
-    stale `expected_revision` → `StaleRevisionError`; `orchestrator='compose'` заповнює
+    stale `expected_revision` → `StaleRevisionError`; значення поза інваріантами pool
+    (`requested_concurrency < 1`, replicas поза `min/max`) → `InvalidValueError` **до** будь-якого
+    запису, а не сирий `IntegrityError` на CHECK (L-1); `orchestrator='compose'` заповнює
     `cli_command` (exact CLI для awaiting_manual_apply), `'swarm'` — контролер застосує сам.
     """
     if orchestrator not in {"compose", "swarm"}:
         msg = f"orchestrator має бути compose|swarm, отримано {orchestrator!r}"
         raise ValueError(msg)
+    if requested_replicas < 0:
+        msg = f"requested_replicas має бути >= 0, отримано {requested_replicas}"
+        raise InvalidValueError(msg)
+    if requested_concurrency < 1:
+        msg = f"requested_concurrency має бути >= 1, отримано {requested_concurrency}"
+        raise InvalidValueError(msg)
     existing = await session.scalar(
         select(ScaleCommand).where(ScaleCommand.idempotency_key == idempotency_key)
     )
@@ -326,6 +363,13 @@ async def request_scale(
     )
     if pool is None:
         await _raise_stale_or_missing_pool(session, role, expected_revision)
+    if not pool.min_replicas <= requested_replicas <= pool.max_replicas:
+        # Перевірка після lock: межі беруться з поточного desired state pool (L-1).
+        msg = (
+            f"worker pool {role.value!r}: requested_replicas ({requested_replicas}) поза "
+            f"[{pool.min_replicas}, {pool.max_replicas}]"
+        )
+        raise InvalidValueError(msg)
     before: JsonObject = {
         "desired_replicas": pool.desired_replicas,
         "desired_concurrency": pool.desired_concurrency,

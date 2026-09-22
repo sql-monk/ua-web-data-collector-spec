@@ -5,7 +5,7 @@
 | Від | WP-01A PR1 (`wp/01a-1-control-queue`) |
 | До | WP-00 (owner `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `docker-compose.yml`/`Dockerfile` PR2) |
 | Файли | `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `tests/unit/test_foundation_config.py` (змінено в branch WP-01A за прецедентом WP-01C), `docker-compose.yml` (запит), `Dockerfile` (запит) |
-| Стан | п.1 — applied у `wp/01a-1-control-queue` (потребує підтвердження owner WP-00 на gate); п.2–3 — open, для WP-00 PR2 |
+| Стан | п.1 — **resolved**: підтверджено оркестратором на gate 2 як owner-рішення (звіт `docs/plan/reports/WP-01A/testing-pr1.md`, знахідка L-3); п.2–3 — open, для WP-00 PR2 |
 
 ## 1. CLI-контракт: `db migrate` більше не стаб, група `db` має підкоманду `roles`
 
@@ -25,9 +25,12 @@
 
 Зміни мінімальні (5 рядків + коментарі з посиланням на цей файл) і зроблені прямо у branch
 WP-01A за прецедентом `docs/plan/deps/WP-01C-to-WP-00.md` (п.1–2 «resolved у branch за
-рішенням оркестратора»), щоб `uv run pytest -m "not live"` лишався зеленим. Якщо owner WP-00
-воліє інший спосіб (напр. окремий allowlist «реалізованих команд» у adversarial-тесті) —
-готові переробити на gate.
+рішенням оркестратора»), щоб `uv run pytest -m "not live"` лишався зеленим.
+
+**Стан п.1 — `resolved`.** Незалежне тестування (gate 2) винесло ці зміни окремою знахідкою
+L-3 («процесна, не технічна: жоден тест не послаблено — навпаки, додано покриття
+`db migrate`/`db roles`»), і оркестратор підтвердив їх як owner-рішення. Додаткових дій від
+WP-00 за цим пунктом не потрібно.
 
 Поведінка нових команд, яку WP-00 може перевіряти у своїх контрактних тестах:
 

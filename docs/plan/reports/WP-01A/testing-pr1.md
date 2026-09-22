@@ -231,9 +231,9 @@ login-з'єднання** (закриває «Ризик 5» звіту реал
 `ValueError`/`InvalidTransitionError` у `request_scale`/`upsert_pool` до першого UPDATE.
 
 **L-2. Ідемпотентність `enqueue` залежить від READ COMMITTED** —
-`src/collector/persistence/postgres/repositories/queue.py:75` (`enqueue`). `INSERT … ON CONFLICT DO NOTHING`
-+ наступний `SELECT` бачить чужий щойно закомічений рядок лише тому, що кожен statement у READ
-COMMITTED бере свіжий snapshot. Якщо викликач відкриє транзакцію в `REPEATABLE READ`, шлях
+`src/collector/persistence/postgres/repositories/queue.py:75` (`enqueue`). `INSERT … ON CONFLICT
+DO NOTHING` і наступний `SELECT` бачать чужий щойно закомічений рядок лише тому, що кожен
+statement у READ COMMITTED бере свіжий snapshot. Якщо викликач відкриє транзакцію в `REPEATABLE READ`, шлях
 впаде у `NotFoundError` («job … зник між INSERT і SELECT»). Перевірено: у READ COMMITTED
 6 конкурентних сесій дають рівно один рядок
 (`test_concurrent_enqueue_of_same_key_yields_one_row_without_unique_violation`). Достатньо

@@ -8,12 +8,16 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from collector.persistence.postgres.clock import resolve_now
+from collector.persistence.postgres.errors import InvalidValueError
 from collector.persistence.postgres.models import (
     SCALE_COMMAND_STATUSES,
     SCALE_COMMAND_TERMINAL,
     SCALE_COMMAND_TRANSITIONS,
 )
-from collector.persistence.postgres.repositories.pools import INSTANCE_TRANSITIONS
+from collector.persistence.postgres.repositories.pools import (
+    INSTANCE_TRANSITIONS,
+    PoolDesiredState,
+)
 from collector.persistence.postgres.repositories.queue import BackoffPolicy
 
 
@@ -65,3 +69,27 @@ def test_resolve_now_requires_aware_utc() -> None:
     assert resolve_now(None).tzinfo is UTC
     with pytest.raises(ValueError, match="aware"):
         resolve_now(datetime(2026, 9, 22, 12))  # naive навмисно
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        PoolDesiredState(desired_replicas=1, desired_concurrency=0, max_replicas=4),
+        PoolDesiredState(desired_replicas=5, desired_concurrency=1, max_replicas=4),
+        PoolDesiredState(desired_replicas=1, desired_concurrency=1, max_replicas=4, min_replicas=2),
+        PoolDesiredState(
+            desired_replicas=1, desired_concurrency=1, max_replicas=4, min_replicas=-1
+        ),
+        PoolDesiredState(desired_replicas=1, desired_concurrency=1, max_replicas=4, mode="turbo"),
+    ],
+)
+def test_pool_desired_state_validation_rejects_invalid_values(state: PoolDesiredState) -> None:
+    """L-1: інваріанти перевіряються у репозиторії, а не лише CHECK-ами БД."""
+    with pytest.raises(InvalidValueError):
+        state.validate()
+
+
+def test_pool_desired_state_validation_accepts_scale_to_zero() -> None:
+    PoolDesiredState(
+        desired_replicas=0, desired_concurrency=1, max_replicas=4, mode="autoscale"
+    ).validate()

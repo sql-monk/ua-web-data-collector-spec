@@ -46,6 +46,11 @@ CRAWL_RUN_KINDS: tuple[str, ...] = ("full", "incremental", "replay", "backfill")
 CRAWL_RUN_STATUSES: tuple[str, ...] = ("running", "succeeded", "failed", "cancelled")
 JOB_STATUSES: tuple[str, ...] = ("pending", "leased", "succeeded", "retry", "quarantined")
 CLAIMABLE_JOB_STATUSES: tuple[str, ...] = ("pending", "retry")
+CLAIMABLE_PREDICATE = "status IN ({})".format(
+    ", ".join(f"'{status}'" for status in CLAIMABLE_JOB_STATUSES)
+)
+"""Предикат partial index `ix_crawl_jobs_claimable_order`; має збігатися зі статусами, які
+бере `repositories.queue.claim`, інакше index перестане обслуговувати hot path черги."""
 DEAD_LETTER_REASONS: tuple[str, ...] = ("max_attempts", "quarantine")
 JOB_ARGS_MAX_BYTES = 8 * 1024
 
@@ -93,8 +98,20 @@ class CrawlJob(Base):
             "(status = 'leased') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)",
             name="lease_consistent",
         ),
+        # Index картки/R-32: операторські вибірки і фільтри за (status, not_before).
         Index(
             "ix_crawl_jobs_status_not_before_priority", "status", "not_before", "priority", "job_id"
+        ),
+        # Hot path `claim` (§7.2): partial index лише по claimable-рядках, у точному порядку
+        # `ORDER BY priority DESC, not_before, job_id`. Status винесено у предикат, бо з
+        # `status IN (...)` на провідній колонці PostgreSQL не може читати index у потрібному
+        # порядку і сортує всю чергу (вимір — звіт PR1, «Виправлення після gate 2»).
+        Index(
+            "ix_crawl_jobs_claimable_order",
+            text("priority DESC"),
+            "not_before",
+            "job_id",
+            postgresql_where=text(CLAIMABLE_PREDICATE),
         ),
         Index(
             "ix_crawl_jobs_lease_expires_at",
