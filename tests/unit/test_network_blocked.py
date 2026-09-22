@@ -54,3 +54,16 @@ async def test_asyncio_event_loop_works_under_network_block() -> None:
     """Event loop створюється і працює попри блокування мережі (Windows socketpair)."""
     await asyncio.sleep(0)
     assert asyncio.get_running_loop().is_running()
+
+
+def test_asyncio_run_in_sync_test_is_blocked_too() -> None:
+    """`asyncio.run()` поза pytest-asyncio (патерн CLI під CliRunner) теж під блоком мережі.
+
+    На Windows це доводить `WindowsSelectorEventLoopPolicy` з `pytest_configure`:
+    default Proactor loop минав би `socket.connect` через ConnectEx.
+    """
+    with pytest.raises(BaseException) as excinfo:  # noqa: B017 — тип перевіряється нижче
+        asyncio.run(asyncio.wait_for(asyncio.open_connection(NON_LOOPBACK_HOST, 80), timeout=0.5))
+    assert isinstance(excinfo.value, BLOCKED_ERRORS), repr(excinfo.value)
+    if sys.platform == "win32":
+        assert isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsSelectorEventLoopPolicy)

@@ -69,8 +69,12 @@ def test_package_is_typed_and_python_pinned() -> None:
 def test_foundation_dependencies_exclude_domain_libraries() -> None:
     deps = [d.lower() for d in PYPROJECT["project"]["dependencies"]]
     dev = [d.lower() for d in PYPROJECT["dependency-groups"]["dev"]]
+    # Заборона картки стосується runtime [project.dependencies]; у dev-групі httpx дозволений
+    # лише для тестів мережевої політики (коментар у pyproject), решта — і там заборонена.
     for forbidden in FORBIDDEN_FOUNDATION_DEPS:
-        assert not any(d.startswith(forbidden) for d in deps + dev), forbidden
+        assert not any(d.startswith(forbidden) for d in deps), forbidden
+        if forbidden != "httpx":
+            assert not any(d.startswith(forbidden) for d in dev), forbidden
     assert any(d.startswith("pydantic>=2") for d in deps)
     for required in (
         "ruff",

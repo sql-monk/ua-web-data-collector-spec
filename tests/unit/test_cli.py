@@ -78,9 +78,13 @@ def test_worker_rejects_unknown_role() -> None:
     assert "not implemented" not in result.output
 
 
-def test_no_args_prints_help() -> None:
-    result = runner.invoke(app, [])
+@pytest.mark.parametrize("argv", [[], ["db"], ["release"]], ids=["root", "db", "release"])
+def test_group_without_subcommand_prints_help_with_exit_0(argv: list[str]) -> None:
+    """Виклик групи без підкоманди — не стаб і не usage-помилка: help, код 0."""
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0, result.output
     assert "Usage: collector" in result.output
+    assert "not implemented" not in result.output
 
 
 def test_version_prints_package_git_sha_and_schema(monkeypatch: pytest.MonkeyPatch) -> None:

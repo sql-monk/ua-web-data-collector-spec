@@ -20,7 +20,6 @@ NOT_IMPLEMENTED_EXIT_CODE = 2
 app = typer.Typer(
     name="collector",
     help="UA Web Data Collector — CLI для workers, API, міграцій, e2e і releases (§16.2).",
-    no_args_is_help=True,
     add_completion=False,
     # Plain-text help (без rich): детермінований вивід у CI/Docker логах і тестах.
     rich_markup_mode=None,
@@ -31,6 +30,21 @@ db_app = typer.Typer(
 release_app = typer.Typer(help="Immutable dataset releases (§9.9); owner — WP-11A.")
 app.add_typer(db_app, name="db")
 app.add_typer(release_app, name="release")
+
+
+def _help_when_no_subcommand(ctx: typer.Context) -> None:
+    """Група без підкоманди друкує help і завершується кодом 0.
+
+    Click `no_args_is_help` дає код 2 — той самий, що й стаби «not implemented»;
+    тут виклик без підкоманди — не помилка і не стаб.
+    """
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(code=0)
+
+
+for _group in (app, db_app, release_app):
+    _group.callback(invoke_without_command=True)(_help_when_no_subcommand)
 
 
 def not_implemented(owner: str) -> NoReturn:

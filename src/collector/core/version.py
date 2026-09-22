@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from importlib import metadata
 
 from pydantic import BaseModel, ConfigDict
@@ -41,9 +42,9 @@ def package_version(distribution: str = "collector") -> str:
         return "0.0.0+unknown"
 
 
-def git_sha(environ: os._Environ[str] | dict[str, str] | None = None) -> str:
+def git_sha(environ: Mapping[str, str] | None = None) -> str:
     """Git SHA з env `COLLECTOR_GIT_SHA` (задає CI/Docker build) або `unknown`."""
-    env = os.environ if environ is None else environ
+    env: Mapping[str, str] = os.environ if environ is None else environ
     value = env.get(GIT_SHA_ENV, "").strip()
     return value or UNKNOWN_GIT_SHA
 

@@ -10,12 +10,17 @@
 - `live`: socket увімкнено; такі тести запускаються лише явно (`-m live`) з дозволу
   користувача і ніколи не входять у `pytest -m "not live"`.
 
-Event loop для async-тестів — завжди `SelectorEventLoop` (hook `pytest_asyncio_loop_factories`).
+Event loop для async-тестів — завжди `SelectorEventLoop`: hook `pytest_asyncio_loop_factories`
+для тестів pytest-asyncio і, на Windows, `WindowsSelectorEventLoopPolicy` у `pytest_configure`
+для `asyncio.run(...)` у sync-тестах/helpers (напр. CLI-команди під `CliRunner`).
 На Windows default `ProactorEventLoop` з'єднується через `_overlapped.ConnectEx`, минаючи
 `socket.connect`, тому `asyncio.open_connection`/`httpx.AsyncClient` обходили б блокування
 у режимі allow-hosts. Selector loop іде через `sock_connect` → `socket.connect`, і асинхронний
-шлях блокується так само, як синхронний. Ціна: на Windows selector loop не підтримує
-asyncio subprocess/pipes — тестам, що цього потребують, робити окремий loop явно.
+шлях блокується так само, як синхронний. Межі: (а) на Windows selector loop не підтримує
+asyncio subprocess/pipes — тестам, що цього потребують, робити окремий loop явно;
+(б) код, що ЯВНО створює `asyncio.ProactorEventLoop()` / `WindowsProactorEventLoopPolicy()`,
+policy не покриває — на Windows такий тест обійде блок мережі; у CI (Linux) діє повний
+`disable_socket`, тож витік лишається локальним.
 
 Відомі межі pytest-socket у режимі allow-hosts (integration/e2e; на Windows — усі тести):
 не перехоплюються `socket.connect_ex`, UDP `sendto`, `socket.getaddrinfo` (DNS-резолв імен)
@@ -48,6 +53,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: Iterable[pytest.
             item.add_marker(pytest.mark.enable_socket)
         elif _is_loopback_level(item) or IS_WINDOWS:
             item.add_marker(pytest.mark.allow_hosts(list(LOOPBACK_HOSTS)))
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Windows: selector policy і для `asyncio.run()` поза pytest-asyncio (див. docstring).
+
+    Policy API asyncio deprecated з Python 3.14; проєкт pinned `<3.14` (pyproject), при
+    переході на 3.14 замінити на `asyncio.Runner(loop_factory=...)` у місцях виклику.
+    """
+    if IS_WINDOWS:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def pytest_asyncio_loop_factories(

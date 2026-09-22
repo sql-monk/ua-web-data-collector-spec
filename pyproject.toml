@@ -19,11 +19,16 @@ collector = "collector.cli:app"
 
 [dependency-groups]
 dev = [
+  # httpx — лише для тестів мережевої політики (tests/unit/test_network_block_adversarial.py);
+  # як runtime-залежність його додає WP-02 у [project.dependencies].
+  "httpx>=0.28",
   "mypy>=1.17",
   "pre-commit>=4.3",
   "pytest>=8.4",
   "pytest-asyncio>=1.1",
   "pytest-socket>=0.7",
+  # pyyaml — tests/unit/test_foundation_config.py читає ci.yml.
+  "pyyaml>=6.0",
   "respx>=0.22",
   "ruff>=0.13",
   "types-pyyaml>=6.0",
@@ -46,8 +51,9 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-# Правила безпеки (S) обов'язкові лише для src; у тестах assert та subprocess дозволені.
-"tests/**" = ["S"]
+# У тестах дозволені лише assert (S101) і subprocess без shell (S603, S607);
+# решта S-правил (hardcoded passwords S105–S107, yaml.load S506, ...) діє і для tests.
+"tests/**" = ["S101", "S603", "S607"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["collector"]

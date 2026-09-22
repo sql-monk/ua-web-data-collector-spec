@@ -2,14 +2,16 @@
 # Secrets — лише з GitHub Environments/Actions Secrets; у файлі нічого не hardcode.
 name: ci
 
+# push лише для main (PR з wp/** покриває pull_request — без подвійного прогону);
+# на main прогони не скасовуються, щоб кожен merge commit мав завершений CI (§18).
 on:
   push:
-    branches: [main, "wp/**"]
+    branches: [main]
   pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
