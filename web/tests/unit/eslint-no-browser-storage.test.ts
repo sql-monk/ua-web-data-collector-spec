@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import { ESLint, Linter } from 'eslint';
 import { beforeAll, describe, expect, it } from 'vitest';
 
@@ -76,5 +79,25 @@ describe('ESLint-заборона browser storage (§13)', () => {
       .flatMap((r) => r.messages.map((m) => ({ file: r.filePath, ruleId: m.ruleId })))
       .filter((m) => (STORAGE_RULES as readonly string[]).includes(m.ruleId ?? ''));
     expect(violations).toEqual([]);
+  });
+
+  /**
+   * Відома межа (зафіксована тестувальником WP-00 PR3): правила `no-restricted-globals`/
+   * `no-restricted-properties`/`no-restricted-syntax` синтаксичні — вони бачать лише
+   * `localStorage`, `window.localStorage`, `window['localStorage']`. Присвоєння в проміжну
+   * змінну (`const w = window; w.localStorage…`, `window.top!.localStorage`,
+   * `globalThis as unknown as {localStorage}`) ESLint не ловить і зловити не може без
+   * type-aware правила на тип `Storage`.
+   *
+   * Тому статична заборона не є єдиним бар'єром: `tests/e2e/smoke.spec.ts` перевіряє у
+   * реальному браузері, що після рендеру застосунок нічого не поклав у storage. Цей тест
+   * не дає прибрати runtime-страховку, доки статичне правило обходиться alias-ом.
+   */
+  it('runtime-страховка проти alias-обходу правила існує в e2e', async () => {
+    const spec = await readFile(join(projectRoot, 'tests', 'e2e', 'smoke.spec.ts'), 'utf8');
+
+    expect(spec).toMatch(/localStorage\.length/);
+    expect(spec).toMatch(/sessionStorage\.length/);
+    expect(spec).toMatch(/\{ local: 0, session: 0 \}/);
   });
 });
