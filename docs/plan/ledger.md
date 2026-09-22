@@ -17,7 +17,7 @@
 
 | WP | Стан | Примітка |
 |---|---|---|
-| WP-01A | testing pass → fix (PR1) | 576 + 71 integration tests; матриця прав 8 ролей БД; `reports/WP-01A/testing-pr1.md` |
+| WP-01A | code_review (PR1) | gate 2 pass + 4 low fixed; 587 + 75 integration tests; partial claim index (331 ms → 0.18 ms) |
 | WP-01B | pending | після WP-01A |
 | WP-01D | pending | після WP-00, WP-01A |
 | WP-02 | pending | після WP-01A |
