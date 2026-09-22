@@ -8,5 +8,8 @@
 !README.md
 !src/
 !docs/research/source-registry.yaml
+# Alembic (WP-01A): ще не існують у main; COPY у Dockerfile опційний.
+!alembic.ini
+!migrations/
 src/**/__pycache__/
 src/**/*.pyc

@@ -38,6 +38,9 @@ SECRET_CONSUMERS: dict[str, set[str]] = {
     "mongo_keyfile": {"mongo"},
     "minio_root_user": {"minio"},
     "minio_root_password": {"minio"},
+    # DSN міграційної ролі — лише one-shot `migrate-postgres` (approved dependency WP-01A;
+    # §13: migration role не використовується runtime-процесами).
+    "postgres_dsn": {"migrate-postgres"},
 }
 COMPONENT_NAMES = ("postgres", "mongo", "minio")
 ONE_SHOTS = {"migrate-postgres", "ensure-mongo"}

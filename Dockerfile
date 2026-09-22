@@ -76,6 +76,16 @@ COPY --from=builder --chown=root:root /opt/collector /opt/collector
 # зробив би каталог непрохідним). Читається non-root процесом, rootfs read-only.
 COPY --chown=root:root --chmod=0644 docs/research/source-registry.yaml /app/config/source-registry.yaml
 
+# Alembic-конфіг і міграції (approved dependency WP-01A): `collector db migrate` шукає
+# `alembic.ini` через `COLLECTOR_ALEMBIC_INI`, `migrations/postgres` — відносно нього.
+# Файлів ще немає в main, тому COPY опційний: `[i]`/`[s]` — glob, який не матчиться, доки
+# файл/тека відсутні, і BuildKit тоді робить крок no-op (перевірено: build зелений без них).
+# Цей Dockerfile і так вимагає BuildKit (`# syntax=`, `--mount=type=cache`), тому поведінка
+# legacy-білдера («no source files») тут не застосовна. Після merge WP-01A PR1 файли
+# з'являються в контексті без зміни Dockerfile (`.dockerignore` їх уже дозволяє).
+COPY --chown=root:root alembic.in[i] /app/
+COPY --chown=root:root migration[s]/ /app/migrations/
+
 # TMPDIR/HOME → /tmp: tmpfs у Compose; read-only rootfs (§7.5) — усі тимчасові файли лише тут.
 ENV PATH="/opt/collector/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
@@ -83,6 +93,7 @@ ENV PATH="/opt/collector/bin:${PATH}" \
     PYTHONUTF8=1 \
     COLLECTOR_GIT_SHA="${COLLECTOR_GIT_SHA}" \
     COLLECTOR_SOURCE_REGISTRY=/app/config/source-registry.yaml \
+    COLLECTOR_ALEMBIC_INI=/app/alembic.ini \
     TMPDIR=/tmp \
     HOME=/tmp
 

@@ -50,6 +50,19 @@ for example in "$here"/*.example; do
       random_keyfile > "$target"; echo "gen   $name (random keyfile)" ;;
     *_password)
       random_hex > "$target"; echo "gen   $name (random)" ;;
+    postgres_dsn)
+      # DSN міграційної ролі будується з уже згенерованого postgres_password (той самий
+      # пароль, що його читає Postgres із POSTGRES_PASSWORD_FILE).
+      if [ ! -e "$here/postgres_password" ]; then
+        random_hex > "$here/postgres_password"
+        chmod 0644 "$here/postgres_password"
+        echo "gen   postgres_password (random, для DSN)"
+      fi
+      printf 'postgresql://%s:%s@%s:%s/%s\n' \
+        "${POSTGRES_USER:-collector}" "$(cat "$here/postgres_password")" \
+        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}" \
+        > "$target"
+      echo "gen   $name (з postgres_password)" ;;
     *)
       tr -d '\r' < "$example" > "$target"; echo "copy  $name (from example — non-secret)" ;;
   esac

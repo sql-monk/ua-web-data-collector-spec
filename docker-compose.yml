@@ -158,6 +158,10 @@ services:
       - postgres_password
     volumes:
       - postgres-data:/var/lib/postgresql
+      # NOLOGIN group-ролі §13 при першому старті кластера (approved dependency WP-01A):
+      # SQL-файли належать WP-01A і з'являться після merge WP-01A PR1; тека порожня — Postgres
+      # просто не виконує нічого. Read-only bind, не named volume: це конфігурація з репозиторію.
+      - ./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro
     networks:
       - backend
     healthcheck:
@@ -271,12 +275,19 @@ services:
   # -------------------------------------------------------------------------------------------
 
   migrate-postgres:
-    # Стаб WP-00: перевіряє з'єднання, «no migrations yet; owner WP-01A». WP-01A замінює
-    # command на `alembic upgrade head` (§16.2) із migration role (§13).
+    # Стаб WP-00: перевіряє з'єднання, «no migrations yet; owner WP-01A». WP-01A замінює тіло
+    # `collector db migrate` на Alembic (§16.2) із migration role (§13).
     <<: *collector-runtime
     profiles: [core]
     restart: "no"
-    command: ["collector", "db", "migrate"]
+    command: ["collector", "db", "migrate"]  # + collector db roles після merge WP-01A PR1
+    environment:
+      <<: *collector-env
+      # DSN міграційної ролі — лише цьому one-shot (§13: migration role не використовується
+      # runtime-процесами). Per-role DSN для api/workers додають WP-01A/WP-01D.
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn
+    secrets:
+      - postgres_dsn
     networks:
       - backend
     depends_on:
@@ -560,6 +571,10 @@ volumes:
 secrets:
   postgres_password:
     file: ./deploy/compose/secrets/postgres_password
+  # DSN міграційної ролі (approved dependency WP-01A): `collector db migrate` читає його з
+  # `COLLECTOR_POSTGRES_DSN_FILE`; пароль не потрапляє в `environment`/`docker inspect`.
+  postgres_dsn:
+    file: ./deploy/compose/secrets/postgres_dsn
   mongo_root_password:
     file: ./deploy/compose/secrets/mongo_root_password
   mongo_keyfile:

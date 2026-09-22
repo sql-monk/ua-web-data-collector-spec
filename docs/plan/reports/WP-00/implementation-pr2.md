@@ -7,7 +7,7 @@
 | Картка | `docs/plan/cards/WP-00.md`, розділ «PR2» + «Спільні правила» |
 | Розділи ТЗ | §1 п.8/10, §7.5, §7.6, §8, §13, §16.1 п.14, §16.2, §16.3, FR-030, FR-035; REVIEW.md R-51, R-55; ADR-0001 |
 | Середовище | Windows 11, Docker Desktop 29.8.0 (Linux containers), Compose v5.5.1, uv 0.12.13, CPython 3.13.9; Docker Scout 1.24 (SBOM/CVE локально); `syft`/`trivy` локально відсутні |
-| Commits | `d0360e3 feat(wp-00): Docker image collector, Compose profiles, health stub, one-shots (PR2)` + `f6ae1c2 docs(wp-00): PR2 implementation report, compose render skip message`; після gate 2 — `71f5903 fix(wp-00): gate 2 — mongo healthcheck init-phase, trivy CRITICAL, COPY chmod, profiles docs`; після gate 3 — `fix(wp-00): gate 3 — IPv4 mongo healthcheck, CI health assert, minio hardening, lazy imports, random secrets` |
+| Commits | `d0360e3 feat(wp-00): Docker image collector, Compose profiles, health stub, one-shots (PR2)` + `f6ae1c2 docs(wp-00): PR2 implementation report, compose render skip message`; після gate 2 — `71f5903 fix(wp-00): gate 2 — mongo healthcheck init-phase, trivy CRITICAL, COPY chmod, profiles docs`; після gate 3 — `eb280a6 fix(wp-00): gate 3 — …`; approved dependency WP-01A — `feat(wp-00): postgres init mount and DSN secret for WP-01A` |
 
 ## Що зроблено
 
@@ -594,4 +594,79 @@ $ uv run pre-commit run --all-files
 11 hooks Passed
 $ uv run pytest -m "not live" (після додавання tests/unit/test_gate3_fixes.py)
 234 passed, 1 skipped
+```
+
+## Approved dependency WP-01A (після зрізу пострев'ю)
+
+`docs/plan/deps/WP-01A-to-WP-00.md`, п.2–3 — ухвалено оркестратором і внесено **після** HEAD
+`eb280a6`, на якому працював пострев'юер: зміни цього розділу відсутні у `spec-review-pr2.md`.
+
+| # | Запит WP-01A | Статус | Реалізація |
+|---|---|---|---|
+| 2a | digest `postgres:18@sha256:86c951e0…` (той самий, що в CI/testcontainers WP-01A) | **вже був** | Digest у `docker-compose.yml` від початку PR2 збігається символ у символ; `docker inspect` підтверджує (`Image=postgres:18@sha256:86c951e0…`). |
+| 2b | mount `./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro` | **fixed** | Read-only bind; тека `deploy/compose/postgres/init/` з `.gitkeep` і `README.md` (пояснює: SQL ролей §13 належить WP-01A і з'явиться після merge його PR1; entrypoint виконує вміст лише коли data directory порожня). WP-00 SQL не копіює — перевірено, у теці лише `.gitkeep`/`README.md`. Тест `test_postgres_init_scripts_are_mounted_read_only_for_wp_01a`. |
+| 2c | `COLLECTOR_POSTGRES_DSN_FILE` як Docker secret | **fixed** | Secret `postgres_dsn` (`deploy/compose/secrets/postgres_dsn` + `.example`), змонтований **лише** у `migrate-postgres` (§13: migration role не використовується runtime-процесами; per-role DSN для api/workers додають WP-01A/WP-01D — інші контейнери не мають цього mount, перевірено `docker inspect`). `init-secrets.sh` не копіює приклад, а будує DSN із того самого згенерованого `postgres_password` (SEC L-3: жодних default credentials). Тест `test_migration_dsn_secret_is_scoped_to_the_one_shot`. |
+| 2d | `migrate-postgres` = `collector db migrate && collector db roles` | **частково, свідомо** | Команда лишається `["collector", "db", "migrate"]` з коментарем `# + collector db roles після merge WP-01A PR1`: команди `db roles` ще немає в `main`, додавання зламало б `up --wait` (usage error Click). Тест фіксує і команду, і наявність коментаря. |
+| 3 | `alembic.ini` і `migrations/` в image | **fixed** (опційний COPY) | `COPY alembic.in[i] /app/` і `COPY migration[s]/ /app/migrations/` + `ENV COLLECTOR_ALEMBIC_INI=/app/alembic.ini`; `.dockerignore` дозволяє обидва шляхи. **Чому саме такий варіант:** звичайний `COPY alembic.ini` ламає build у `main` (файлу немає), а glob, що не матчиться, BuildKit трактує як no-op — перевірено обидва напрями: без файлів build зелений і `/app` містить лише `config/`; з тимчасовими `alembic.ini` + `migrations/postgres/env.py` вони потрапляють у `/app/alembic.ini` і `/app/migrations/postgres/env.py`. Обмеження: потрібен BuildKit — цей Dockerfile і так його вимагає (`# syntax=`, `--mount=type=cache`), тож legacy-білдер («no source files») не застосовний. Після merge WP-01A PR1 файли потрапляють в image **без зміни Dockerfile**. Тест `test_dockerfile_optionally_copies_alembic_and_migrations`. |
+
+**Для ADR-0002** (файл у момент цієї правки редагував паралельний агент етапу docs, тому
+абзац не вносився, щоб не зачепити його незакомічені зміни — внести при merge docs-коміту):
+
+```markdown
+### Approved dependency WP-01A (після gate 3, дата 2026-09-22)
+
+`docs/plan/deps/WP-01A-to-WP-00.md`, п.2–3 (ухвалено оркестратором): `postgres` монтує
+`./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro` (SQL ролей §13 — власність
+WP-01A, з'явиться після merge його PR1; тека у WP-00 порожня); digest `postgres:18@sha256:86c951e0…`
+збігається з CI/testcontainers WP-01A; `migrate-postgres` отримує Docker secret `postgres_dsn`
+через `COLLECTOR_POSTGRES_DSN_FILE` — **лише цей one-shot** (§13: migration role не
+використовується runtime-процесами; per-role DSN для api/workers додають WP-01A/WP-01D);
+`init-secrets.sh` будує DSN із того самого згенерованого `postgres_password`. `Dockerfile`
+копіює `alembic.ini` і `migrations/` опційним glob (`alembic.in[i]`, `migration[s]/`) і задає
+`COLLECTOR_ALEMBIC_INI=/app/alembic.ini`: доки файлів немає, BuildKit робить крок no-op;
+після merge WP-01A вони потрапляють в image без зміни Dockerfile. Команду `collector db roles`
+не додано (її ще немає в main) — лише коментар біля `command` у compose.
+```
+
+### Вивід перевірок після внесення dependency
+
+```text
+$ docker compose config --quiet / build --pull
+exit=0
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+ Image collector:dev Built
+$ image /app (опційний COPY — файлів WP-01A ще немає)
+.
+..
+config
+COLLECTOR_ALEMBIC_INI=/app/alembic.ini
+$ down -v → up -d --wait → check-healthy
+up --wait exit=0 elapsed=27s
+all 16 containers healthy or exited 0
+$ postgres mounts / migrate-postgres secret
+bind /docker-entrypoint-initdb.d rw=false bind /run/secrets/postgres_password rw=false volume /var/lib/postgresql rw=true
+(перевірка env/mounts — окремою командою нижче)
+$ pytest / pre-commit
+237 passed, 1 skipped, 8 warnings in 13.27s
+11
+усі hooks Passed
+$ docker compose down -v
+24
+volumes: 0
+
+$ docker inspect collector-migrate-postgres-1 (env + mounts)
+env=COLLECTOR_POSTGRES_DSN_FILE=/run/secrets/postgres_dsn mounts=/run/secrets/postgres_dsn
+$ docker inspect collector-api-1 / fetch-worker-1 / scheduler-1 (mounts)
+/collector-api-1 mounts=      /collector-fetch-worker-1 mounts=      /collector-scheduler-1 mounts=
+$ docker run --rm collector:dev sh -c 'ls -a /app'   # з тимчасовими файлами WP-01A
+alembic.ini  config  migrations       /app/migrations/postgres/env.py
 ```

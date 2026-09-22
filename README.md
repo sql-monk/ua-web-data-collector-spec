@@ -13,9 +13,10 @@
 
 ## Швидкий старт розробника
 
-Стан на PR1 (`wp/00-1-python-ci`): Python-каркас, CLI-контракт §16.2 як типізовані
-стаби та CI. Docker images/Compose (PR2) і web scaffold (PR3) додаються наступними
-під-PR роботи WP-00 — команди нижче охоплюють лише те, що вже працює.
+Стан на PR2 (`wp/00-2-docker-compose`): Python-каркас і CLI-контракт §16.2 з PR1, плюс
+Docker image `collector` та Compose-стек (`core`+`workers`) з PR2. Web scaffold (PR3, profile
+`gui`) додається наступним під-PR роботи WP-00 — команди нижче охоплюють лише те, що вже
+працює.
 
 ### Вимоги
 
@@ -23,8 +24,8 @@
   окремо встановлювати Python 3.13 не потрібно, `uv sync` підтягує його сам
   (`.python-version` фіксує `3.13`);
 - Node.js 24 LTS — знадобиться для `web/` (PR3, `.nvmrc` з'явиться разом зі scaffold);
-- Docker Engine + Compose — знадобиться для `Dockerfile`/`docker-compose.yml` (PR2/PR3);
-  для PR1 не потрібен (CLI і тести працюють без Docker).
+- Docker Engine 27+ з Compose plugin v2.30+ — потрібен для запуску стека (`Dockerfile`,
+  `docker-compose.yml`, PR2 нижче, розділ «Запуск стека»); для `uv run` команд не потрібен.
 
 ### Встановлення
 
@@ -50,8 +51,8 @@ uv run collector --help
 uv run pre-commit run --all-files
 ```
 
-Решта команд §16.2 (`docker compose …`, `uv run alembic upgrade head`,
-`duckdb …`, `cd web && npm …`) з'являються в PR2/PR3 і в подальших WP, коли
+Команди §16.2 `docker compose …` — розділ «Запуск стека» нижче. Решта (`uv run alembic
+upgrade head`, `duckdb …`, `cd web && npm …`) з'являються в PR3 і в подальших WP, коли
 відповідні стаби замінюються реальною реалізацією.
 
 ### CLI `collector`
@@ -81,7 +82,25 @@ uv run collector --help
 Детальніше про вибір `typer`, логування та мережеву політику тестів —
 [docs/decisions/0001-foundation-stack.md](docs/decisions/0001-foundation-stack.md).
 
-### План і стан робіт
+## Запуск стека (Docker Compose, PR2)
+
+```bash
+./deploy/compose/secrets/init-secrets.sh
+docker compose --profile core --profile workers up -d --wait   # §16.2; +`--profile gui` у PR3
+docker compose ps
+```
+
+`init-secrets.sh` генерує локальні файли секретів (поза git) для Postgres/Mongo/MinIO.
+Докладна покрокова інструкція для чистого хоста (передумови, перевірка health, масштабування,
+restart без втрати даних, типові проблеми) —
+[docs/runbooks/clean-host-start.md](docs/runbooks/clean-host-start.md); відкат image за
+tag/digest — [docs/runbooks/rollback-image.md](docs/runbooks/rollback-image.md). Опис
+profiles, мереж, secrets і dev-override з портами на `127.0.0.1` —
+[deploy/compose/README.md](deploy/compose/README.md). Рішення й прийняті відхилення (MinIO
+root, права секретів 0644, unfixed CVE) —
+[docs/decisions/0002-docker-compose-single-host.md](docs/decisions/0002-docker-compose-single-host.md).
+
+## План і стан робіт
 
 - [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) — конвеєр
   work packages (картка → реалізація → тестування → код-рев'ю → пострев'ю →

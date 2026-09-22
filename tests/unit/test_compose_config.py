@@ -291,9 +291,16 @@ def test_stateful_image_pinned_by_digest_and_named_volumes(
     assert PINNED_IMAGE.match(svc["image"]), svc["image"]
     volumes = svc["volumes"]
     assert volumes, f"{name}: stateful без named volume"
-    for volume in volumes:
+    named = [v for v in volumes if not str(v).startswith(".")]
+    assert named, f"{name}: дані мають бути в named volume"
+    for volume in named:
         source = str(volume).split(":", 1)[0]
         assert source in compose["volumes"], f"{name}: {source} не named volume"
+    # Єдиний дозволений bind — read-only конфігурація з репозиторію (init-скрипти WP-01A).
+    for volume in volumes:
+        if str(volume).startswith("."):
+            assert str(volume).endswith(":ro"), f"{name}: bind {volume} має бути read-only"
+            assert str(volume).startswith("./deploy/"), volume
     assert "profiles" in svc and svc["profiles"] == ["core"]
 
 
@@ -310,8 +317,49 @@ def test_named_volumes_only_for_stateful(compose: dict[str, Any]) -> None:
         str(v).split(":", 1)[0]
         for svc in compose["services"].values()
         for v in svc.get("volumes", [])
+        if not str(v).startswith(".")  # bind-и конфігів перевіряє тест вище
     }
     assert used == set(compose["volumes"])
+
+
+def test_postgres_init_scripts_are_mounted_read_only_for_wp_01a(
+    services: dict[str, dict[str, Any]],
+) -> None:
+    """Approved dependency WP-01A: NOLOGIN group-ролі §13 при першому старті кластера."""
+    mounts = [str(v) for v in services["postgres"]["volumes"]]
+    assert "./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro" in mounts
+    init_dir = REPO_ROOT / "deploy" / "compose" / "postgres" / "init"
+    assert init_dir.is_dir() and (init_dir / "README.md").is_file()
+    # SQL-файли ролей належать WP-01A — WP-00 їх не копіює.
+    assert not list(init_dir.glob("*.sql"))
+
+
+def test_migration_dsn_secret_is_scoped_to_the_one_shot(
+    compose: dict[str, Any], services: dict[str, dict[str, Any]]
+) -> None:
+    """DSN міграційної ролі — лише у `migrate-postgres` (§13: migration role не у runtime)."""
+    assert "postgres_dsn" in compose["secrets"]
+    migrate = services["migrate-postgres"]
+    assert migrate["secrets"] == ["postgres_dsn"]
+    assert migrate["environment"]["COLLECTOR_POSTGRES_DSN_FILE"] == "/run/secrets/postgres_dsn"
+    for name, svc in services.items():
+        if name == "migrate-postgres":
+            continue
+        assert "postgres_dsn" not in [
+            s if isinstance(s, str) else s["source"] for s in svc.get("secrets", [])
+        ], name
+    # `collector db roles` ще немає в main — у compose лише коментар-нагадування.
+    assert migrate["command"] == ["collector", "db", "migrate"]
+    assert "collector db roles" in COMPOSE_PATH.read_text(encoding="utf-8")
+
+
+def test_dockerfile_optionally_copies_alembic_and_migrations() -> None:
+    """Approved dependency WP-01A: файли з'являться після merge — COPY має бути опційним."""
+    text = DOCKERFILE_PATH.read_text(encoding="utf-8")
+    assert "alembic.in[i]" in text and "migration[s]/" in text
+    assert "COLLECTOR_ALEMBIC_INI=/app/alembic.ini" in text
+    ignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert "!alembic.ini" in ignore and "!migrations/" in ignore
 
 
 # --- Dockerfile / .dockerignore (§7.5, §13) -------------------------------------------------
@@ -352,6 +400,10 @@ def test_dockerignore_excludes_everything_but_build_inputs() -> None:
         "src/",
         # WP-01C (approved dependency): реєстр джерел у image для валідації source_id.
         "docs/research/source-registry.yaml",
+        # WP-01A (approved dependency): Alembic-конфіг і міграції; з'являться після merge,
+        # COPY у Dockerfile опційний.
+        "alembic.ini",
+        "migrations/",
     }
 
 
@@ -456,6 +508,10 @@ def test_init_secrets_generates_random_passwords_not_examples() -> None:
     assert "random_hex > " in script
     for example in SECRETS_DIR.glob("*_password.example"):
         assert "GENERATED" in example.read_text(encoding="utf-8"), example.name
+    # DSN будується з того самого згенерованого пароля, не копіюється з прикладу.
+    assert "postgres_dsn)" in script and 'cat "$here/postgres_password"' in script
+    dsn_example = (SECRETS_DIR / "postgres_dsn.example").read_text(encoding="utf-8")
+    assert "GENERATED" in dsn_example
     assert (
         (SECRETS_DIR / "mongo_keyfile.example")
         .read_text(encoding="utf-8")

@@ -92,8 +92,12 @@ file-secrets у Compose bind-mount-яться з правами хоста (на
 `up --wait` падав, бо healthcheck `mongosh … ping` на loopback потрапляв у тимчасовий
 init-mongod, зависав до timeout → exit 137 → mongod die 48 → restart, а Compose трактує exit
 залежності як фатальний). Init-mongod слухає лише `127.0.0.1` і запущений без `--replSet`,
-тому healthcheck (а) з'єднується з IP контейнера (`--host "$(hostname -i)"`), який слухає
-лише фінальний mongod з `--bind_ip_all`, і (б) вимагає від `hello` ознаки члена RS
+тому healthcheck (а) з'єднується з першою IPv4-адресою контейнера — `--host "$ip"`, де `ip`
+явно вибирається з `hostname -I | tr ' ' '\n' | grep -m1 -E '^[0-9]+(\.[0-9]+){3}$'` (gate 3,
+знахідка CR-1: `hostname -i` на dual-stack хості/мережі віддає кілька адрес, IPv6 першою, що
+робить `--host` невалідним; `hostname -I` явно фільтрується на першу IPv4 з перевіркою
+`test -n "$ip"`), — цю адресу слухає лише фінальний mongod з `--bind_ip_all`, і (б) вимагає
+від `hello` ознаки члена RS
 (`isreplicaset` до `replSetInitiate` або `setName` після); `start_period 40s`, `interval 10s`,
 `timeout 10s`, `retries 10`. Свідоме відхилення від рекомендованого gate-ом
 `isWritablePrimary || secondary`: до `replSetInitiate` член не є ні primary, ні secondary,
@@ -200,6 +204,20 @@ WP-13 разом із security-тестами; до того unfixed CRITICAL б
 - `docker compose config --quiet` без profiles валідує лише схему (усі сервіси мають profiles);
   CI задає `COMPOSE_PROFILES=core,workers` і має окремий крок з усіма profiles — достатньо (info).
 
+### Прийняті знахідки пострев'ю / spec-review (дата 2026-09-22)
+
+- **F-2** (§13, low): dependency/image scanning вимагається «щотижня і на кожен PR», а
+  `.github/workflows/ci.yml` job `docker` спрацьовує лише на `pull_request`/`push: main` —
+  окремого `schedule: cron` немає. Owner **WP-13** (разом із `.trivyignore`-механізмом вище),
+  не пізніше **2026-12-22**: додати щотижневий workflow або задокументувати тут, чому per-PR
+  частота на активному репозиторії еквівалентна вимозі.
+- **F-3** (§7.5, low): application image `collector` має лише mutable tag
+  (`collector:dev`/CI `collector:ci`), без публікації в registry з immutable digest (vendor
+  images — `postgres`/`mongo`/`minio` — уже `tag@digest`). Rollback за digest тому обмежений
+  локальним image cache або детермінованим ребілдом із попереднього Git SHA
+  (`docs/runbooks/rollback-image.md`). Owner **WP-14** (registry/release pipeline) разом із
+  PR3: опублікувати `collector` у registry з immutable digest і оновити runbook.
+
 ## Consequences
 
 - Clean-host старт core+workers — одна команда після `init-secrets.sh`; `gui` додається у
@@ -225,5 +243,6 @@ WP-13 разом із security-тестами; до того unfixed CRITICAL б
 - Тести: `tests/unit/test_compose_config.py`, `tests/unit/test_health.py`,
   `tests/unit/test_cli_compose_commands.py`, `tests/integration/test_compose_render.py`,
   `tests/integration/test_health_loopback.py`.
-- Документи: `docs/runbooks/clean-host-start.md`, `deploy/compose/README.md`,
-  `docs/plan/reports/WP-00/implementation-pr2.md`; ADR-0001 (стаби, логування).
+- Документи: `docs/runbooks/clean-host-start.md`, `docs/runbooks/rollback-image.md`,
+  `deploy/compose/README.md`, `docs/plan/reports/WP-00/implementation-pr2.md`,
+  `docs/plan/reports/WP-00/spec-review-pr2.md`; ADR-0001 (стаби, логування).

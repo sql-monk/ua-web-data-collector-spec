@@ -50,6 +50,7 @@ Parse/projector/export/maintenance/scheduler/one-shots — лише `backend`, �
 | `mongo_root_password` | `mongo` (`MONGO_INITDB_ROOT_PASSWORD_FILE`), `ensure-mongo` |
 | `mongo_keyfile` | `mongo` (`--keyFile`, копія в tmpfs 0400) |
 | `minio_root_user`, `minio_root_password` | `minio` (`MINIO_ROOT_*_FILE`) |
+| `postgres_dsn` | `migrate-postgres` (`COLLECTOR_POSTGRES_DSN_FILE`) — DSN міграційної ролі; будується з `postgres_password` (§13: migration role не у runtime-процесах) |
 
 ## Override для розробки
 
@@ -77,6 +78,14 @@ Base-файл портів не публікує; на shared/production host ov
 | `POSTGRES_DB`, `POSTGRES_USER` | `collector` | ім'я БД/ролі; пароль — лише secret |
 | `MONGO_ROOT_USERNAME` | `collector_root` | root user Mongo; пароль — лише secret |
 | `DEV_*_PORT` | 5432/27017/9000/9001/8000 | порти override |
+
+## `postgres/init` — SQL першого старту (WP-01A)
+
+`deploy/compose/postgres/init/` монтується у `postgres` як
+`/docker-entrypoint-initdb.d:ro`; entrypoint виконує звідти `*.sql`/`*.sh` **лише** коли
+data directory порожня (перший `up` після `down -v`). NOLOGIN group-ролі §13
+(`01-roles.sql`) належать WP-01A і з'являться після merge WP-01A PR1 — WP-00 сюди SQL не
+копіює. Деталі — `deploy/compose/postgres/init/README.md`.
 
 ## Обмеження: фіксоване ім'я проєкту `collector`
 
