@@ -4,7 +4,7 @@
 
 Об’єкт: `TECHNICAL_SPECIFICATION.md`
 
-Результат: усі критичні й суттєві зауваження виправлено у версії 1.3.
+Результат: усі критичні й суттєві зауваження виправлено у версії 1.4.
 
 ## Чекліст і виправлення
 
@@ -60,6 +60,13 @@
 | R-48 | Середній | Не було стандартного способу досліджувати releases без прямого доступу до operational БД. | Fixed | Додано pinned read-only DuckDB research kit поверх перевірених partitioned Parquet releases; новий analytics datastore потребує benchmark/ADR. |
 | R-49 | Високий | Назва bitemporal не мала формального valid/known interval query contract. | Fixed | Release тепер містить `[valid_from, valid_to)` та `[known_from, known_to)`, basis/inference metadata і окремі `as_of_valid_time`/`as_known_at` запити. |
 | R-50 | Високий | Compaction могла створити вікно між видаленням hot version і доступністю archive locator. | Fixed | Archive part і hashes перевіряються, locators атомарно публікуються в PostgreSQL до Mongo delete; API весь час бачить hot або archive version. |
+| R-51 | Високий | ТЗ не гарантувало контейнерну поставку всіх application-компонентів і відтворюваний clean-host start. | Fixed | Додано OCI images, Compose profiles/networks/volumes/secrets, health/readiness, migrations, pinned digests, SBOM і acceptance clean-host stack. |
+| R-52 | Високий | Worker був абстрактним і не мав незалежних role pools, replica/concurrency contract або safe scale-down. | Fixed | Визначено вісім pools, desired/current state, heartbeats, drain, lease recovery, Compose/Swarm scaling і fault tests. |
+| R-53 | Критичний | Горизонтальне масштабування discovery/fetch/browser workers могло множити request rate до зовнішнього source. | Fixed | Додано canonical PostgreSQL leased origin permits, expiry recovery, aggregate multi-replica test і правило, що pool capacity ніколи не обходить source policy. |
+| R-54 | Високий | GUI не мав scope, API boundary, RBAC і перевірюваних operator flows. | Fixed | Додано український React GUI, дев'ять екранів, generated OpenAPI client, OIDC BFF, cursor pagination, SSE recovery, confirmations та Playwright E2E. |
+| R-55 | Критичний | Прямий Docker socket у GUI/API перетворив би web-компрометацію на host compromise. | Fixed | GUI/API не мають socket; Compose scaling лишається CLI, а Swarm controller ізольований, allowlisted і може змінювати лише replicas у min/max. |
+| R-56 | Середній | Live UI міг показувати завершену дію лише за локальним optimistic state. | Fixed | Mutations завершуються server acknowledgement/audit, використовують revision/idempotency; SSE cursor gaps примусово відновлюються API snapshot. |
+| R-57 | Високий | Targeted drain був ненадійним: Compose/Swarm можуть видалити не той replica, який UI позначив draining. | Fixed | Replica decrease використовує role-wide drain barrier, чекає/повертає всі leases, масштабує service і лише потім відновлює survivors на новій revision. |
 
 ## Підсумкова перевірка узгодженості
 
@@ -74,7 +81,9 @@
 - Matching ↔ releases: узгоджено — merge/unmerge versioned, а кожен release фіксує resolution snapshot.
 - Retention ↔ дослідження: узгоджено — compaction не порушує pins, release hashes або відновлення exact version.
 - Масштаб ↔ витрати: узгоджено — capacity snapshot має вимірювані формули, headroom gate і trigger для ADR.
+- Docker ↔ workers: узгоджено — stateless roles масштабуються незалежно, drain/leases захищають jobs, aggregate source rate не змінюється.
+- GUI ↔ control plane: узгоджено — усі дії й live status проходять versioned API, RBAC/revision/idempotency/audit; Docker socket ізольований.
 
 ## Залишкові відкриті рішення
 
-Вони не є дефектами ТЗ і мають safe default у §20: перший дослідницький сценарій, media binaries, шардінг, backfill, retention, бюджет, cadence releases, Mongo topology та domain matching thresholds. Source API keys не є відкритим рішенням v1.
+Вони не є дефектами ТЗ і мають safe default у §20: перший дослідницький сценарій, media binaries, шардінг, backfill, retention, бюджет, cadence releases, Mongo topology, domain matching thresholds, Docker deployment mode та autoscale. Source API keys не є відкритим рішенням v1.

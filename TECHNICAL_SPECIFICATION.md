@@ -5,7 +5,7 @@
 | Поле | Значення |
 |---|---|
 | Статус | Готово до декомпозиції та реалізації |
-| Версія | 1.3 |
+| Версія | 1.4 |
 | Дата | 2026-09-22 |
 | Мова | Українська |
 | Робоча назва системи | UA Web Data Collector |
@@ -28,6 +28,7 @@
 7. MVP призначений для внутрішнього дослідження; зовнішня публікація даних і UI не входять до MVP.
 8. Інфраструктура MVP працює через Docker Compose на одному Linux-хості: PostgreSQL для control plane/news, MongoDB replica set для каталогів/авто та S3-compatible artifact store; компоненти лишаються горизонтально масштабованими.
 9. Стартовий масштаб: до 5 млн активних сутностей, 30 млн спостережень на місяць, 3 млн новин/рік і до 5 ТБ сирих та очищених даних на рік.
+10. Усі application-компоненти, включно з GUI, API, workers, scheduler, exporter і telemetry, постачаються OCI images; Docker Engine/host storage та зовнішній OIDC/translation provider є інфраструктурними залежностями, а не контейнерами проєкту.
 
 Питання, що не блокують проєктування, але мають бути закриті до production:
 
@@ -60,7 +61,7 @@
 - Новини: повний оригінальний текст, заголовок, анонс, автори, рубрики, теги, час, canonical URL, мова, географія, медіа-метадані, очищений HTML, український переклад і provenance перекладу.
 - Автобазари: повна публічна картка оголошення, опис, марка/модель/комплектація, рік, VIN, пробіг, технічні поля, географія, ціна, продавець, ім’я, телефони/e-mail, профіль, медіа URL, статус та історія змін.
 - Каталоги: повна публічна картка товару, бренд, артикул/MPN/GTIN, категорія, характеристики, продавець, контакти, ціна, валюта, наявність, доставка, рейтинг, відгуки, запитання/відповіді, медіа URL та історія змін.
-- Внутрішній API читання, експорт Parquet/JSONL, DuckDB research kit, CLI керування, метрики і журнал запусків.
+- Внутрішній API читання, український operator GUI, керовані worker pools, експорт Parquet/JSONL, DuckDB research kit, CLI керування, метрики і журнал запусків.
 
 ### 2.3. Поза межами MVP
 
@@ -244,6 +245,14 @@
 | FR-027 | Dataset release має immutable manifest із registry/schema/parser/matcher/translation versions, watermark, exclusions, row/part counts і checksums. |
 | FR-028 | Capacity plan щомісяця перераховує fetch/artifact/DB/index/WAL/backup/translation volumes, unit cost і headroom; перевищення threshold створює scaling decision. |
 | FR-029 | V1 аналітика використовує DuckDB поверх immutable Parquet releases; новий production analytics datastore додається лише після benchmark і ADR. |
+| FR-030 | Усі application services мають versioned OCI images, health/readiness checks, resource limits, non-root runtime і Docker Compose definition; state зберігається лише у named volumes/external stores. |
+| FR-031 | Discovery, fetch, browser, parse, projector, translation, export і maintenance workers є stateless role-based pools, які масштабуються незалежно без зміни image. |
+| FR-032 | Кількість container replicas та concurrency per replica мають окремі desired/current значення; replica scale-down використовує role-wide drain barrier, бо Compose/Swarm можуть самі обрати container для видалення. |
+| FR-033 | Per-origin rate/concurrency budget є глобальним для всіх discovery/fetch/browser replicas; збільшення worker count не збільшує дозволену частоту запитів до джерела. |
+| FR-034 | Operator GUI керує sources/routes, runs/jobs/dead letters, worker pools, matching decisions, translations, releases, retention/compaction і capacity, використовуючи лише versioned API. |
+| FR-035 | GUI не має Docker socket або DB credentials. У Compose mode container replicas змінюються CLI; у Swarm mode окремий allowlisted stack controller застосовує audited desired replica count. |
+| FR-036 | Усі mutating GUI/API actions використовують optimistic concurrency, idempotency key, RBAC, audit record і явне підтвердження для destructive/expensive operations. |
+| FR-037 | GUI показує live progress через SSE, але після reconnect завжди відновлює стан із API snapshot/cursor; UI notification не є джерелом істини. |
 
 ## 7. Архітектура
 
@@ -277,6 +286,15 @@ PostgreSQL News ──> Translation Queue/Worker + QA ──> PostgreSQL Transla
 Failed terminal jobs ──> PostgreSQL Dead Letter
 
 All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafana + Loki
+
+Operator Browser ──> GUI/Nginx ──> FastAPI Operator API ──> PostgreSQL Control
+                                      │          │
+                                      │          └── SSE status/events
+                                      v
+                              Worker Pool Desired State
+                                      │
+                              Stack Controller
+                         Compose CLI (manual) / Swarm Services
 ```
 
 ### 7.1. Межі компонентів
@@ -294,6 +312,8 @@ All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafan
 - **Mongo Projector:** бере task/artifact pointer із PostgreSQL, читає валідований normalized artifact із S3/MinIO, ідемпотентно проєктує його в MongoDB та повертає applied receipt.
 - **Exporter:** read-only відносно PostgreSQL і MongoDB; об'єднує результати лише через стабільні internal UUID/source identity, а не через неявні cross-database joins.
 - **Research Kit:** read-only DuckDB queries/views поверх перевірених Parquet releases; не читає operational БД напряму й не змінює дані.
+- **Operator GUI:** український web client для спостереження й керування; не має прямого доступу до PostgreSQL, MongoDB, S3 або Docker Engine.
+- **Worker Pool Controller:** звіряє desired/current pool state, керує drain і, лише у Swarm mode, змінює replicas через окремий allowlisted deployment adapter.
 
 ### 7.2. Черга MVP
 
@@ -336,6 +356,98 @@ MongoDB є авторитетним serving store catalog/vehicle, але від
 - Для повного disaster recovery спочатку відновлюються PostgreSQL і artifact store, потім Mongo snapshot, після чого projector replay-ить усі tasks після snapshot watermark, а reconciler підтверджує нульовий drift.
 - Restore drill виконується щоквартально в ізольованому середовищі; результат містить watermark, кількість replayed tasks, hash/count звірку, фактичні RPO/RTO та підписаний acceptance report.
 
+### 7.5. Docker deployment
+
+Один pinned application image `collector` запускає API, scheduler, controller, CLI та worker roles через різні commands; browser worker має окремий image із pinned Playwright browser. GUI збирається multi-stage image і віддається non-root Nginx. PostgreSQL, MongoDB, MinIO й telemetry використовують pinned vendor image digests.
+
+Compose profiles:
+
+| Profile | Services |
+|---|---|
+| `core` | `postgres`, `mongo`, `minio`, one-shot `migrate-postgres`, `ensure-mongo`, `api`, singleton `scheduler` |
+| `workers` | `discovery-worker`, `fetch-worker`, `parse-worker`, `projector-worker`, `translation-worker`, `export-worker`, `maintenance-worker` |
+| `browser` | resource-limited `browser-worker`, за замовчуванням 0 або 1 replica |
+| `gui` | `gui` static server/reverse proxy |
+| `observability` | OpenTelemetry Collector, Prometheus, Grafana, Loki |
+| `tools` | one-shot admin, release verifier і DuckDB research container |
+
+Вимоги до Compose/containers:
+
+- worker services не задають `container_name`, host ports або local persistent state, тому їх можна масштабувати; `worker_instance_id` генерується на boot, а Docker hostname зберігається лише як metadata;
+- назовні публікується тільки GUI ingress (`80/443` або configurable host binding); API доступний same-origin через reverse proxy, а DB/object/telemetry ports за замовчуванням не bind-яться на public host interface;
+- named volumes дозволені тільки stateful services; application images read-only, non-root, із writable tmpfs для тимчасових файлів;
+- окремі мережі `ingress`, `backend`, `source-egress`, `provider-egress`, `telemetry`; discovery/fetch/browser мають source egress, translation — provider egress, API — лише OIDC egress, GUI бачить тільки API;
+- secrets передаються Docker secrets/files, а не bake-time ARG, image layer або committed `.env`;
+- healthcheck перевіряє process і критичну dependency; readiness лишається false до migrations/validators; scheduler/controller мають singleton advisory lease;
+- `stop_grace_period` довший за максимальний bounded task shutdown; SIGTERM запускає drain, SIGKILL є fault case з lease recovery;
+- images мають immutable tag + digest, OCI labels з Git SHA/schema version, SBOM і vulnerability scan;
+- stateful services не масштабуються worker controls; Mongo/PostgreSQL topology змінюється окремим runbook/ADR.
+
+У single-host Compose кількість replicas змінюється підтримуваною Docker командою, наприклад:
+
+```bash
+docker compose --profile core --profile workers --profile gui up -d --wait
+docker compose up -d --no-recreate --scale fetch-worker=4 --scale parse-worker=2
+docker compose scale --no-deps translation-worker=3 browser-worker=1
+```
+
+У Compose mode GUI одразу застосовує `desired_concurrency` до живих workers, а для зміни container replicas зберігає desired count, показує audited CLI command і чекає heartbeats після ручного виконання; Docker socket у web/API не монтується. Для автоматичного apply replicas із GUI використовується Docker Swarm replicated services: controller працює лише на manager node, може змінювати replicas тільки сервісів із label `collector.scalable=true`, перевіряє min/max/resource limits і не має дозволу змінювати images, mounts, networks, secrets або stateful services.
+
+### 7.6. Worker pools і масштабування
+
+| Role | Черга/робота | Default replicas × concurrency | Особливі обмеження |
+|---|---|---:|---|
+| `discovery` | RSS/sitemap/API pagination → fetch jobs | 1 × 4 | singleton per source/run через lease |
+| `fetch` | звичайні HTTP GET → raw artifact | 2 × 8 | global origin limiter має верховенство |
+| `browser` | anonymous JS rendering | 0 × 1 | окремий image; CPU/RAM budget; max 1 per origin |
+| `parse` | raw → normalized artifact/news version | 2 × CPU count | без network egress |
+| `projector` | projection task → Mongo + ack | 1 × 8 | одна Mongo transaction на task/entity |
+| `translation` | segments → Ukrainian version | 1 × 4 | character/cost budget і fresh-news priority |
+| `export` | dataset release parts/manifests | 1 × 2 | immutable output; memory/disk scratch limit |
+| `maintenance` | reconcile, compaction, sweeps, capacity | 1 × 1 | mutually exclusive named leases |
+
+`worker_pools` зберігає `role`, `desired_replicas`, `desired_concurrency`, `min/max_replicas`, resource profile, `mode = manual | autoscale`, revision і updated actor/reason. `worker_instances` містить boot UUID, role, deployment/container metadata, version, status (`starting | ready | draining | stopped | stale`), slots, heartbeat і active leases. `scale_commands` має idempotency key, expected pool revision, requested values, status/result і audit link.
+
+Scale command states: `requested | draining | awaiting_manual_apply | applying | applied | failed | superseded`. Desired-state update і command insert є однією PostgreSQL-транзакцією. У Compose mode command переходить у `awaiting_manual_apply` і містить exact CLI; у Swarm mode controller переводить його в `applying`. `applied` дозволений лише коли heartbeat-derived current replicas/concurrency відповідають desired revision.
+
+Масштабування не змінює семантику черги:
+
+- claim виконується через `FOR UPDATE SKIP LOCKED`; кожна task має lease owner/expiry і heartbeat;
+- глобальний PostgreSQL token bucket за normalized origin атомарно видає leased request permit всім discovery/fetch/browser replicas; rate tokens і concurrency permits обліковуються окремо, release і expiry ідемпотентні, а per-container semaphore лише додатково обмежує локальну concurrency;
+- scale-up починає claim лише після readiness. Перед зменшенням container replicas controller ставить role-wide drain barrier: усі instances role припиняють claim, завершують/повертають leases, orchestrator зменшує replicas, а survivors відновлюють claim після підтвердження new revision. Це не покладається на те, який container Compose/Swarm вирішить видалити;
+- зміна `desired_concurrency` застосовується без restart на межі task: нові slots відкриваються одразу, зайві закриваються після завершення активних tasks;
+- repeated scale command безпечний за idempotency key; optimistic pool revision відхиляє stale GUI action;
+- autoscale у v1 вимкнений за замовчуванням. Після load test він використовує queue oldest age + pending/running ratio, три послідовні measurement windows, 5-minute cooldown, min/max і окремий browser/translation budget; manual override має пріоритет.
+
+### 7.7. Operator GUI
+
+GUI за замовчуванням українською, desktop-first і придатний для планшета. Основні екрани:
+
+1. **Огляд:** health компонентів, freshness/SLO, queue backlog, worker pools, storage/capacity, translation cost і активні інциденти.
+2. **Джерела:** рейтинг і його докази, source/route states, розклад, rate budget, останні runs; pause/resume/disable і bounded backfill.
+3. **Jobs і помилки:** фільтри за source/type/status, lease/retries, dead letters, raw/parse/projection lineage, idempotent replay.
+4. **Workers:** desired/current replicas та concurrency, instances/versions/heartbeats/active leases; scale, drain/reapply desired state й autoscale policy в межах min/max.
+5. **Дані:** news original + український translation, catalog/vehicle current/history, seller/contacts, raw lineage та exact-version view.
+6. **Matching:** candidates/evidence/score, merge, manual block, unmerge і preview впливу на наступний release.
+7. **Releases/exports:** build progress, inclusions/exclusions, quality, parts/checksums, download/verify і DuckDB command.
+8. **Retention/capacity:** pins, compaction dry-run/result, hot/cold bytes, actual/forecast/cost і scaling recommendations.
+9. **Аудит:** хто, коли, що змінив, request/idempotency ID, before/after revision і результат.
+
+Frontend: React + TypeScript + Vite, route-level code splitting, generated OpenAPI client і query cache. Таблиці використовують server-side cursor pagination/filter/sort; контакти не кешуються в browser storage. Live counters/progress надходять через SSE з event cursor, heartbeat і reconnect; після gap UI робить snapshot refresh. Mutations мають disabled/pending/success/error states і не вважаються виконаними до server acknowledgement.
+
+Auth реалізує FastAPI BFF через OIDC Authorization Code + PKCE, secure `HttpOnly/SameSite` session cookie та CSRF protection. Ролі з §13 визначають видимість і дії; UI не замінює server authorization. Scale-down, replay batch, unmerge, compaction apply, source disable і release publish показують impact preview; destructive/expensive дії вимагають typed confirmation, reason і свіжу resource revision.
+
+| Можливість | `viewer` | `researcher` | `operator` | `admin` |
+|---|:---:|:---:|:---:|:---:|
+| Health, queues, workers, audit, redacted data | ✓ | ✓ | ✓ | ✓ |
+| Full research records/contacts, create bounded export, temporary research pin | — | ✓ | ✓ | ✓ |
+| Pause/resume, bounded backfill, replay, pool scale/drain у чинних min/max | — | — | ✓ | ✓ |
+| Accept/reject match candidate, build/validate release, compaction dry-run | — | — | ✓ | ✓ |
+| Change pool min/max/autoscale, source disable, manual block/unmerge, publish/supersede release | — | — | — | ✓ |
+| Compaction apply/rollback, indefinite pin, configuration/role mapping | — | — | — | ✓ |
+
+OIDC group → application role mapping versioned і audited. Backend перевіряє роль на кожному endpoint та SSE subscription; frontend gating є лише UX. Stateful database topology, image/mount/network/secret mutation і видалення artifact bucket не доступні через GUI жодній ролі.
+
 ## 8. Технології та їх призначення
 
 | Технологія | Для чого | Обґрунтування/обмеження |
@@ -355,14 +467,19 @@ MongoDB є авторитетним serving store catalog/vehicle, але від
 | PyMongo Async API | MongoDB projector і domain repository | без ODM-магії; Pydantic contract → явний BSON mapping; retryable writes, primary reads, `readConcern=majority` і `writeConcern=majority`; транзакції — `snapshot` |
 | S3-compatible storage (MinIO local, managed S3 prod) | raw і normalized artifacts, screenshots за потреби, exports | content-addressed keys; lifecycle: hot → compressed archive → delete згідно з політикою |
 | DuckDB, pinned | локальні й CI-відтворювані дослідження Parquet releases | [напряму читає Parquet і підтримує filter/projection pushdown](https://duckdb.org/docs/stable/data/parquet/overview); read-only views/macros; не є operational DB та не читає mutable current state |
-| FastAPI | operator/read API, health/readiness | не відкривати назовні без auth gateway |
+| FastAPI | operator/read API, OIDC BFF, SSE, health/readiness | єдиний write/control boundary для GUI; OpenAPI є frontend contract |
+| React + TypeScript + Vite | український operator GUI | typed components/client, route chunks; React документує [TypeScript integration](https://react.dev/learn/typescript) і Vite-based setup |
+| TanStack Query + React Router | server state, cursor lists, mutations і routes | cache keys містять API/schema version; contacts не persist-яться у browser storage |
+| Nginx non-root image | static GUI assets і same-origin reverse proxy `/api` | immutable assets, CSP/security headers; auth/session логіка лишається у FastAPI BFF |
 | Google Cloud Translation Advanced | основний переклад усіх перелічених мов в українську | офіційно підтримує `de`, `fr`, `en`, `lt`, `lv`, `et`, `pl`, `hu`, `ro`, `cs`, `sk`, `sl`, `hr`, `it`, `es`, `nl` і `uk`; batch для backfill, online для нових статей |
 | NLLB-200 distilled або Marian/OPUS-MT | локальний fallback і cost experiment | запускати тільки після benchmark на затвердженому multilingual наборі; не змішувати результати без `provider/model` |
-| Redis-compatible cache (optional) | translation memory hot cache і distributed rate limits | source of truth визначається bounded context у §7.3; Redis ним не є |
+| Redis-compatible cache (optional) | translation memory hot cache; high-throughput limiter optimization після ADR | v1 global rate permit canonical у PostgreSQL; Redis не є source of truth |
 | OpenTelemetry + Prometheus + Grafana + Loki | метрики, traces, logs, alerting | `source_id` у labels лише при контрольованій cardinality; URL не label |
 | pytest + pytest-asyncio + respx | unit/contract/integration tests | мережа заборонена у звичайних tests |
+| Vitest + Testing Library + Playwright Test | GUI unit/component/E2E | E2E запускається проти Docker stack; scale/destructive flows використовують test deployment adapter |
 | Ruff + mypy strict | lint, format, type checks | однакові локально й у CI |
-| Docker Compose | локальне середовище/MVP | non-root containers, healthchecks, resource limits |
+| Docker Engine + Compose | local, CI і single-host MVP | [Compose підтримує `--scale SERVICE=NUM`](https://docs.docker.com/reference/cli/docker/compose/up/); profiles, healthchecks, resource limits, без `container_name` у workers |
+| Docker Swarm mode | production replicated workers і GUI-controlled scaling | [replicated services мають desired replica count](https://docs.docker.com/engine/swarm/how-swarm-mode-works/services/); controller обмежений allowlist/min-max і audit |
 | GitHub Actions | CI, dependency/security scan, image build | secrets тільки GitHub Environments/Actions Secrets |
 
 Версії бібліотек фіксуються lockfile. Оновлення Playwright завжди супроводжується перевстановленням відповідного browser binary, що прямо вимагає його [документація](https://playwright.dev/python/docs/browsers). Версію PostgreSQL перевіряти за офіційною [політикою підтримки](https://www.postgresql.org/support/versioning/). MongoDB 8.0 має [офіційний lifecycle](https://www.mongodb.com/legal/support-policy/lifecycles) до 2029-10-31; deployment використовує replica set, бо [standalone не підтримує multi-document transactions](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/). Для collections обов'язкова [$jsonSchema validation](https://www.mongodb.com/docs/manual/core/schema-validation/), а unbounded arrays заборонені через [ліміт BSON document 16 MiB](https://www.mongodb.com/docs/manual/reference/limits/). Реалізація використовує офіційний [`AsyncMongoClient`](https://www.mongodb.com/docs/languages/python/pymongo-driver/current/connect/mongoclient/) і повторює всю транзакцію для `TransientTransactionError`; при `UnknownTransactionCommitResult` повторюється commit/перевірка receipt з тим самим idempotency key. Single-member replica set у local MVP надає transaction semantics, але не високу доступність.
@@ -375,6 +492,8 @@ MongoDB є авторитетним serving store catalog/vehicle, але від
 |---|---|
 | `sources`, `source_policy_versions`, `source_routes`, `source_cursors` | UUID PK; canonical `source_id`; version/status; cursor payload; `created_at/updated_at`; optimistic version |
 | `crawl_runs`, `crawl_jobs` | UUID PK/FK; `job_type`, `status` (`pending/leased/succeeded/retry/quarantined`), priority, idempotency key, `attempt/max_attempts`, `not_before`, `lease_owner/lease_expires_at`, timestamps/error code |
+| `origin_rate_buckets`, `origin_rate_permits` | bucket: PK normalized origin, token/refill/concurrency budget, available tokens, `blocked_until`, revision/time; permit: UUID, origin, owner instance/job, acquired/lease expiry/released time; atomic acquire/idempotent return/expiry recovery |
+| `worker_pools`, `worker_instances`, `scale_commands` | pool role, desired/current replicas+concurrency, min/max/mode/revision; instance boot ID/status/heartbeat/version/leases; idempotent requested/applied scale + actor/reason/result |
 | `fetches`, `raw_objects`, `parse_attempts` | UUID PK/FK; requested/final URL, HTTP metadata, raw `sha256/uri/size`, parser/schema version, result/error, timestamps |
 | `artifact_upload_claims`, `normalized_artifacts` | claim: unique object key, owner, status, lease expiry, monotonic int64 `claim_generation`; artifact: UUID PK, `entity_uuid`, `sha256/uri/size`, media type, domain, schema version, raw/fetch/parser lineage; без domain payload JSONB |
 | `projection_tasks` | UUID `task_id`; FK artifact/entity; monotonic `projection_version`; target collection/schema; status/priority/attempt/not-before/lease; unique `(entity_uuid, projection_version)` і artifact projection key |
@@ -522,6 +641,27 @@ Published dataset release є immutable і має стани `draft | building | 
 
 Опублікований release не перезаписується. Виправлення створює новий release; `uv run collector release verify --manifest <path>` перевіряє manifest/schema/part hashes до виконання DuckDB research SQL.
 
+### 9.10. Operator API contract
+
+Усі endpoints мають prefix `/api/v1`, генерують OpenAPI і повертають `application/problem+json` для помилок. List response: `items`, `next_cursor`, `snapshot_at`, `total_estimate` лише якщо дешево обчислюється. Mutation response: `command_id`, `status`, `resource_revision`, `audit_id`; `202 Accepted` використовується для довгих jobs. Mutations вимагають `Idempotency-Key`, а зміна versioned resource — `If-Match`/expected revision.
+
+Мінімальні endpoint groups:
+
+| Group | Read | Commands |
+|---|---|---|
+| System | `/system/overview`, `/health/components`, `/capacity` | acknowledge incident |
+| Sources | `/sources`, `/sources/{id}`, `/sources/{id}/runs`, `/routes` | pause/resume/disable, update schedule/rate, backfill preview/start |
+| Jobs | `/jobs`, `/jobs/{id}`, `/dead-letters` | replay preview/one/batch, quarantine/release |
+| Worker pools | `/worker-pools`, `/worker-pools/{role}/instances`, `/scale-commands` | update desired replicas/concurrency, drain instance, set autoscale policy |
+| Data | `/news`, `/catalog-items`, `/vehicle-listings`, `/entities/{id}/versions`, `/lineage/{id}` | export selection; domain records read-only |
+| Translations | `/translation-jobs`, `/translation-quality`, `/translation-budget` | retry failed job, pause/resume backfill, update budget within role limits |
+| Matching | `/match-candidates`, `/resolution-decisions` | merge/block/unmerge preview/apply |
+| Releases | `/dataset-releases`, `/dataset-releases/{id}` | build, validate, publish, supersede, verify |
+| Retention | `/retention-pins`, `/compaction-runs` | pin/unpin, compaction dry-run/apply/rollback |
+| Audit/live | `/audit`, `/events` | `/events` є SSE GET із `after` cursor/`Last-Event-ID` |
+
+Batch command завжди має окремий preview із resolved item count, filters snapshot і estimated cost/impact; apply посилається на `preview_id` та відхиляється після expiry або зміни revision. SSE event містить monotonic cursor, type, resource ID/revision і мінімальний summary без контактів чи повного payload. Відсутня/прострочена cursor position повертає `resync_required`, після чого GUI перечитує відповідний snapshot endpoint.
+
 ## 10. Алгоритм збору й оновлення
 
 1. Scheduler завантажує enabled source manifest і чинну policy version.
@@ -606,6 +746,9 @@ Rubric перекладу, шкала 0–2 для кожного критері
 - Raw bucket шифрується; доступ розділений на writer/parser/auditor roles; object deletion журналюється.
 - Облікові дані БД розділені за компонентами: scheduler/fetcher не має MongoDB credentials; parser пише лише artifact pointer/task/outbox у PostgreSQL; projector читає визначені projection rows у PostgreSQL і пише лише domain collections у MongoDB; API/exporter має read-only ролі в обох БД. Migration role не використовується runtime-процесами.
 - Operator API: OIDC, RBAC (`viewer`, `researcher`, `operator`, `admin`), audit log усіх mutating actions. Сирі контакти доступні `researcher` і вище.
+- GUI використовує same-origin BFF session, CSRF token і restrictive CSP; access/refresh tokens не зберігаються в `localStorage/sessionStorage`.
+- GUI/API/worker images не отримують Docker socket. Swarm controller ізольований на manager node, читає лише committed `scale_commands` з audit link, перевіряє service label, pool revision, min/max і дозволений diff `replicas`; його credentials/network недоступні GUI.
+- Batch replay, source disable, scale-to-zero, unmerge, compaction apply і release publish мають impact preview, typed confirmation, reason та audit before/after.
 - Dependency та image scanning — щотижня і на кожен PR; critical CVE блокує release або має датоване risk acceptance.
 
 ## 14. Спостережуваність та експлуатація
@@ -619,6 +762,9 @@ Rubric перекладу, шкала 0–2 для кожного критері
 - `source_freshness_seconds`, `queue_oldest_age_seconds`, `dead_letters_total`;
 - `raw_bytes_total`, `raw_dedup_ratio`, `artifact_orphans_total`, DB/storage utilization;
 - `projection_tasks_total{domain,status}`, `projection_lag_seconds`, `projection_replays_total`, `cross_store_drift_total`;
+- `worker_pool_replicas{role,state=desired|ready|draining|stale}`, `worker_slots{role,state}`, `worker_heartbeat_age_seconds`, `worker_active_leases`, `scale_commands_total{role,status}`;
+- `origin_rate_permits_total{origin_group,result}`, `origin_inflight`, limiter wait/lock duration; origin labels мають bounded mapping, не raw hostname cardinality;
+- Operator API request/error/latency, SSE active connections/reconnects/cursor gaps і GUI asset/version mismatch;
 - `late_arrivals_total`, `source_time_null_ratio`, `source_time_inferred_total`, temporal-order violations;
 - `resolution_decisions_total{action,actor_type}`, candidate precision sample, blocked remerge attempts;
 - `compaction_candidates/archived/deleted/pinned`, archive verification failures, hot/cold bytes;
@@ -632,14 +778,17 @@ Rubric перекладу, шкала 0–2 для кожного критері
 ### 14.2. Алерти
 
 - SEV-1: витік secrets, неконтрольований request rate, підозрілий масовий export контактів, недоступність PostgreSQL/MongoDB/artifact store або підтверджена втрата projection.
-- SEV-2: немає нових news понад 30 хв для активного джерела, projection lag понад 15 хв, cross-store drift, release/archive hash failure, translation lag понад 20 хв, queue age понад SLO, parse success <95%, yield drop >50%, 429/403 spike.
-- SEV-3: storage >70% або 90-day forecast порушує 30% headroom, source-time drift, окремий адаптер деградував, наближення анонімного rate budget.
+- SEV-2: немає нових news понад 30 хв для активного джерела, projection lag понад 15 хв, cross-store drift, desired/ready worker mismatch понад 10 хв, усі replicas критичного role відсутні, release/archive hash failure, translation lag понад 20 хв, queue age понад SLO, parse success <95%, yield drop >50%, 429/403 spike.
+- SEV-3: worker heartbeat stale, drain/scale command timeout, SSE cursor gaps, storage >70% або 90-day forecast порушує 30% headroom, source-time drift, окремий адаптер деградував, наближення анонімного rate budget.
 
-Runbook має містити pause source, inspect raw/parse/projection error, restore lease, replay from raw, reconcile PostgreSQL tasks із Mongo applied receipts та PostgreSQL acknowledgements, rotate key, sweep/expire artifact objects і rollback parser/schema version.
+Runbook має містити pause source, inspect raw/parse/projection error, scale/drain/recover worker pool, restore lease, replay from raw, reconcile PostgreSQL tasks із Mongo applied receipts та PostgreSQL acknowledgements, rotate key, sweep/expire artifact objects, rollback GUI/API/worker image і rollback parser/schema version.
 
 ## 15. Продуктивність і масштабування
 
 - MVP worker process обробляє кілька jobs асинхронно, але per-origin limiter має верховенство над глобальною concurrency.
+- Кожен role масштабується окремо; API, scheduler і stateful services не множаться командою scale worker pool.
+- Replica count × concurrency є capacity ceiling, а не request-rate setting: origin token bucket і source policy завжди мають пріоритет.
+- Worker не зберігає job/data на локальному filesystem; replacement replica підхоплює expired/released lease після readiness.
 - Browser jobs ізольовані в окремій queue/pool з обмеженням CPU/RAM і concurrency 1 на pod/container.
 - Translation jobs мають окрему queue, character budget і пріоритет: title/lead → body нової статті → backfill. Backfill не може витісняти свіжі новини.
 - Sitemap streaming parser не завантажує весь документ у RAM.
@@ -681,6 +830,9 @@ Runbook має містити pause source, inspect raw/parse/projection error, 
 11. **Compaction:** pin race, dry-run, archive row/hash verification, concurrent exact reads never see a gap, rollback window, restore exact version із Parquet.
 12. **Release/analytics:** дві збірки з однаковим manifest дають ті самі hashes; DuckDB contract queries проходять без доступу до operational БД.
 13. **Capacity:** synthetic 2× forecast, формули unit cost і thresholds перевіряються golden snapshot tests.
+14. **Docker:** `docker compose config`, image build/SBOM, cold start/migrations/health, named-volume restart, profile isolation і pinned digest checks.
+15. **Scaling:** replicas `1→4→1→0→2`, concurrent global rate-limit, expired permit recovery, concurrency hot-change, drain during active task, killed replica lease recovery, stale command/revision і controller allowlist tests.
+16. **GUI:** React unit/component, generated-client contract, RBAC/CSRF, cursor pagination, SSE gap/reconnect, accessibility smoke і Playwright operator E2E.
 
 ### 16.2. Команди як контракт
 
@@ -690,13 +842,17 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy src
 uv run pytest -m "not live"
-docker compose up -d --wait postgres mongo minio
+docker compose config --quiet
+docker compose build --pull
+docker compose --profile core --profile workers --profile gui up -d --wait
+docker compose up -d --no-recreate --scale fetch-worker=4 --scale parse-worker=2
 uv run alembic upgrade head
 uv run collector db ensure-mongo --validators --indexes
 uv run collector e2e --source fixtures --offline
 uv run collector release build --watermark test --output .artifacts/release
 uv run collector release verify --manifest .artifacts/release/manifest.json
 duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*.parquet')"
+cd web && npm ci && npm run lint && npm run test && npm run build && npm run test:e2e
 ```
 
 Фінальні назви CLI можуть змінитися один раз у foundation PR; після цього README і CI мають виконувати саме ці команди.
@@ -718,6 +874,11 @@ duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*
 - compaction dry-run, pin race, concurrent read, archive verification і rollback пройдено; published release після compaction має ті самі part hashes;
 - capacity snapshot побудовано з фактичних pilot metrics; усі класи мають не менше 30% 90-day headroom або затверджений scaling ADR;
 - DuckDB відкриває release після hash verification і виконує contract queries без credentials PostgreSQL/MongoDB;
+- чистий Docker host підіймає core/workers/gui однією documented командою; migrations/validators завершуються до readiness, restart не втрачає named-volume data;
+- scale `fetch 1→4→1` і `parse 1→4→1` змінює ready replicas без дублів, а сумарний origin request rate не перевищує source policy;
+- scale-down під активним job завершує або повертає lease без втрати; kill replica відновлюється після lease expiry;
+- Compose mode повертає audited scale command, Swarm test adapter застосовує лише replica diff allowlisted worker service; GUI/API не мають Docker socket;
+- GUI E2E покриває pause/resume source, bounded backfill, dead-letter replay, worker scale/drain, matching block/unmerge, release publish і compaction dry-run з RBAC/audit evidence;
 - кожне джерело з §4.1 має доказаний `source_state`; кожен route — `route_state`, а sample item — `content_access` із §5.5; для кожної з 19 країн щонайменше одне джерело з `source_state=enabled` віддає item із `content_access=full`, оригіналом і українським перекладом через API/SQL;
 - 30 випадкових перекладів на кожну вихідну мову пройшли human QA за rubric, critical meaning errors = 0.
 
@@ -727,7 +888,7 @@ duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*
 
 - Один work package — один owner, окрема branch/PR, чіткі вхідні/вихідні контракти.
 - Агенти не редагують чужий адаптер або shared schema без узгодженого issue/ADR.
-- Спочатку зливаються WP-00 і WP-01C, потім WP-01A/WP-01B та WP-02—WP-04; адаптери можуть паралельно працювати на versioned fixtures/schema після цього.
+- Спочатку зливаються WP-00 і WP-01C, потім WP-01A/WP-01B/WP-01D та WP-02—WP-04; адаптери й GUI можуть паралельно працювати на versioned fixtures/OpenAPI після цього.
 - WP-01C є єдиним owner shared IDs/event/artifact contracts; WP-01A — єдиним owner PostgreSQL migrations; WP-01B — єдиним owner Mongo validators/index migrations. Інші WP подають зміну shared schema як окрему dependency-задачу відповідному owner, а не редагують її паралельно.
 - Кожен PR містить: зміни, тести, fixture provenance, ризики, як вимкнути/відкотити, що не перевірено live.
 - Заборонено переносити тестові докази між джерелами: успішний Prom adapter не є доказом для Rozetka.
@@ -737,10 +898,11 @@ duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*
 
 | WP | Власність | Залежить від | Результат і критерій приймання |
 |---|---|---|---|
-| WP-00 | Foundation | — | repo layout, `pyproject`, lock, CI, Compose, coding/PR rules; порожній smoke проходить |
+| WP-00 | Docker/application foundation | — | repo layout, Python/web locks, multi-stage images, Compose profiles/networks/volumes/secrets, migrations, CI, SBOM; clean-host stack smoke green |
 | WP-01C | Shared data contracts | WP-00 | canonical UUID/source identity, temporal axes, artifact, projection command/ack, resolution decision, domain event і dataset release schemas; compatibility fixtures green |
 | WP-01A | PostgreSQL foundation | WP-01C | єдине ownership SQL migrations; control/news schemas, jobs, artifact pointers, projection tasks/acks, outboxes, entity index/lineage, release/pin/capacity tables; clean SQL integration green |
 | WP-01B | MongoDB domain foundation | WP-01C, WP-01A | єдине ownership Mongo validators/index migrations; replica set, repositories, projector, receipts/reconciler, compaction/archive locator; crash/out-of-order/restore tests green |
+| WP-01D | Worker pool control | WP-00, WP-01A | role commands, pool/instance/scale contracts, PostgreSQL origin limiter, heartbeat/drain, Compose command adapter і Swarm replica adapter; scale/rate/fault tests green |
 | WP-02 | Fetch core | WP-01A | HTTP fetcher, robots snapshot, allowlist, limiter, retries, raw S3; SSRF/rate tests green |
 | WP-03 | Discovery | WP-01A, WP-02 | API/RSS/sitemap streaming, cursors, idempotent jobs; gzip/pagination fixtures green |
 | WP-04 | Translation core | WP-01A | segmenter, provider interface, Google adapter, translation memory, glossary, QA corpus; all language pairs green |
@@ -756,9 +918,10 @@ duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*
 | WP-08A–D | Vehicle adapters | WP-03, WP-07 | один незалежний пакет на AUTO.RIA, OLX Авто, RST, Automoto; full public field coverage |
 | WP-09 | Catalog contracts & matching | WP-01A, WP-01B | product/offer/review/question contracts, reversible resolution decisions, category mapping і matching; benchmark; schema changes через WP-01A/B owners |
 | WP-10A–H | Catalog adapters | WP-03, WP-09 | один незалежний пакет на Prom, Rozetka, Epicentr, Allo, Hotline, Comfy, Foxtrot, MOYO |
-| WP-11A | Operator API/releases | WP-01A, WP-01B, WP-04, WP-07, WP-09 | bounded cross-store API, status/pause/replay, immutable Parquet/JSONL dataset releases, temporal/resolution snapshots; reproducibility/RBAC tests |
+| WP-11A | Operator API/releases | WP-01A, WP-01B, WP-04, WP-07, WP-09 | OpenAPI §9.10, bounded reads, preview/idempotent commands, pause/replay, immutable releases, temporal/resolution snapshots; reproducibility/RBAC tests |
 | WP-11B | DuckDB research kit | WP-11A | pinned DuckDB, manifest verifier, read-only views/macros і representative price/vehicle/news SQL; offline contract queries green |
-| WP-12 | Observability/lifecycle/runbooks | WP-01B, WP-02, WP-04, WP-11A | dashboards, projection/drift/source/translation/release/capacity alerts, compactor, backup/restore procedure; injected-failure, compaction і restore exercises |
+| WP-11C | Operator GUI | WP-01D, WP-11A | React/TypeScript Ukrainian GUI, generated client, cursor tables, SSE, worker scaling/drain і всі operator flows §7.7; RBAC/a11y/Playwright E2E green |
+| WP-12 | Observability/lifecycle/runbooks | WP-01B, WP-01D, WP-02, WP-04, WP-11A | dashboards, worker/projection/drift/source/translation/release/capacity alerts, compactor, backup/restore/scale runbooks; injected-failure exercises |
 | WP-13 | Security review | WP-02–12 | threat model validation, dependency/container scans, secret checks; findings triaged |
 | WP-14 | Integration/release | усі required WP | 7-day pilot, 19-country coverage, traceability matrix, acceptance report; no unresolved critical/high findings |
 
@@ -794,6 +957,10 @@ duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*
 | Плутанина source/system time | висока/високий | окремі temporal axes, nullable source time, inference flag, late-arrival tests | crawler time записано як source time або negative interval |
 | Неконтрольоване зростання projection history | висока/високий | hot/cold policy, pins, verified compaction, capacity forecast | <30% 90-day headroom або compaction verify failed |
 | Невідтворюваний dataset release | середня/високий | immutable manifest, code/config/schema versions, part hashes, DuckDB verifier | повторна збірка має непояснений hash/count diff |
+| Scale-out перевищує source rate | середня/високий | global PostgreSQL token bucket, source budget, multi-replica load test | aggregate origin rate вище policy або 429 spike |
+| Scale-down втрачає/дублює jobs | середня/високий | drain state, bounded grace, leases, idempotency, kill tests | lost ack, duplicate domain change або stuck lease |
+| Компрометація через Docker control | низька/критичний | GUI/API без socket; isolated Swarm controller, service allowlist, replica-only diff, audit | команда змінює image/mount/network/secret або stateful service |
+| GUI показує застарілий успіх | середня/середній | server acknowledgement, optimistic revision, SSE cursor + snapshot recovery | дія показана completed без audit/server state |
 | Розсинхронізація PostgreSQL і MongoDB | середня/високий | transactional outbox, monotonic projection version/CAS, Mongo applied receipt, PostgreSQL acknowledgement, reconciler, exact-version export | відсутній ack >15 хв або `cross_store_drift_total > 0` після reconcile |
 | Надмірно великий Mongo document | середня/високий | bounded embedding, окремі observation/review/media collections, size metric | document >8 MiB або unbounded array detected |
 | Надмірне використання браузера | середня/середній | browser by exception, budget metric | >10% fetches без ADR |
@@ -818,6 +985,8 @@ duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*
 | Q-010 | Яка production topology MongoDB? | single-member replica set у локальному MVP; 3 data-bearing members у різних failure domains перед HA production | DevOps, до production |
 | Q-011 | Яка cadence dataset releases? | щотижня та on-demand; published releases immutable | Research owner, до WP-11A close |
 | Q-012 | Які auto-merge thresholds по доменах? | auto-merge лише deterministic IDs; fuzzy лишається candidate до benchmark precision ≥99% | Data owner, до WP-07/WP-09 close |
+| Q-013 | Який production deployment mode? | Compose для local/single-host MVP; Swarm mode для automatic GUI-controlled replicas | DevOps, до WP-01D production enablement |
+| Q-014 | Увімкнути worker autoscale? | ні; manual desired replicas/concurrency до 7-day load/pilot evidence | Product/DevOps, після pilot |
 
 Рішення оформлювати у `docs/decisions/NNNN-title.md` з полями Context, Decision, Consequences, Date, Owner, Status.
 
@@ -843,11 +1012,17 @@ duckdb ':memory:' -c "SELECT count(*) FROM read_parquet('.artifacts/release/**/*
 │   ├── normalization/
 │   ├── translation/
 │   ├── persistence/{postgres,mongo}/
+│   ├── workers/
+│   ├── orchestration/{compose,swarm}/
 │   ├── api/
 │   └── telemetry/
+├── web/
+│   ├── src/{api,components,features,routes}/
+│   └── tests/{unit,e2e}/
 ├── schemas/{events,mongo,releases}/
 ├── migrations/{postgres,mongo}/
 ├── research/{sql,views}/
+├── deploy/{compose,swarm}/
 ├── tests/{unit,contract,integration,e2e,fixtures}/
 ├── sources/<source_id>/manifest.yaml
 ├── docs/{adr,runbooks,decisions}/
@@ -922,4 +1097,6 @@ parser:
 | Оборотний matching | FR-026, §9.8 | merge/block/unmerge/replay, immutable source records, resolution snapshot |
 | Відтворювані дослідження | FR-027, FR-029, §9.9 | manifest/part hashes, identical rebuild, offline DuckDB contract queries |
 | Capacity і витрати | FR-028, §15.1 | monthly actual/forecast, golden formulas, 2× load і headroom gate |
+| Docker і масштабування | FR-030—FR-033, §7.5—§7.6 | clean-host start, profiles, replica/drain/kill, global rate-limit і volume restart tests |
+| Operator GUI | FR-034—FR-037, §7.7, §9.10 | OpenAPI contract, RBAC/CSRF, cursor/SSE recovery, preview/idempotency, accessibility і Playwright E2E |
 | Незалежна реалізація | §17, §18 | WP acceptance, CI, contract/version ownership |
