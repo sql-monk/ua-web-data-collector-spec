@@ -148,14 +148,27 @@ jobs:
           artifact-name: sbom-collector.spdx.json
           upload-artifact: true
 
-      - name: Vulnerability scan (trivy; CRITICAL з fix блокує)
+      # §13: будь-який CRITICAL (і без fix) блокує — unfixed CRITICAL потребує датованого
+      # risk acceptance в ADR (не мовчазного ignore-unfixed).
+      - name: Vulnerability scan (trivy; CRITICAL блокує, включно з unfixed)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: collector:ci
           format: table
           severity: CRITICAL
+          exit-code: "1"
+
+      # HIGH: блокує лише за наявності fix (оновити digest base image / залежність);
+      # unfixed HIGH — risk acceptance в ADR-0002 (owner WP-13).
+      - name: Vulnerability scan (trivy; HIGH з fix блокує)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: collector:ci
+          format: table
+          severity: HIGH
           ignore-unfixed: true
           exit-code: "1"
+          skip-setup-trivy: true
 
       - name: docker compose up core+workers --wait (clean host, §16.3)
         run: docker compose up -d --wait --wait-timeout 300

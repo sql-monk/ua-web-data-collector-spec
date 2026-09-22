@@ -180,12 +180,20 @@ services:
     networks:
       - backend
     healthcheck:
-      # Процес живий і приймає команди; primary/RS перевіряє `ensure-mongo` та health api.
-      test: ["CMD", "mongosh", "--quiet", "--norc", "--eval", "db.adminCommand('ping').ok === 1 || quit(1)"]
+      # Стійкий до init-фази entrypoint (gate 2, H-1): під час init тимчасовий mongod слухає
+      # ЛИШЕ 127.0.0.1 і БЕЗ --replSet, тому (а) з'єднуємось на IP контейнера (hostname -i) —
+      # його слухає лише фінальний mongod з --bind_ip_all; (б) `hello` має бути від члена RS
+      # (`isreplicaset` до ініціалізації або `setName` після). Healthy ≠ primary: RS ініціалізує
+      # `ensure-mongo` (depends_on service_healthy), primary перевіряє health api.
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --norc --host "$(hostname -i)" --eval
+          'const h = db.hello(); (h.isreplicaset || h.setName) ? quit(0) : quit(1)'
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       start_period: 40s
-      retries: 6
+      retries: 10
     deploy: *limits-large
 
   minio:
@@ -433,7 +441,10 @@ services:
       replicas: 1
 
   # -------------------------------------------------------------------------------------------
-  # Browser (profile browser): 0 replicas за замовчуванням (§7.6)
+  # Browser (profile browser): 0 replicas за замовчуванням (§7.6).
+  # Увага: прапорець `--profile browser` ЗАМІНЮЄ env COMPOSE_PROFILES (а не доповнює), тому без
+  # `core` проєкт невалідний. Правильно:
+  #   COMPOSE_PROFILES=core,workers,browser docker compose up -d --no-recreate --scale browser-worker=1
   # -------------------------------------------------------------------------------------------
 
   browser-worker:

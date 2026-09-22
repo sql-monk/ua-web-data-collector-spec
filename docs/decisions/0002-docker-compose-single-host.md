@@ -84,6 +84,22 @@ file-secrets у Compose bind-mount-яться з правами хоста (на
 `docker-entrypoint.sh mongod`. Root user створює entrypoint образу з
 `MONGO_INITDB_ROOT_PASSWORD_FILE`; `replSetInitiate` виконує one-shot `ensure-mongo`.
 
+**Healthcheck mongo стійкий до init-фази entrypoint** (gate 2, знахідка H-1: 1/9 clean-host
+`up --wait` падав, бо healthcheck `mongosh … ping` на loopback потрапляв у тимчасовий
+init-mongod, зависав до timeout → exit 137 → mongod die 48 → restart, а Compose трактує exit
+залежності як фатальний). Init-mongod слухає лише `127.0.0.1` і запущений без `--replSet`,
+тому healthcheck (а) з'єднується з IP контейнера (`--host "$(hostname -i)"`), який слухає
+лише фінальний mongod з `--bind_ip_all`, і (б) вимагає від `hello` ознаки члена RS
+(`isreplicaset` до `replSetInitiate` або `setName` після); `start_period 40s`, `interval 10s`,
+`timeout 10s`, `retries 10`. Свідоме відхилення від рекомендованого gate-ом
+`isWritablePrimary || secondary`: до `replSetInitiate` член не є ні primary, ні secondary,
+а `ensure-mongo` чекає `service_healthy` — така перевірка дала б deadlock. Healthy = «фінальний
+mongod з --replSet приймає команди»; primary перевіряють `ensure-mongo` і health api.
+Відтворення: 10/10 циклів `down -v → up -d --wait` зелені (`implementation-pr2.md`,
+«Виправлення після gate 2»). Залишковий ризик (дата 2026-09-22, owner WP-00/WP-01B):
+на Linux CI не прогнано; якщо збій повториться, повторний `up -d --wait` — штатна
+ідемпотентна дія (runbook, «Типові проблеми»).
+
 ### One-shots і readiness
 
 `migrate-postgres` = `collector db migrate` — у PR2 TCP-перевірка PostgreSQL і exit 0 з
@@ -125,11 +141,31 @@ Swarm secrets, WP-01D).
 
 Job `docker` у `.github/workflows/ci.yml`: `init-secrets.sh` → `docker compose config
 --quiet` (без і з усіма profiles) → `docker build` (перевірка `Config.User`) →
-SBOM `anchore/sbom-action` (syft, SPDX artifact) → `aquasecurity/trivy-action`
-(`severity: CRITICAL`, `ignore-unfixed`, `exit-code: 1` — §13 «critical CVE блокує») →
-`docker compose up -d --wait` core+workers → `ps`/health → `down -v`. Локально SBOM/CVE —
-`docker scout sbom`/`docker scout cves` (0 critical, 2 high без fix у Debian trixie:
-perl, zlib — прийнято, дата 2026-09-22, переглядати при оновленні digest).
+SBOM `anchore/sbom-action` (syft, SPDX artifact) → `aquasecurity/trivy-action` двічі:
+`severity: CRITICAL, exit-code: 1` **без** `ignore-unfixed` (§13: критичний CVE блокує, навіть
+без fix — тоді потрібен датований risk acceptance тут, а не мовчазний skip) і
+`severity: HIGH, ignore-unfixed: true, exit-code: 1` (HIGH із доступним fix блокує → оновити
+digest/залежність; unfixed HIGH — risk acceptance нижче) → `docker compose up -d --wait`
+core+workers → `ps`/health → `down -v`. Локально SBOM/CVE — `docker scout sbom`/`docker scout
+cves`.
+
+**Risk acceptance (дата 2026-09-22, owner WP-13 — security/log tests §16.1 п.8;
+переглянути при кожному оновленні digest `python:3.13-slim`, не пізніше 2026-12-22):**
+2 HIGH без fix у base image Debian 13 trixie — `perl 5.40.1-6+deb13u1` (CVE-2026-82560) і
+`zlib 1:1.3.dfsg+really1.3.1-1`; 0 CRITICAL. Обидва — системні пакети base image, не
+виконуються application-кодом (perl не викликається; zlib — через stdlib Python лише для
+довірених даних у PR2). Прийнято до появи fix у Debian; CI `HIGH ignore-unfixed` їх не блокує,
+`CRITICAL` без `ignore-unfixed` заблокує будь-яке підвищення severity.
+
+### Прийняті знахідки gate 2 (дата 2026-09-22)
+
+- `api` завершується з кодом 143 при `docker compose stop` (uvicorn ≥ 0.30 після graceful
+  shutdown повторно піднімає SIGTERM), хоч shutdown штатний (~4 с) — owner **WP-11A** при заміні
+  стаба `collector.api.health` (нормалізувати до 0 або задокументувати як штатний код).
+- `name: collector` і фіксовані назви мереж — паралельні checkout-и на одному host конфліктують;
+  задокументовано в `deploy/compose/README.md` («Обмеження»), прийнято для single-host MVP/CI.
+- `docker compose config --quiet` без profiles валідує лише схему (усі сервіси мають profiles);
+  CI задає `COMPOSE_PROFILES=core,workers` і має окремий крок з усіма profiles — достатньо (info).
 
 ## Consequences
 

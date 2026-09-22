@@ -17,7 +17,9 @@ Base-файл — `docker-compose.yml` у корені репозиторію (C
 | `tools` | admin one-shot, release verifier, DuckDB | WP-11A/WP-14 |
 
 `core` потрібен завжди (workers залежать від `postgres`/`migrate-postgres`):
-`export COMPOSE_PROFILES=core,workers`.
+`export COMPOSE_PROFILES=core,workers`. Прапорець `--profile X` **замінює** `COMPOSE_PROFILES`
+(не доповнює), тому для browser: `COMPOSE_PROFILES=core,workers,browser docker compose up -d
+--no-recreate --scale browser-worker=1`.
 
 ## Мережі (§7.5)
 
@@ -68,6 +70,17 @@ Base-файл портів не публікує; на shared/production host ov
 | `POSTGRES_DB`, `POSTGRES_USER` | `collector` | ім'я БД/ролі; пароль — лише secret |
 | `MONGO_ROOT_USERNAME` | `collector_root` | root user Mongo; пароль — лише secret |
 | `DEV_*_PORT` | 5432/27017/9000/9001/8000 | порти override |
+
+## Обмеження: фіксоване ім'я проєкту `collector`
+
+`docker-compose.yml` задає `name: collector` і фіксовані назви мереж `collector_*`, тому
+project name **не** залежить від назви теки і `COMPOSE_PROJECT_NAME` його не перекриває
+(`name:` у файлі має пріоритет). Два checkout-и/worktree на одному host (напр. паралельні
+тестувальники) ділять один project, ті самі volumes `collector_*` і конфліктують за мережі.
+Для single-host MVP і CI (один runner = один checkout) це свідомо: стабільні назви volumes
+і мереж потрібні runbook-ам. Для паралельних стеків на одному host — окремий override з
+іншим `name:` та назвами мереж (`docker compose -f docker-compose.yml -f my.override.yml`),
+або різні Docker context/host.
 
 ## Перевірки (tests)
 

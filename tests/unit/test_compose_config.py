@@ -377,3 +377,34 @@ def test_ci_runs_compose_config_and_image_build() -> None:
     uses = [step.get("uses", "") for job in ci["jobs"].values() for step in job["steps"]]
     assert any("sbom" in u for u in uses), "SBOM step (syft) відсутній"
     assert any("trivy" in u for u in uses), "vulnerability scan (trivy) відсутній"
+
+
+def test_mongo_healthcheck_is_robust_to_entrypoint_init_phase(
+    services: dict[str, dict[str, Any]],
+) -> None:
+    """Gate 2, H-1: init-mongod слухає лише loopback і без --replSet — healthcheck його омине."""
+    healthcheck = services["mongo"]["healthcheck"]
+    test = " ".join(map(str, healthcheck["test"]))
+    assert "hostname -i" in test, "з'єднання з IP контейнера, не 127.0.0.1"
+    assert "127.0.0.1" not in test and "localhost" not in test
+    assert "isreplicaset" in test and "setName" in test, "ознака члена RS, не лише ping"
+    # Не вимагати primary: до `ensure-mongo` (depends_on service_healthy) член ще не primary.
+    assert "isWritablePrimary" not in test
+    assert _seconds(healthcheck["start_period"]) >= 40
+    assert _seconds(healthcheck["timeout"]) >= 10
+    assert healthcheck["retries"] >= 10
+
+
+def test_dockerfile_copies_registry_with_explicit_mode() -> None:
+    text = DOCKERFILE_PATH.read_text(encoding="utf-8")
+    assert re.search(r"^COPY .*--chmod=0644 .*source-registry\.yaml", text, re.MULTILINE)
+
+
+def test_ci_trivy_critical_without_ignore_unfixed_and_high_with() -> None:
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    scans = [s["with"] for s in ci["jobs"]["docker"]["steps"] if "trivy" in (s.get("uses") or "")]
+    by_severity = {s["severity"]: s for s in scans}
+    assert set(by_severity) == {"CRITICAL", "HIGH"}
+    assert "ignore-unfixed" not in by_severity["CRITICAL"], "§13: unfixed CRITICAL не пропускати"
+    assert str(by_severity["CRITICAL"]["exit-code"]) == "1"
+    assert by_severity["HIGH"]["ignore-unfixed"] is True

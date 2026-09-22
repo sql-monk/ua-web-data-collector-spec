@@ -378,3 +378,115 @@ $ python -c "yaml.safe_load(ci.yml)"    jobs: ['python', 'pre-commit', 'secrets'
   у `ensure-mongo` command; WP-01D — тіла `worker`/`scheduler`, Swarm ADR; WP-11A —
   `collector.api.health` → повний API; WP-02 PR3 — image `browser-worker`; WP-12 — сервіси
   profile `observability` у мережі `telemetry`.
+
+## Виправлення після gate 2
+
+Gate 2: `docs/plan/reports/WP-00/testing-pr2.md` (вердикт pass, HEAD `d96a1b4`, тести
+тестувальника `150441e`). Відповідь на кожну знахідку §6:
+
+| Severity | Знахідка | Статус | Що зроблено / обґрунтування |
+|---|---|---|---|
+| high | H-1: інтермітентний `up --wait` через рестарт `mongo` на першому boot (healthcheck `mongosh` під час init-фази entrypoint → exit 137 → die 48 → restart) | **fixed** | Healthcheck `mongo` переписано: `mongosh --host "$(hostname -i)"` (init-mongod слухає лише `127.0.0.1`, IP контейнера слухає лише фінальний mongod з `--bind_ip_all`) + умова `hello().isreplicaset \|\| hello().setName` (init-mongod запущений без `--replSet`); `start_period 40s`, `interval 10s`, `timeout 10s`, `retries 10`. **Відхилення від рекомендованого `isWritablePrimary \|\| secondary`:** до `replSetInitiate` член не є ні primary, ні secondary, а `ensure-mongo` чекає `service_healthy` → deadlock; primary перевіряють `ensure-mongo` і health api. Підтверджено: до фінального mongod healthcheck дає `ECONNREFUSED <container-ip>:27017` (exit 1, не зависання), далі 0. Відтворення 10 циклів `down -v → up -d --wait` — нижче, 10/10 exit 0, `mongo.RestartCount=0`. Runbook «Типові проблеми» + ADR-0002 (залишковий ризик з датою, повтор `up -d --wait` — штатна дія). Тест `test_mongo_healthcheck_is_robust_to_entrypoint_init_phase`. |
+| medium | `test_compose_render.py`: невалідний проєкт → skip | **fixed** тестувальником у `150441e` | Без змін реалізатора; підтверджую поведінку (FAIL замість skip). |
+| medium | `test_ensure_replica_set_reraises_other_operation_failures` не ловив мутацію M13 | **fixed** тестувальником у `150441e` | Новий тест у `test_health_adversarial.py`; код без змін. |
+| low | `api` завершується з кодом 143 при `stop` (uvicorn повторно піднімає SIGTERM) | **accepted** (owner WP-11A, 2026-09-22) | Косметично; stub `collector.api.health`/команда `api` замінюються WP-11A — зафіксовано в ADR-0002 «Прийняті знахідки gate 2». |
+| low | runbook/коментар compose: `--profile browser` замінює `COMPOSE_PROFILES` | **fixed** | Runbook «Масштабування» + «Типові проблеми», коментар у `docker-compose.yml` (секція browser), `deploy/compose/README.md`: правильна команда `COMPOSE_PROFILES=core,workers,browser docker compose up -d --no-recreate --scale browser-worker=1`; пояснено, що прапорець замінює env. |
+| low | `COPY … source-registry.yaml` → 0755 з Windows-контексту | **fixed** | `COPY --chown=root:root --chmod=0644` у `Dockerfile`; коментар оновлено; тест `test_dockerfile_copies_registry_with_explicit_mode`; перевірено в image (`-rw-r--r--`, вивід нижче). |
+| low | trivy `ignore-unfixed: true` суперечить §13 для CRITICAL | **fixed** | CI: два кроки trivy — `CRITICAL, exit-code 1` **без** `ignore-unfixed` (unfixed CRITICAL блокує до датованого acceptance в ADR) і `HIGH, ignore-unfixed: true, exit-code 1` (HIGH з fix блокує → оновити digest). 2 відомі unfixed HIGH (perl CVE-2026-82560, zlib; base image Debian trixie) — датований risk acceptance в ADR-0002, owner WP-13, перегляд до 2026-12-22. Тест `test_ci_trivy_critical_without_ignore_unfixed_and_high_with`; тест тестувальника `test_ci_trivy_blocks_on_critical` лишається зеленим (перший trivy-крок — CRITICAL). |
+| low | `name: collector` / фіксовані назви мереж — конфлікт паралельних checkout-ів | **accepted** (owner WP-00, 2026-09-22) | Задокументовано в `deploy/compose/README.md` «Обмеження: фіксоване ім'я проєкту» (чому свідомо, як обійти override-ом з іншим `name:`); ADR-0002. |
+| info | `docker compose config --quiet` без profiles валідує лише схему | **accepted** (info) | CI задає `COMPOSE_PROFILES=core,workers` + окремий крок з усіма profiles; зафіксовано в ADR-0002. |
+| info | SBOM/scan — `operationally unverified` до першого прогону CI | **accepted** (owner WP-00, до першого PR-прогону) | Без змін; локально Docker Scout (0 CRITICAL, 2 HIGH unfixed). |
+| — | (поза §6) `markdownlint` MD038 у `testing-pr2.md:423` ламав `pre-commit run --all-files` | **fixed** (мінімально) | Прибрано пробіли всередині code span у звіті тестувальника (`(healthcheck mongosh, timeout 5s)`); зміст не змінено. |
+
+### Вивід перевірок після виправлень
+
+```text
+# H-1: 10 циклів `docker compose down -v; docker compose up -d --wait` (core+workers, новий healthcheck mongo)
+cycle 1: up --wait exit=0 elapsed=172s not-healthy=0 mongo.RestartCount=0
+cycle 2: up --wait exit=0 elapsed=65s not-healthy=0 mongo.RestartCount=0
+cycle 3: up --wait exit=0 elapsed=76s not-healthy=0 mongo.RestartCount=0
+cycle 4: up --wait exit=0 elapsed=127s not-healthy=0 mongo.RestartCount=0
+cycle 5: up --wait exit=0 elapsed=55s not-healthy=0 mongo.RestartCount=0
+cycle 6: up --wait exit=0 elapsed=60s not-healthy=0 mongo.RestartCount=0
+cycle 7: up --wait exit=0 elapsed=89s not-healthy=0 mongo.RestartCount=0
+cycle 8: up --wait exit=0 elapsed=144s not-healthy=0 mongo.RestartCount=0
+cycle 9: up --wait exit=0 elapsed=39s not-healthy=0 mongo.RestartCount=0
+cycle 10: up --wait exit=0 elapsed=42s not-healthy=0 mongo.RestartCount=0
+
+# Healthcheck mongo під час init-фази (smoke до циклів): ECONNREFUSED на IP контейнера — exit 1, без зависання
+1 MongoNetworkError: connect ECONNREFUSED 172.19.0.2:27017
+1 MongoNetworkError: connect ECONNREFUSED 172.19.0.2:27017
+0 (healthy: фінальний mongod з --replSet)
+
+# Повний прогін команд PR2 з фінальним image (після всіх правок)
+$ docker compose config --quiet
+exit=0
+$ docker compose --profile core --profile workers --profile browser config --quiet
+exit=0
+$ docker compose build --pull
+ Image collector:dev Built
+exit=0
+$ docker compose --profile core --profile workers up -d --wait
+ Container collector-api-1 Healthy
+ Container collector-discovery-worker-1 Healthy
+ Container collector-ensure-mongo-1 Exited
+ Container collector-export-worker-1 Healthy
+ Container collector-fetch-worker-1 Healthy
+ Container collector-fetch-worker-2 Healthy
+ Container collector-maintenance-worker-1 Healthy
+ Container collector-migrate-postgres-1 Exited
+ Container collector-minio-1 Healthy
+ Container collector-mongo-1 Healthy
+ Container collector-parse-worker-1 Healthy
+ Container collector-parse-worker-2 Healthy
+ Container collector-postgres-1 Healthy
+ Container collector-projector-worker-1 Healthy
+ Container collector-scheduler-1 Healthy
+ Container collector-translation-worker-1 Healthy
+exit=0 elapsed=36s
+$ docker compose ps -a
+SERVICE              STATUS
+api                  Up 9 seconds (healthy)
+discovery-worker     Up 12 seconds (healthy)
+ensure-mongo         Exited (0) 13 seconds ago
+export-worker        Up 9 seconds (healthy)
+fetch-worker         Up 8 seconds (healthy)
+fetch-worker         Up 11 seconds (healthy)
+maintenance-worker   Up 10 seconds (healthy)
+migrate-postgres     Exited (0) 13 seconds ago
+minio                Up 25 seconds (healthy)
+mongo                Up 23 seconds (healthy)
+parse-worker         Up 8 seconds (healthy)
+parse-worker         Up 10 seconds (healthy)
+postgres             Up 22 seconds (healthy)
+projector-worker     Up 10 seconds (healthy)
+scheduler            Up 12 seconds (healthy)
+translation-worker   Up 11 seconds (healthy)
+$ mongo healthcheck log (перші записи) / RestartCount
+0 (ok)
+0 (ok)
+RestartCount=0
+$ docker compose exec api python -m collector.api.health
+postgres: ok (tcp postgres:5432 reachable (no SQL check yet; owner WP-01A))
+mongo: ok (writable primary of replica set 'rs0')
+minio: ok (liveness HTTP 200)
+$ docker compose exec api ls -l /app/config/source-registry.yaml
+-rw-r--r-- 1 root root 9922 Sep 22 06:44 /app/config/source-registry.yaml
+$ docker compose down -v
+24
+volumes collector_*: 0
+```
+
+```text
+$ uv run ruff check . / ruff format --check . / mypy src / mypy tests
+All checks passed!
+72 files already formatted
+Success: no issues found in 25 source files
+Success: no issues found in 14 source files
+$ uv run pytest -m "not live"
+213 passed, 1 skipped, 8 warnings in 35.33s
+$ uv run pre-commit run --all-files
+11 hooks Passed
+$ docker ps --filter name=collector- (після down -v)
+0
+```

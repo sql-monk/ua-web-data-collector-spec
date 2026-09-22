@@ -54,8 +54,15 @@ curl -s http://127.0.0.1:8000/api/v1/health/components
 
 ```bash
 docker compose up -d --no-recreate --scale fetch-worker=4 --scale parse-worker=2
-docker compose up -d --no-recreate --scale browser-worker=1   # після canary, профіль browser
+# browser-worker живе у профілі `browser`: додайте його до COMPOSE_PROFILES (після canary, §8).
+COMPOSE_PROFILES=core,workers,browser docker compose up -d --no-recreate --scale browser-worker=1
 ```
+
+Прапорець `--profile <name>` **замінює** значення `COMPOSE_PROFILES`, а не доповнює його:
+`docker compose --profile browser up …` активує лише `browser` без `core` і падає з
+`depends on undefined service "postgres"`. Або перелічуйте всі профілі прапорцями
+(`--profile core --profile workers --profile browser`), або задавайте повний список у
+`COMPOSE_PROFILES`.
 
 ## Restart без втрати даних
 
@@ -74,7 +81,8 @@ docker compose down -v         # + видалення volumes (усі дані!)
 
 | Симптом | Причина / дія |
 |---|---|
-| `service "…-worker" depends on undefined service "postgres"` | запущено `--profile workers` без `core`; додайте `core` |
+| `service "…-worker" depends on undefined service "postgres"` | активовано профіль без `core` (напр. `--profile workers` або `--profile browser` — прапорець замінює `COMPOSE_PROFILES`); додайте `core` |
+| `up -d --wait` завершився з кодом 1, `mongo` має `RestartCount` > 0, стек далі стає healthy | init-фаза entrypoint mongo (виправлено healthcheck-ом у PR2 gate 2, 10/10 циклів зелені); якщо повториться — повторний `docker compose up -d --wait` штатний (ідемпотентний), повідомте owner WP-00/WP-01B з `docker events` |
 | `mongo` не стає healthy, у логах «permissions on … keyfile are too open» | keyfile копіюється в tmpfs з 0400 entrypoint-ом; перевірте, що `deploy/compose/secrets/mongo_keyfile` існує і readable |
 | `ensure-mongo` `Exited (1)`, `Authentication failed` | `mongo_root_password` змінено після першої ініціалізації volume; скиньте `down -v` або оновіть пароль у Mongo |
 | `api` `unhealthy` | `python -m collector.api.health` у контейнері покаже, який компонент `error` |

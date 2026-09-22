@@ -64,14 +64,17 @@ RUN groupadd --gid 10001 collector \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent \
        --shell /usr/sbin/nologin collector \
     && rm -rf /usr/local/lib/python3.13/site-packages/pip* /usr/local/bin/pip* \
-              /usr/local/lib/python3.13/ensurepip
+              /usr/local/lib/python3.13/ensurepip \
+    && mkdir -p -m 0755 /app/config
 
 COPY --from=builder --chown=root:root /opt/collector /opt/collector
 
 # Реєстр джерел (WP-01C, approved dependency): контракти валідують `source_id` проти
 # docs/research/source-registry.yaml через env COLLECTOR_SOURCE_REGISTRY. Файл read-only,
-# належить root (0644, каталог 0755); читається non-root процесом, rootfs read-only.
-COPY --chown=root:root docs/research/source-registry.yaml /app/config/source-registry.yaml
+# належить root, --chmod=0644 (незалежно від прав у build-контексті, напр. Windows 0755); каталог
+# /app/config створено вище з 0755 (COPY --chmod поширюється й на створювані каталоги — 0644
+# зробив би каталог непрохідним). Читається non-root процесом, rootfs read-only.
+COPY --chown=root:root --chmod=0644 docs/research/source-registry.yaml /app/config/source-registry.yaml
 
 # TMPDIR/HOME → /tmp: tmpfs у Compose; read-only rootfs (§7.5) — усі тимчасові файли лише тут.
 ENV PATH="/opt/collector/bin:${PATH}" \
