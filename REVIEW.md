@@ -4,7 +4,7 @@
 
 Об’єкт: `TECHNICAL_SPECIFICATION.md`
 
-Результат: усі критичні й суттєві зауваження виправлено у версії 1.1.
+Результат: усі критичні й суттєві зауваження виправлено у версії 1.2.
 
 ## Чекліст і виправлення
 
@@ -33,6 +33,25 @@
 | R-21 | Середній | HTTPX-рядок досі пропонував реєстраційний AUTO.RIA API. | Fixed | HTTPX обмежено live-перевіреними anonymous API; AUTO.RIA v1 явно використовує sitemap/category/HTML. |
 | R-22 | Середній | 70 джерел не мали канонічних `source_id`. | Fixed | Додано `docs/research/source-registry.yaml` з 70 унікальними ID, names, domains, country/kind, ratings і research-файлами. |
 | R-23 | Середній | RST phone reveal був записаний як підтверджене поле, хоча live reveal перевірено лише для OLX. | Fixed | RST reveal позначено `operationally_unverified`; acceptance вимагає окремий доказ для кожного сайту. |
+| R-24 | Високий | Одна PostgreSQL-модель змушувала вкладати різнорідні каталожні й автомобільні attributes у relational/JSONB структуру. | Fixed | Запроваджено bounded-context polyglot persistence: PostgreSQL для control/news/lineage, MongoDB для catalog/vehicle current+history, S3 для raw/normalized artifacts; додано projection outbox, monotonic versions/CAS, applied receipts, acknowledgements, reconciler, exact-version export, validators/indexes і failure tests. |
+| R-25 | Високий | Out-of-order tasks могли перезаписати новіший Mongo current document. | Fixed | Додано per-entity monotonic `projection_version`, conditional update/CAS, unique entity-version і тест доставки `3,1,2`. |
+| R-26 | Високий | Одна назва receipt змішувала Mongo atomic proof і PostgreSQL acknowledgement. | Fixed | Розділено `applied_projection_receipts` у Mongo та `projection_acknowledgements` у PostgreSQL; Mongo receipt атомарний із observation/current write. |
+| R-27 | Високий | Повний normalized payload у PostgreSQL JSONB утворював другий source of truth. | Fixed | Payload перенесено в immutable content-addressed S3 artifact; PostgreSQL містить лише URI/hash/schema/version/task/lineage. |
+| R-28 | Високий | Незалежним WP бракувало точних storage/event контрактів. | Fixed | Додано ключі, стани, versions, leases, timestamps, BSON shapes, обов'язкові indexes та окремий WP-01C shared contracts. |
+| R-29 | Високий | Cross-store API/export не гарантували snapshot consistency. | Fixed | API читає exact confirmed version або повертає inconsistency; export фіксує immutable watermark/manifest і exact Mongo versions. |
+| R-30 | Середній | Projection command і publishable domain event були змішані. | Fixed | Введено окремі `projection.command` та `domain.changed`; останній атомарний із acknowledgement та власним publish outbox. |
+| R-31 | Середній | Mongo bulk policy суперечила per-task transaction boundary. | Fixed | Batch дозволено лише для dispatch; кожна task/entity має окрему Mongo transaction. |
+| R-32 | Середній | Для history та operational queue бракувало compound indexes. | Fixed | Додано indexes entity/time, parent/time, offer/seller/contact та PostgreSQL status/not-before/priority/publish lookup. |
+| R-33 | Середній | Не було S3↔PostgreSQL crash/reconciliation protocol. | Fixed | Додано content-addressed PUT, HEAD/checksum verification перед DB commit, grace-period orphan sweeper і fault-injection test. |
+| R-34 | Середній | Mongo consistency та transaction retry policy були неповні. | Fixed | Зафіксовано primary/majority/snapshot concerns, retry для transient/unknown commit і межу single-member replica set. |
+| R-35 | Середній | Work packages конфліктували за shared schemas/migrations. | Fixed | WP-01C володіє shared contracts, WP-01A — SQL migrations, WP-01B — Mongo validators/indexes; інші WP працюють через owned APIs. |
+| R-36 | Високий | Exact-version export суперечив правилу створення observation лише при зміні/heartbeat. | Fixed | Додано обов'язковий `entity_projection_versions` для кожної task; business observations лишилися change/heartbeat records; event потребує і apply, і state change. |
+| R-37 | Середній | Після crash до PostgreSQL ack не гарантувалося byte-equivalent відновлення change event. | Fixed | Mongo receipt атомарно зберігає previous/result hash і canonical event descriptor/delta з hash; reconciler відтворює той самий event. |
+| R-38 | Середній | Orphan sweeper міг змагатися з producer між HEAD та DB commit. | Fixed | Додано PostgreSQL upload claim із lease/token; stale producer повторює claim і HEAD/reupload, sweeper не чіпає live claim. |
+| R-39 | Середній | Entity kinds та replay indexes були неповні для offers/sellers/reviews/questions. | Fixed | Розширено kinds, введено exact projection records та natural content-version unique index для reviews/questions. |
+| R-40 | Середній | Mongo одночасно називався source of truth і materialized projection. | Fixed | Ролі уточнено: S3 raw — canonical evidence, normalized artifact — reproducible input, PostgreSQL — canonical control/index/news, Mongo — authoritative serving projection. |
+| R-41 | Середній | Upload claim не мав формального fencing token. | Fixed | Додано unique object key, монотонну `claim_generation`, атомарне збільшення та commit predicate з generation і чинним lease. |
+| R-42 | Середній | Byte-equivalent event replay не мав canonical serialization contract. | Fixed | Receipt зберігає готові UTF-8 event bytes, media type і SHA-256; reconciler копіює bytes без reserialization, великі payloads мають immutable artifact ref. |
 
 ## Підсумкова перевірка узгодженості
 

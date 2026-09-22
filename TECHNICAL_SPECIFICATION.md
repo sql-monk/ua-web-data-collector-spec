@@ -5,7 +5,7 @@
 | Поле | Значення |
 |---|---|
 | Статус | Готово до декомпозиції та реалізації |
-| Версія | 1.1 |
+| Версія | 1.2 |
 | Дата | 2026-09-22 |
 | Мова | Українська |
 | Робоча назва системи | UA Web Data Collector |
@@ -26,7 +26,7 @@
 5. Для кожної новини зберігаємо незмінений оригінал і машинний переклад українською. Переклад не замінює оригінал і може бути перегенерований іншою моделлю.
 6. У v1 використовуємо лише сторінки, RSS/Atom, sitemap і source API, які працюють без реєстрації та входу. Авторизація на джерелах, source API keys, приватні кабінети й paywall не входять до v1; credentials внутрішньої інфраструктури та провайдера перекладу належать іншому контуру.
 7. MVP призначений для внутрішнього дослідження; зовнішня публікація даних і UI не входять до MVP.
-8. Інфраструктура MVP працює через Docker Compose на одному Linux-хості; компоненти лишаються горизонтально масштабованими.
+8. Інфраструктура MVP працює через Docker Compose на одному Linux-хості: PostgreSQL для control plane/news, MongoDB replica set для каталогів/авто та S3-compatible artifact store; компоненти лишаються горизонтально масштабованими.
 9. Стартовий масштаб: до 5 млн активних сутностей, 30 млн спостережень на місяць, 3 млн новин/рік і до 5 ТБ сирих та очищених даних на рік.
 
 Питання, що не блокують проєктування, але мають бути закриті до production:
@@ -166,7 +166,7 @@
 - `status`: `active`, `inactive`, `deleted`, `unknown`;
 - `content_hash`, `identity_hash`, `fetch_id`, `parser_version`;
 - `raw_object_uri`, `schema_version`;
-- `attributes` JSONB для всіх публічних полів, які ще не стандартизовані;
+- `attributes` object для всіх публічних полів, які ще не стандартизовані: BSON у Mongo catalog/vehicle documents; JSONB у PostgreSQL дозволений лише для bounded news/control extensions, не для копії catalog/vehicle payload;
 - `contacts` як окрема versioned collection: тип, нормалізоване й вихідне значення, ім’я/роль, `first_seen_at`, `last_seen_at`;
 - `media_assets`: URL, тип, caption, width/height/duration, source hash і optional downloaded object URI.
 
@@ -228,6 +228,10 @@
 | FR-017 | Translation memory не відправляє повторно незмінні сегменти; ключ містить source language, target language, normalized segment hash, provider/model і glossary version. |
 | FR-018 | Публічні контакти, імена, профілі, VIN та інші доступні поля мають зберігатися разом із provenance і часовою версією. |
 | FR-019 | Кожне джерело має coverage report: відомі типи сторінок, поля, pagination/backfill межі, кількість виявлених і пропущених записів. |
+| FR-020 | Повна domain-модель каталогів і авто зберігається в MongoDB як bounded current documents та окремі append-only observations; PostgreSQL містить artifact pointer/hash, index, task і lineage, але не payload-копію. |
+| FR-021 | Parser ніколи не робить синхронний запис у дві БД; PostgreSQL projection outbox і Mongo unique idempotency key забезпечують at-least-once delivery без дублікатів. |
+| FR-022 | Reconciler виявляє task без Mongo applied receipt/PostgreSQL acknowledgement, acknowledgement без index і version drift; повторна проєкція з raw/normalized artifact відновлює узгодженість. |
+| FR-023 | Read/export API приховує межу двох БД, але не виконує необмежені runtime joins; масові cross-domain вибірки формуються як versioned Parquet/JSONL. |
 
 ## 7. Архітектура
 
@@ -237,21 +241,26 @@ Source Registry ──> Scheduler ──> Discovery ──> Fetch Queue ──> 
        │                 │                                         │
        └── Route Guard ──┴─────────────────────────────────────────┤
                                                                   v
-                                                        S3/MinIO Raw Store
+                                                     S3/MinIO Artifact Store
                                                                   │
                                                                   v
-                                                  Extractor + Parser + Validator
-                                                                  │
-                                       ┌──────────────────────────┼───────────────┐
-                                       v                          v               v
-                              PostgreSQL Core          Translation Queue   Dead Letter Queue
+                                                   Extractor + Parser + Validator
                                                                   │
                                                                   v
-                                                     UK Translation + QA
-                                       │
-                              Change/Event Outbox
-                                       │
-                         Export API / Parquet / Consumers
+                                         PostgreSQL Artifact Index/Projection Outbox
+                                                   │                        │
+                         ┌─────────────────────────┘                        └──────────────┐
+                         v                                                                 v
+           PostgreSQL Control + News                                      MongoDB Catalog + Vehicle
+          jobs, cursors, lineage, news,                                  current documents, offers,
+          translations, match graph, audit                              observations, sellers, contacts
+                         │                                                                 │
+                         └──────────────────> Read/Export API <────────────────────────────┘
+                                                   │
+                                      Parquet/JSONL / Consumers
+
+PostgreSQL News ──> Translation Queue/Worker + QA ──> PostgreSQL Translation Versions
+Failed terminal jobs ──> PostgreSQL Dead Letter
 
 All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafana + Loki
 ```
@@ -262,18 +271,55 @@ All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafan
 - **Scheduler:** створює jobs; не містить CSS/XPath selectors.
 - **Discovery:** повертає кандидатні URL/IDs і cursor; не парсить доменну картку.
 - **Fetcher:** отримує bytes; не знає доменної схеми.
-- **Raw Store:** immutable, content-addressed, шифрований; повторний parse не потребує мережі.
+- **Artifact Store:** immutable, content-addressed, шифрований; містить raw та versioned normalized artifacts, тому повторний parse/projection не потребує мережі.
 - **Extractor/Parser:** адаптер джерела + версія; виділяє main content, structured data, contacts та доменні поля; не робить зовнішніх HTTP-запитів.
 - **Translation:** сегментує очищений оригінал, використовує translation memory і перекладає в `uk`; ніколи не змінює original artifact.
 - **Normalizer/Matcher:** приводить одиниці, довідники й ідентичності, не змінює raw.
-- **Core DB:** operational state, normalized entities, observations, lineage і outbox.
-- **Exporter:** read-only відносно core tables.
+- **PostgreSQL Core:** operational state, jobs, cursors, fetch/parse metadata, lineage, news, translations, cross-source identity/matching, projection tasks і outbox.
+- **MongoDB Domain Store:** поточні source documents і append-only observations каталогів/авто, sellers, contacts, reviews/questions; не керує scheduler або source cursors.
+- **Mongo Projector:** бере task/artifact pointer із PostgreSQL, читає валідований normalized artifact із S3/MinIO, ідемпотентно проєктує його в MongoDB та повертає applied receipt.
+- **Exporter:** read-only відносно PostgreSQL і MongoDB; об'єднує результати лише через стабільні internal UUID/source identity, а не через неявні cross-database joins.
 
 ### 7.2. Черга MVP
 
 Використати PostgreSQL job table з `FOR UPDATE SKIP LOCKED`, lease timeout, `attempt`, `not_before`, унікальним idempotency key і dead-letter status. Це скорочує кількість сервісів і гарантує транзакційний outbox.
 
 Перехід на RabbitMQ/Redpanda допускається лише після виміряної межі: понад 100 jobs/s стабільно, черга понад 1 млн pending jobs або потреба в незалежному масштабуванні багатьох типів споживачів. Перехід оформлюється ADR і не змінює job payload contract.
+
+### 7.3. Межа PostgreSQL / MongoDB
+
+| Дані/функція | Авторитетне сховище/роль | Причина |
+|---|---|---|
+| Sources, policies, routes, cursors, jobs, retries, fetch/parse metadata | PostgreSQL, canonical control state | транзакційні переходи станів, leases, унікальні ключі, аудит |
+| Raw HTML/XML/JSON | S3/MinIO, canonical evidence | immutable bytes, checksum, compression і lifecycle |
+| Normalized projection payloads | S3/MinIO, immutable reproducible projection input | не дублює domain payload у PostgreSQL; version/hash пов'язують його з raw і parser |
+| NewsArticle, versions, translations, segments | PostgreSQL, canonical news store | чіткі зв'язки original/version/translation, повнотекстові й часові запити |
+| Global entity index, aliases, match candidates, export manifests | PostgreSQL, canonical cross-domain index | зв'язки між джерелами й посилання на Mongo document IDs |
+| Каталожні source items, offers, reviews/questions, observations | MongoDB, authoritative serving projection | різнорідні вкладені attributes і різні схеми категорій; клієнти не читають payload із PostgreSQL |
+| Vehicle listings, seller/contact snapshots, observations | MongoDB, authoritative serving projection | поліморфні комплектації/стани й повна source-specific картка |
+| Screenshots, великі media/export artifacts | S3/MinIO, artifact store | content-addressing і lifecycle |
+
+PostgreSQL і MongoDB не мають спільної транзакції та не використовують синхронний dual-write з parser. Потік запису:
+
+1. Fetcher зберігає raw artifact у S3/MinIO; parser створює окремий immutable normalized projection artifact у тому самому store.
+2. Одна PostgreSQL-транзакція записує `parse_attempt`, pointer/hash/schema version normalized artifact, монотонний для `entity_uuid` `projection_version`, `projection_task` і `projection.command` outbox event.
+3. Mongo Projector обробляє одну task/entity в одній MongoDB-транзакції: завжди вставляє `entity_projection_version`, умовно оновлює current document лише якщо вхідний `projection_version` більший, при зміні state hash/heartbeat додає business observation і атомарно вставляє `applied_projection_receipt`. Ключі task та `(entity_uuid, projection_version)` унікальні.
+4. Після Mongo commit projector в одній PostgreSQL-транзакції записує `projection_acknowledgement`, монотонно оновлює confirmed version в `entity_index` і завершує job. Лише receipt з `applied_to_current=true AND state_changed=true` створює deterministic `domain.changed` event разом із його publish outbox row. Crash між кроками 3–4 спричиняє безпечний replay, а не нову observation.
+5. Reconciler порівнює незавершені PostgreSQL tasks із Mongo `applied_projection_receipts`/документами; cursor не вважається повністю опрацьованим, доки всі його projection tasks не acknowledged або quarantined.
+
+`projection_version` видається PostgreSQL атомарно під row/advisory lock для конкретного `entity_uuid`. Доставка може бути не по порядку: старіша task зберігає exact version record і receipt, але compare-and-set не дозволяє їй перезаписати новіший current state. Seller/contact, якщо це окремий current document, має власний `entity_uuid` і монотонну version; не можна ділити version counter між неатомарними агрегатами.
+
+`projection.command` є внутрішньою командою projector і не публікується зовнішнім споживачам. `domain.changed` виникає тільки після Mongo commit і лише для `applied_to_current=true AND state_changed=true`; має `event_id`, `aggregate_id`, `aggregate_version`, `event_type`, `payload_schema_version` і публікується щонайменше один раз з окремого PostgreSQL outbox. Projector один раз формує ready-to-publish UTF-8 event bytes зі стабільним `event_id` і записує bytes (`BSON Binary`), media type та SHA-256 у Mongo receipt у тій самій транзакції. Reconciler копіює ці bytes у PostgreSQL `bytea` без повторної серіалізації, тому після crash відтворює byte-equivalent event; consumer дедуплікує за `event_id`. Максимум inline event — 256 KiB, більший payload зберігається як immutable artifact із URI/hash у receipt.
+
+MongoDB є авторитетним serving store catalog/vehicle, але відновлюваною проєкцією canonical raw evidence та versioned normalized input. Заборонено робити MongoDB canonical джерелом scheduler state або PostgreSQL джерелом повної картки каталогу/авто. Read API робить bounded two-step lookup через `entity_index`; масові аналітичні об'єднання виконуються в versioned Parquet export, а не runtime cross-database join.
+
+### 7.4. Резервування, відновлення та перебудова MongoDB
+
+- PostgreSQL має point-in-time recovery; S3/MinIO — versioning/immutability; MongoDB — регулярний snapshot із зафіксованим operation time та перевіреним restore.
+- Pointers/hashes normalized artifacts і projection outbox зберігаються щонайменше до успішної перевірки двох наступних MongoDB backups. Сам payload не дублюється в PostgreSQL JSONB. Raw/normalized artifacts і lineage мають чинну retention policy незалежно від MongoDB.
+- MongoDB domain state вважається відновлюваною materialized projection: після втрати collection її можна детерміновано перебудувати з PostgreSQL artifact pointers/tasks та immutable raw/normalized artifacts без повторного звернення до сайтів.
+- Для повного disaster recovery спочатку відновлюються PostgreSQL і artifact store, потім Mongo snapshot, після чого projector replay-ить усі tasks після snapshot watermark, а reconciler підтверджує нульовий drift.
+- Restore drill виконується щоквартально в ізольованому середовищі; результат містить watermark, кількість replayed tasks, hash/count звірку, фактичні RPO/RTO та підписаний acceptance report.
 
 ## 8. Технології та їх призначення
 
@@ -288,53 +334,124 @@ All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafan
 | lingua-language-detector або fastText lid.176 | визначення мови | результат з confidence; source-declared language не ігнорувати мовчки |
 | Playwright Python, pinned | звичайне анонімне JS-rendering як виняток | після bounded canary без challenge можна ввімкнути low-rate production route; browser binary pinned; CAPTCHA/challenge/login, fingerprint spoofing і private cookies не обходити |
 | Pydantic v2 + JSON Schema | versioned контракти і валідація | schema snapshots у репозиторії |
-| PostgreSQL 18 | core data, job queue, history, outbox | підтримувана гілка до 2030; JSONB лише для extension fields |
-| SQLAlchemy 2 + Alembic | persistence і міграції | міграції forward-only; downgrade лише де безпечно |
-| S3-compatible storage (MinIO local, managed S3 prod) | raw HTML/XML/JSON, screenshots за потреби, exports | lifecycle: hot → compressed archive → delete згідно з політикою |
+| PostgreSQL 18 | control plane, job queue, news/translations, lineage, matching, outbox | транзакційний source of truth; JSONB лише для bounded extension fields |
+| SQLAlchemy 2 + Alembic | PostgreSQL persistence і міграції | міграції forward-only; downgrade лише де безпечно |
+| MongoDB 8.0 replica set | каталоги, offers, авто, sellers/contacts та їхні observations | гнучкі BSON documents; replica set потрібен для транзакцій/change streams; exact image digest pin |
+| PyMongo Async API | MongoDB projector і domain repository | без ODM-магії; Pydantic contract → явний BSON mapping; retryable writes, primary reads, `readConcern=majority` і `writeConcern=majority`; транзакції — `snapshot` |
+| S3-compatible storage (MinIO local, managed S3 prod) | raw і normalized artifacts, screenshots за потреби, exports | content-addressed keys; lifecycle: hot → compressed archive → delete згідно з політикою |
 | FastAPI | operator/read API, health/readiness | не відкривати назовні без auth gateway |
 | Google Cloud Translation Advanced | основний переклад усіх перелічених мов в українську | офіційно підтримує `de`, `fr`, `en`, `lt`, `lv`, `et`, `pl`, `hu`, `ro`, `cs`, `sk`, `sl`, `hr`, `it`, `es`, `nl` і `uk`; batch для backfill, online для нових статей |
 | NLLB-200 distilled або Marian/OPUS-MT | локальний fallback і cost experiment | запускати тільки після benchmark на затвердженому multilingual наборі; не змішувати результати без `provider/model` |
-| Redis-compatible cache (optional) | translation memory hot cache і distributed rate limits | source of truth лишається PostgreSQL; не потрібен на першому локальному запуску |
+| Redis-compatible cache (optional) | translation memory hot cache і distributed rate limits | source of truth визначається bounded context у §7.3; Redis ним не є |
 | OpenTelemetry + Prometheus + Grafana + Loki | метрики, traces, logs, alerting | `source_id` у labels лише при контрольованій cardinality; URL не label |
 | pytest + pytest-asyncio + respx | unit/contract/integration tests | мережа заборонена у звичайних tests |
 | Ruff + mypy strict | lint, format, type checks | однакові локально й у CI |
 | Docker Compose | локальне середовище/MVP | non-root containers, healthchecks, resource limits |
 | GitHub Actions | CI, dependency/security scan, image build | secrets тільки GitHub Environments/Actions Secrets |
 
-Версії бібліотек фіксуються lockfile. Оновлення Playwright завжди супроводжується перевстановленням відповідного browser binary, що прямо вимагає його [документація](https://playwright.dev/python/docs/browsers). Версію PostgreSQL перевіряти за офіційною [політикою підтримки](https://www.postgresql.org/support/versioning/).
+Версії бібліотек фіксуються lockfile. Оновлення Playwright завжди супроводжується перевстановленням відповідного browser binary, що прямо вимагає його [документація](https://playwright.dev/python/docs/browsers). Версію PostgreSQL перевіряти за офіційною [політикою підтримки](https://www.postgresql.org/support/versioning/). MongoDB 8.0 має [офіційний lifecycle](https://www.mongodb.com/legal/support-policy/lifecycles) до 2029-10-31; deployment використовує replica set, бо [standalone не підтримує multi-document transactions](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/). Для collections обов'язкова [$jsonSchema validation](https://www.mongodb.com/docs/manual/core/schema-validation/), а unbounded arrays заборонені через [ліміт BSON document 16 MiB](https://www.mongodb.com/docs/manual/reference/limits/). Реалізація використовує офіційний [`AsyncMongoClient`](https://www.mongodb.com/docs/languages/python/pymongo-driver/current/connect/mongoclient/) і повторює всю транзакцію для `TransientTransactionError`; при `UnknownTransactionCommitResult` повторюється commit/перевірка receipt з тим самим idempotency key. Single-member replica set у local MVP надає transaction semantics, але не високу доступність.
 
 ## 9. Контракти даних
 
-### 9.1. Мінімальні таблиці
+### 9.1. Мінімальні таблиці PostgreSQL
 
-- `sources`, `source_policy_versions`, `source_cursors`;
-- `crawl_runs`, `crawl_jobs`, `fetches`, `raw_objects`, `parse_attempts`;
-- `products`, `offers`, `offer_observations`, `product_reviews`, `product_questions`;
-- `vehicle_listings`, `vehicle_observations`, `sellers`, `contact_observations`;
-- `news_articles`, `news_article_versions`, `news_translations`, `translation_segments`;
-- `entity_aliases`, `match_candidates`;
-- `change_events`, `outbox_events`, `exports`;
-- `quality_results`, `dead_letters`, `audit_log`.
+| Таблиця/група | Мінімальний контракт |
+|---|---|
+| `sources`, `source_policy_versions`, `source_routes`, `source_cursors` | UUID PK; canonical `source_id`; version/status; cursor payload; `created_at/updated_at`; optimistic version |
+| `crawl_runs`, `crawl_jobs` | UUID PK/FK; `job_type`, `status` (`pending/leased/succeeded/retry/quarantined`), priority, idempotency key, `attempt/max_attempts`, `not_before`, `lease_owner/lease_expires_at`, timestamps/error code |
+| `fetches`, `raw_objects`, `parse_attempts` | UUID PK/FK; requested/final URL, HTTP metadata, raw `sha256/uri/size`, parser/schema version, result/error, timestamps |
+| `artifact_upload_claims`, `normalized_artifacts` | claim: unique object key, owner, status, lease expiry, monotonic int64 `claim_generation`; artifact: UUID PK, `entity_uuid`, `sha256/uri/size`, media type, domain, schema version, raw/fetch/parser lineage; без domain payload JSONB |
+| `projection_tasks` | UUID `task_id`; FK artifact/entity; monotonic `projection_version`; target collection/schema; status/priority/attempt/not-before/lease; unique `(entity_uuid, projection_version)` і artifact projection key |
+| `projection_acknowledgements` | PK/FK `task_id`; entity/version; Mongo receipt ID/cluster time; `applied_to_current`; acknowledged timestamp; result hash |
+| `entity_index` | PK `entity_uuid`; domain/source identity; Mongo collection/document ID; `confirmed_projection_version`; unique source identity; timestamps |
+| `change_events`, `outbox_events` | UUID PK; event/aggregate/version/type/schema; payload або artifact pointer; `available_at`, `published_at`, attempts/error; unique event ID |
+| `news_articles`, `news_article_versions`, `news_translations`, `translation_segments` | UUID PK/FK; source identity; immutable article version; original/cleaned/translated artifact refs; language/provider/model/glossary versions; timestamps |
+| `entity_aliases`, `match_candidates`, `exports`, `quality_results`, `dead_letters`, `audit_log` | UUID PK/FK; version/status/score або manifest watermark; actor/reason; timestamps |
 
-Великі observation/fetch tables партиціонуються щомісяця за `observed_at/fetched_at`. Foreign keys зберігаються там, де не блокують retention; видалення raw object не повинно руйнувати lineage record.
+Великі fetch/event tables партиціонуються щомісяця за `fetched_at/created_at`. Обов'язкові operational indexes: `crawl_jobs(status, not_before, priority, job_id)`, `projection_tasks(status, not_before, priority, task_id)`, `outbox_events(published_at, available_at, event_id)` і `entity_index(domain, confirmed_projection_version, entity_uuid)`. `entity_index` не дублює domain document. Видалення raw object або domain document не повинно руйнувати lineage record.
 
-### 9.2. Ідентичність та ідемпотентність
+### 9.2. Мінімальні collections MongoDB
+
+- `catalog_items_current`, `catalog_offers_current`;
+- `entity_projection_versions` для exact-version read/export;
+- `catalog_offer_observations`, `product_reviews`, `product_questions`;
+- `vehicle_listings_current`, `vehicle_observations`;
+- `sellers_current`, `contact_observations`;
+- `applied_projection_receipts` для idempotency/reconciliation.
+
+| Тип документа | Обов'язкові поля |
+|---|---|
+| будь-який `*_current` | UUID `_id/entity_uuid`; `schema_version`; source identity; `projection_version`; `state_hash`; bounded core/attributes/latest state; lineage; first/last seen |
+| `entity_projection_versions` | entity UUID; кожна `projection_version` і task; state hash; `state_changed`; previous current version/hash; bounded snapshot або immutable normalized artifact ref; lineage |
+| offer/listing observation | UUID `_id`; parent/entity UUID; `projection_version`; `projection_task_id`; `observed_at`; state hash; observation reason (`changed/heartbeat`); snapshot або artifact ref; lineage |
+| seller/contact observation | seller/entity UUID; source identity; typed contact values + original values; `observed_at`; projection version/task; lineage |
+| review/question | UUID; parent catalog item UUID; source identity/item ID; `content_version`; author/name when public; rating/text/status; published/updated/observed timestamps; projection task; lineage |
+| `applied_projection_receipts` | PK `projection_task_id`; entity UUID/version; target collection/document ID; `applied_to_current`; `state_changed`; previous/result version+hash; ready event bytes/media type/SHA-256 або immutable artifact ref; committed/cluster time |
+
+Current document зберігає bounded snapshot, який зазвичай читається разом: source identity, normalized core, source-specific `attributes`, category/equipment, короткий media preview, latest state і lineage pointer. Це відповідає MongoDB-підходу «дані, які читаються разом, зберігати разом»; offers, observations, reviews, questions, контакти та повні media lists не вбудовуються як unbounded arrays, а мають окремі collections із reference IDs згідно з рекомендаціями щодо [embedding versus references](https://www.mongodb.com/docs/manual/data-modeling/concepts/embedding-vs-references/).
+
+Мінімальний контракт current document:
+
+```yaml
+_id: UUID
+schema_version: 1
+entity_kind: catalog_item | catalog_offer | vehicle_listing | seller
+source:
+  source_id: string
+  source_item_id: string
+  canonical_url: string
+identity_hash: string
+projection_version: int64       # monotonic per entity_uuid
+state_hash: string
+core: object                    # versioned normalized fields
+attributes: object              # source-specific polymorphic fields
+latest_state: object            # price/status/mileage summary if applicable
+lineage:
+  fetch_id: UUID
+  raw_sha256: string
+  parser_version: string
+  projection_task_id: UUID
+first_seen_at: datetime
+last_seen_at: datetime
+```
+
+Обов'язкові indexes:
+
+- unique `{source.source_id: 1, source.source_item_id: 1}` для current collections;
+- unique `{entity_uuid: 1}` для current collections і unique `{entity_uuid: 1, projection_version: 1}` для `entity_projection_versions`;
+- unique `{projection_task_id: 1}` для `entity_projection_versions`, observations і `applied_projection_receipts`;
+- unique `{source.source_id: 1, source.source_item_id: 1, content_version: 1}` для reviews/questions; content version — source update version/timestamp або deterministic content hash;
+- `{entity_uuid: 1, observed_at: -1}` для history; `{catalog_item_id: 1, last_seen_at: -1}` для offers; `{seller_id: 1, observed_at: -1}` для contacts; `{parent_item_id: 1, published_at: -1}` для reviews/questions;
+- `{last_seen_at: -1}`, status/category/brand/model/location/seller indexes лише за підтвердженими query patterns;
+- index budget і `$indexStats` review; wildcard index не вмикати без benchmark;
+- стандартні collections у v1; MongoDB time-series або sharding — лише після load test та ADR.
+
+Кожна collection має versioned `$jsonSchema`; validator спочатку працює `warn` на контрольованій міграції, потім `error`. Зміна document schema супроводжується backward-compatible reader, migration/reprojection plan і fixtures.
+
+### 9.3. Ідентичність та ідемпотентність
 
 1. Первинний природний ключ: `(source_id, source_item_id)`.
 2. Якщо source ID відсутній, використовувати versioned `identity_hash` із canonical URL та стабільних атрибутів; алгоритм і поля документуються.
 3. Fetch idempotency key: `source_id + normalized_url + planned_at_bucket + request_variant`.
 4. Raw object key: `sha256(body)`; однакові bytes фізично не дублюються.
-5. Observation додається лише якщо змінився значущий state hash або сплив heartbeat interval.
+5. `entity_projection_version` додається для кожної task/version. Business observation додається лише якщо змінився значущий state hash або сплив heartbeat interval; `idempotency_key` однаковий при replay.
 6. Cross-source matching ніколи не зливає записи без score і provenance; невпевнені збіги потрапляють у `match_candidates`.
 7. Translation idempotency key: `article_version_id + target_language + provider + model_version + glossary_version`.
 8. Телефон нормалізується в E.164, e-mail — lowercase/IDNA domain, але вихідний рядок завжди зберігається.
 
-### 9.3. Сумісність контрактів
+### 9.4. Сумісність контрактів
 
 - Додавання optional field — minor schema version.
 - Видалення/перейменування/зміна типу — major schema version і міграція споживачів.
-- Кожен PR зі зміною схеми містить migration, JSON Schema diff, fixture і compatibility test.
+- Кожен PR зі зміною схеми містить PostgreSQL migration або Mongo reprojection/migration plan, JSON Schema diff, fixture і compatibility test.
 - Вихід адаптера не залежить від порядку полів чи локалі процесу.
+
+### 9.5. Узгоджене читання та export snapshot
+
+- `entity_index.confirmed_projection_version` змінюється тільки після підтвердженого Mongo receipt і ніколи не зменшується: `GREATEST(existing, receipt.projection_version)`. `domain.changed` створюється лише для `applied_to_current=true AND state_changed=true`.
+- Online API читає PostgreSQL index, потім Mongo з filter `{entity_uuid, projection_version}`. Якщо current document новіший, API читає `entity_projection_versions` і його exact snapshot/artifact ref; якщо потрібної версії немає, повертає `409 projection_inconsistent`, ставить reconcile task і не змішує версії.
+- Export спочатку фіксує immutable manifest із PostgreSQL snapshot watermark та парами `(entity_uuid, confirmed_projection_version)`, а потім читає exact Mongo version records/snapshots. Manifest містить hash кожного part і schema versions; нові projections не змінюють уже створений export.
+- Reconciler та consistency-critical reads використовують primary + majority concern. Eventual/stale secondary reads дозволені лише окремому exploratory endpoint із явним `consistency=stale_ok` і без export/quality рішень.
 
 ## 10. Алгоритм збору й оновлення
 
@@ -342,14 +459,16 @@ All stages ──> OpenTelemetry metrics/traces/logs ──> Prometheus + Grafan
 2. Route Guard отримує діагностичний snapshot robots і застосовує URL patterns з manifest.
 3. Discovery читає API/RSS/sitemap курсор і створює jobs із priority та idempotency key.
 4. Worker бере lease, перевіряє policy ще раз і виконує conditional request.
-5. Для 200/206 bytes пишуться в raw store; для 304 оновлюється freshness без нового raw object.
+5. Для 200/206 worker спочатку бере PostgreSQL upload claim із lease та монотонною `claim_generation`, пише bytes за content-addressed key у artifact store, виконує HEAD/checksum/size verification і лише з умовою `object_key + generation + lease_expires_at > now()` commit-ить посилання. Reacquire атомарно збільшує generation. Після паузи або втрати lease worker мусить повторно взяти claim і виконати HEAD; stale generation не може створити DB reference. Sweeper видаляє object лише після grace period, якщо немає DB reference або активного claim. Для 304 оновлюється freshness без нового raw object.
 6. 429 поважає `Retry-After`; 5xx/network errors використовують exponential backoff із jitter; 401/403/CAPTCHA не ретраяться нескінченно, а ставлять channel/route incident. Джерело цілком вимикається лише коли не лишилося корисного анонімного каналу.
-7. Parser читає immutable raw object, видає normalized records та validation report.
-8. Транзакція upsert-ить entity, контакти й observation, додає change event, оновлює cursor та outbox.
-9. Для news article version створюється translation job. Текст сегментується по абзацах/реченнях без розриву HTML-структури, незмінні сегменти беруться з translation memory.
-10. Translation worker перекладає в `uk`, відновлює структуру, валідовує числа, дати, URL, імена/терміни з glossary та записує immutable translation version.
-11. Окремий publisher доставляє outbox events щонайменше один раз; споживачі зобов’язані бути ідемпотентними.
-12. Завершення crawl run обчислює quality gates. Невдалий gate не позначає відсутні сутності видаленими.
+7. Parser читає immutable raw object, видає normalized records та validation report; catalog/vehicle payload серіалізується як versioned immutable artifact у S3/MinIO через той самий claimed/verified PUT protocol.
+8. Для news PostgreSQL-транзакція upsert-ить article/version, lineage і outbox. Для catalog/vehicle вона записує artifact pointer/hash, атомарно видає per-entity `projection_version`, створює `projection_task` та `projection.command`, але не пише domain payload у PostgreSQL.
+9. Mongo Projector обробляє одну task в одній транзакції: mandatory exact version record + conditional current update + optional business observation + `applied_projection_receipt`. Duplicate task повертає попередній результат; out-of-order task не знижує current version. Retry policy відповідає §8.
+10. Після Mongo commit одна PostgreSQL-транзакція фіксує `projection_acknowledgement`, не зменшує confirmed entity version і, лише для `applied_to_current=true AND state_changed=true`, додає `domain.changed` та publish outbox; reconciler відновлює незавершені кроки з canonical event descriptor у receipt.
+11. Для news article version створюється translation job. Текст сегментується по абзацах/реченнях без розриву HTML-структури, незмінні сегменти беруться з translation memory.
+12. Translation worker перекладає в `uk`, відновлює структуру, валідовує числа, дати, URL, імена/терміни з glossary та записує immutable translation version.
+13. Окремий publisher доставляє outbox events щонайменше один раз; споживачі зобов’язані бути ідемпотентними.
+14. Завершення crawl run обчислює quality gates. Невдалий gate не позначає відсутні сутності видаленими.
 
 Retry policy за замовчуванням: максимум 4 спроби для idempotent GET, backoff 5 с / 30 с / 2 хв / 10 хв із jitter; окремий денний retry budget на джерело. Timeout: connect 10 с, read 30 с, total 60 с; великі файли sitemap можуть мати окремий manifest override.
 
@@ -412,6 +531,7 @@ Rubric перекладу, шкала 0–2 для кожного критері
 - Контейнери non-root, read-only root filesystem де можливо, окремі network policies й egress allowlist у production.
 - Secrets скануються в pre-commit/CI; logs приховують Authorization/Cookie/API keys. Публічні контакти зберігаються у даних, але не дублюються в технічних logs і metric labels.
 - Raw bucket шифрується; доступ розділений на writer/parser/auditor roles; object deletion журналюється.
+- Облікові дані БД розділені за компонентами: scheduler/fetcher не має MongoDB credentials; parser пише лише artifact pointer/task/outbox у PostgreSQL; projector читає визначені projection rows у PostgreSQL і пише лише domain collections у MongoDB; API/exporter має read-only ролі в обох БД. Migration role не використовується runtime-процесами.
 - Operator API: OIDC, RBAC (`viewer`, `researcher`, `operator`, `admin`), audit log усіх mutating actions. Сирі контакти доступні `researcher` і вище.
 - Dependency та image scanning — щотижня і на кожен PR; critical CVE блокує release або має датоване risk acceptance.
 
@@ -424,7 +544,8 @@ Rubric перекладу, шкала 0–2 для кожного критері
 - `items_discovered/parsed/accepted/quarantined`;
 - `parser_failures_total{source,parser_version,error_code}`;
 - `source_freshness_seconds`, `queue_oldest_age_seconds`, `dead_letters_total`;
-- `raw_bytes_total`, `raw_dedup_ratio`, DB/storage utilization;
+- `raw_bytes_total`, `raw_dedup_ratio`, `artifact_orphans_total`, DB/storage utilization;
+- `projection_tasks_total{domain,status}`, `projection_lag_seconds`, `projection_replays_total`, `cross_store_drift_total`;
 - `translation_jobs_total{source_language,status}`, `translation_characters_total`, `translation_cost`, `translation_latency_seconds`, `translation_memory_hit_ratio`;
 - quality completeness/yield/duplicate metrics.
 
@@ -432,11 +553,11 @@ Rubric перекладу, шкала 0–2 для кожного критері
 
 ### 14.2. Алерти
 
-- SEV-1: витік secrets, неконтрольований request rate, підозрілий масовий export контактів, недоступність DB/raw store.
-- SEV-2: немає нових news понад 30 хв для активного джерела, translation lag понад 20 хв, queue age понад SLO, parse success <95%, yield drop >50%, 429/403 spike.
+- SEV-1: витік secrets, неконтрольований request rate, підозрілий масовий export контактів, недоступність PostgreSQL/MongoDB/artifact store або підтверджена втрата projection.
+- SEV-2: немає нових news понад 30 хв для активного джерела, projection lag понад 15 хв, cross-store drift, translation lag понад 20 хв, queue age понад SLO, parse success <95%, yield drop >50%, 429/403 spike.
 - SEV-3: storage >75%, окремий адаптер деградував, наближення анонімного rate budget.
 
-Runbook має містити pause source, inspect raw/parse error, restore lease, replay from raw, rotate key, expire/delete raw objects і rollback parser version.
+Runbook має містити pause source, inspect raw/parse/projection error, restore lease, replay from raw, reconcile PostgreSQL tasks із Mongo applied receipts та PostgreSQL acknowledgements, rotate key, sweep/expire artifact objects і rollback parser/schema version.
 
 ## 15. Продуктивність і масштабування
 
@@ -444,9 +565,9 @@ Runbook має містити pause source, inspect raw/parse error, restore lea
 - Browser jobs ізольовані в окремій queue/pool з обмеженням CPU/RAM і concurrency 1 на pod/container.
 - Translation jobs мають окрему queue, character budget і пріоритет: title/lead → body нової статті → backfill. Backfill не може витісняти свіжі новини.
 - Sitemap streaming parser не завантажує весь документ у RAM.
-- Bulk inserts observations виконуються пакетами 100–1000 із обмеженим transaction time.
-- API читання використовує keyset pagination; `OFFSET` не застосовувати на великих таблицях.
-- Партиції, indexes і retention перевіряються на dataset масштабу не менш як 2× річний прогноз.
+- Projector може batch-читати/диспетчеризувати незалежні tasks, але кожна task/entity виконується в окремій MongoDB-транзакції; один unordered bulk не може змішувати atomic units. PostgreSQL batches мають обмежений transaction time.
+- PostgreSQL API використовує keyset pagination; MongoDB — стабільний compound sort + `_id` cursor. `OFFSET/skip` не застосовувати на великих наборах.
+- PostgreSQL partitions, Mongo indexes/collection sizes і retention перевіряються на dataset масштабу не менш як 2× річний прогноз.
 - Raw HTML/XML/JSON, очищений оригінал і переклади зберігаються безстроково за замовчуванням; object storage має versioning, compression і tiering. Media binaries мають окремий retention через обсяг.
 
 ## 16. Тестування та приймання
@@ -455,10 +576,10 @@ Runbook має містити pause source, inspect raw/parse error, restore lea
 
 1. **Unit:** URL normalization, money/time/contact parsing, identity hash, retry decisions, language detection, translation segmentation/reassembly.
 2. **Contract:** кожен fixture → очікуваний versioned JSON; schema compatibility.
-3. **Integration:** PostgreSQL + MinIO, job lease/recovery, transaction/outbox, migrations from empty DB.
-4. **End-to-end offline:** fixture discovery → raw → parse → DB → export, мережа заблокована.
+3. **Integration:** PostgreSQL + MongoDB replica set + MinIO, job lease/recovery, outbox/projector/reconciliation, out-of-order/concurrent projection, transient/unknown Mongo commit result, S3 orphan sweep, SQL migrations і Mongo validators/indexes з нуля.
+4. **End-to-end offline:** fixture discovery → raw/normalized artifacts → PostgreSQL pointer/task → Mongo projection/news SQL write → exact-version snapshot export, мережа заблокована.
 5. **Live smoke:** максимум 3–10 configured URL, явний прапорець, стабільний User-Agent, без CI schedule.
-6. **Load:** черга і DB на 2× прогнозі, browser pool окремо.
+6. **Load:** черга, PostgreSQL і MongoDB на 2× прогнозі, browser pool окремо.
 7. **Translation QA:** golden multilingual corpus для всіх 16 вихідних мов, preservation тест чисел/URL/імен, glossary і regression score.
 8. **Security:** SSRF redirect, zip bomb, XXE, hostile HTML, secret log checks.
 
@@ -470,8 +591,9 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy src
 uv run pytest -m "not live"
-docker compose up -d --wait postgres minio
+docker compose up -d --wait postgres mongo minio
 uv run alembic upgrade head
+uv run collector db ensure-mongo --validators --indexes
 uv run collector e2e --source fixtures --offline
 ```
 
@@ -480,11 +602,15 @@ uv run collector e2e --source fixtures --offline
 ### 16.3. Приймання релізу
 
 - усі quality gates зелені на пілоті 7 діб;
-- відновлення після kill worker і недоступності DB продемонстровано;
-- повторний parse тієї самої raw відповіді не створює дублікати;
+- відновлення після kill worker та окремої недоступності PostgreSQL/MongoDB продемонстровано;
+- повторний parse або projection тієї самої raw відповіді не створює дублікати;
+- fault injection після Mongo commit, але до PostgreSQL acknowledgement, завершується idempotent replay; reconciler повертає drift до нуля;
+- доставка projection versions у порядку `3, 1, 2` залишає current на версії 3; усі tasks мають рівно один receipt/acknowledgement й export читає підтверджену exact version;
+- fault injection після S3 PUT, але до PostgreSQL commit, не створює DB reference на відсутній object; concurrent sweeper не видаляє object із живим claim, а producer зі stale claim повторює HEAD/reupload перед commit;
+- ізольований restore PostgreSQL/raw/MongoDB за процедурою §7.4 відтворює domain state до зафіксованого watermark, а count/hash reconciliation не знаходить втрат або дублів;
 - один source pause зупиняє нові запити не пізніше 60 секунд;
 - відсутність credentials у source runtime не ламає інші джерела й не спричиняє спроб login;
-- lineage від експортованого рядка до raw artifact відкривається за один API/SQL lookup;
+- lineage від експортованого рядка до raw artifact відкривається через один API lookup, навіть якщо API внутрішньо читає entity index у PostgreSQL і document у MongoDB;
 - кожне джерело з §4.1 має доказаний `source_state`; кожен route — `route_state`, а sample item — `content_access` із §5.5; для кожної з 19 країн щонайменше одне джерело з `source_state=enabled` віддає item із `content_access=full`, оригіналом і українським перекладом через API/SQL;
 - 30 випадкових перекладів на кожну вихідну мову пройшли human QA за rubric, critical meaning errors = 0.
 
@@ -494,7 +620,8 @@ uv run collector e2e --source fixtures --offline
 
 - Один work package — один owner, окрема branch/PR, чіткі вхідні/вихідні контракти.
 - Агенти не редагують чужий адаптер або shared schema без узгодженого issue/ADR.
-- Спочатку зливаються WP-00—WP-04; адаптери можуть паралельно працювати на versioned fixtures/schema після цього.
+- Спочатку зливаються WP-00 і WP-01C, потім WP-01A/WP-01B та WP-02—WP-04; адаптери можуть паралельно працювати на versioned fixtures/schema після цього.
+- WP-01C є єдиним owner shared IDs/event/artifact contracts; WP-01A — єдиним owner PostgreSQL migrations; WP-01B — єдиним owner Mongo validators/index migrations. Інші WP подають зміну shared schema як окрему dependency-задачу відповідному owner, а не редагують її паралельно.
 - Кожен PR містить: зміни, тести, fixture provenance, ризики, як вимкнути/відкотити, що не перевірено live.
 - Заборонено переносити тестові докази між джерелами: успішний Prom adapter не є доказом для Rozetka.
 - Інтегратор не виправляє мовчки адаптер: повертає конкретний failed contract власнику або окремим PR із посиланням.
@@ -504,10 +631,12 @@ uv run collector e2e --source fixtures --offline
 | WP | Власність | Залежить від | Результат і критерій приймання |
 |---|---|---|---|
 | WP-00 | Foundation | — | repo layout, `pyproject`, lock, CI, Compose, coding/PR rules; порожній smoke проходить |
-| WP-01 | Contracts & DB | WP-00 | Pydantic/JSON schemas, migrations, job lease, outbox, lineage; clean DB integration green |
-| WP-02 | Fetch core | WP-01 | HTTP fetcher, robots snapshot, allowlist, limiter, retries, raw S3; SSRF/rate tests green |
-| WP-03 | Discovery | WP-01, WP-02 | API/RSS/sitemap streaming, cursors, idempotent jobs; gzip/pagination fixtures green |
-| WP-04 | Translation core | WP-01 | segmenter, provider interface, Google adapter, translation memory, glossary, QA corpus; all language pairs green |
+| WP-01C | Shared data contracts | WP-00 | canonical UUID/source identity, artifact, projection command/ack, domain event і export manifest schemas; compatibility fixtures green |
+| WP-01A | PostgreSQL foundation | WP-01C | єдине ownership SQL migrations; control/news schemas, jobs, artifact pointers, projection tasks/acks, outboxes, entity index/lineage; clean SQL integration green |
+| WP-01B | MongoDB domain foundation | WP-01C, WP-01A | єдине ownership Mongo validators/index migrations; replica set Compose, repositories, projector, applied receipts/reconciler; crash/out-of-order tests green |
+| WP-02 | Fetch core | WP-01A | HTTP fetcher, robots snapshot, allowlist, limiter, retries, raw S3; SSRF/rate tests green |
+| WP-03 | Discovery | WP-01A, WP-02 | API/RSS/sitemap streaming, cursors, idempotent jobs; gzip/pagination fixtures green |
+| WP-04 | Translation core | WP-01A | segmenter, provider interface, Google adapter, translation memory, glossary, QA corpus; all language pairs green |
 | WP-05 | News adapter SDK | WP-02–04 | RSS/sitemap/article extraction base, full-text contract, country/language config |
 | WP-06A | News UA/DE/AT | WP-05 | окремий adapter на кожне джерело цих країн із §4.1 + translations |
 | WP-06B | News FR/BE | WP-05 | окремий adapter на кожне джерело цих країн + `fr/nl/de -> uk` translations |
@@ -516,12 +645,12 @@ uv run collector e2e --source fixtures --offline
 | WP-06E | News PL/HU/RO | WP-05 | усі джерела цих країн + translations |
 | WP-06F | News CZ/SK/SI/HR | WP-05 | усі джерела цих країн + translations |
 | WP-06G | News IT/ES | WP-05 | усі джерела цих країн + translations |
-| WP-07 | Vehicle contracts & matching | WP-01 | vehicle/seller/contact schemas, dictionaries, source matching; golden fixtures |
+| WP-07 | Vehicle contracts & matching | WP-01A, WP-01B | vehicle/seller/contact domain contracts, dictionaries і matching implementation поверх owned storage APIs; golden fixtures; schema changes через WP-01A/B owners |
 | WP-08A–D | Vehicle adapters | WP-03, WP-07 | один незалежний пакет на AUTO.RIA, OLX Авто, RST, Automoto; full public field coverage |
-| WP-09 | Catalog contracts & matching | WP-01 | product/offer/review/question/contact schemas, category mapping, matching benchmark |
+| WP-09 | Catalog contracts & matching | WP-01A, WP-01B | product/offer/review/question domain contracts, category mapping і matching поверх owned storage APIs; benchmark; schema changes через WP-01A/B owners |
 | WP-10A–H | Catalog adapters | WP-03, WP-09 | один незалежний пакет на Prom, Rozetka, Epicentr, Allo, Hotline, Comfy, Foxtrot, MOYO |
-| WP-11 | Operator API/export | WP-01, WP-04 | status/pause/replay/read API, original+translation export, Parquet/JSONL manifest; RBAC tests |
-| WP-12 | Observability/runbooks | WP-02, WP-04, WP-11 | dashboards, source/translation alerts, SLO queries; injected-failure exercise |
+| WP-11 | Operator API/export | WP-01A, WP-01B, WP-04 | bounded cross-store read API, status/pause/replay, original+translation export, Parquet/JSONL manifest; RBAC tests |
+| WP-12 | Observability/runbooks | WP-01B, WP-02, WP-04, WP-11 | dashboards, projection/drift/source/translation alerts, backup/restore procedure, SLO queries; injected-failure і restore exercises |
 | WP-13 | Security review | WP-02–12 | threat model validation, dependency/container scans, secret checks; findings triaged |
 | WP-14 | Integration/release | усі required WP | 7-day pilot, 19-country coverage, traceability matrix, acceptance report; no unresolved critical/high findings |
 
@@ -538,7 +667,7 @@ uv run collector e2e --source fixtures --offline
 - зміна схеми має migration і compatibility evidence;
 - новий адаптер має manifest, fixtures, golden outputs, field coverage report, quality sample і bounded live smoke;
 - документація, метрики й runbook оновлені;
-- secret scan чистий; публічні контакти присутні тільки в доменних таблицях/raw, а не в fixtures з випадково приватних джерел або технічних logs;
+- secret scan чистий; публічні контакти присутні тільки в Mongo domain collections та immutable domain artifacts, а не в fixtures з випадково приватних джерел або технічних logs;
 - reviewers’ findings позначені `fixed`, `accepted with owner/date` або `not applicable` з аргументом;
 - PR злитий тільки після CI та required review; commit SHA і release evidence зафіксовані.
 
@@ -552,6 +681,8 @@ uv run collector e2e --source fixtures --offline
 | Несанкціонований доступ до зібраних контактів | низька/високий | encryption, RBAC, audit log, закритий research API | аномальний export/access pattern |
 | Вибух обсягу raw storage | висока/середній | compression, content addressing, lifecycle | >75% capacity або прогноз >бюджету |
 | Невірний cross-source match | середня/середній | deterministic IDs first, candidate review | precision нижче 99% для auto-merge |
+| Розсинхронізація PostgreSQL і MongoDB | середня/високий | transactional outbox, monotonic projection version/CAS, Mongo applied receipt, PostgreSQL acknowledgement, reconciler, exact-version export | відсутній ack >15 хв або `cross_store_drift_total > 0` після reconcile |
+| Надмірно великий Mongo document | середня/високий | bounded embedding, окремі observation/review/media collections, size metric | document >8 MiB або unbounded array detected |
 | Надмірне використання браузера | середня/середній | browser by exception, budget metric | >10% fetches без ADR |
 | Vendor API quota/ціна | середня/середній | cursor, cache, priority, quota alerts | залишок квоти <20% до reset |
 | Висока вартість перекладу | висока/середній | translation memory, сегментний hash, character budget, batch | прогноз перевищує місячний бюджет |
@@ -571,6 +702,7 @@ uv run collector e2e --source fixtures --offline
 | Q-007 | Чи переходить login/API-key канал у майбутню версію? | ні; v1 завжди anonymous-only | Product, після v1 |
 | Q-008 | Місячний бюджет Google Cloud Translation? | character budget конфігурується; backfill paused без ліміту | Product, до WP-04 live |
 | Q-009 | Перекладати оновлену статтю повністю чи лише змінені сегменти? | лише змінені сегменти, потім збирати повну version | Product, до WP-04 close |
+| Q-010 | Яка production topology MongoDB? | single-member replica set у локальному MVP; 3 data-bearing members у різних failure domains перед HA production | DevOps, до production |
 
 Рішення оформлювати у `docs/decisions/NNNN-title.md` з полями Context, Decision, Consequences, Date, Owner, Status.
 
@@ -595,11 +727,11 @@ uv run collector e2e --source fixtures --offline
 │   │   └── catalogs/
 │   ├── normalization/
 │   ├── translation/
-│   ├── persistence/
+│   ├── persistence/{postgres,mongo}/
 │   ├── api/
 │   └── telemetry/
-├── schemas/
-├── migrations/
+├── schemas/{events,mongo}/
+├── migrations/{postgres,mongo}/
 ├── tests/{unit,contract,integration,e2e,fixtures}/
 ├── sources/<source_id>/manifest.yaml
 ├── docs/{adr,runbooks,decisions}/
@@ -611,7 +743,7 @@ uv run collector e2e --source fixtures --offline
 
 ```yaml
 schema_version: 1
-id: auto_ria_used
+id: vehicle_ua_auto_ria
 name: AUTO.RIA used vehicles
 domain: vehicles
 owner: data-acquisition
@@ -668,4 +800,5 @@ parser:
 | Повні публічні поля | FR-018, §5 | raw-to-field trace, contacts/version tests |
 | Технічна безпека | FR-013, §13 | SSRF/XXE/secret tests and scans |
 | Експлуатація | FR-009, §14 | pause/replay drill, dashboards and alert exercise |
+| Узгодженість двох БД | FR-020—FR-023, §7.3—§7.4, §9 | crash-window replay, reconciliation, backup/restore drill, bounded read/export tests |
 | Незалежна реалізація | §17, §18 | WP acceptance, CI, contract/version ownership |
