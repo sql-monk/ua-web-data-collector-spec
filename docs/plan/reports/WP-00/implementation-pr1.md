@@ -59,7 +59,7 @@
 ### pre-commit, CI, шаблони (вимоги 6, 7, 8)
 
 - `.pre-commit-config.yaml`: pre-commit-hooks v6.0.0 (eof/trailing-whitespace/yaml/toml/large-files/merge-conflict/private-key), ruff-pre-commit v0.16.8 (= версія ruff у lock), gitleaks v8.30.0, markdownlint-cli2 v0.23.3 (`exclude: ^\.claude/` — промпти субагентів із frontmatter не є документацією). Revs зафіксовано через `pre-commit autoupdate`.
-- `.github/workflows/ci.yml`: jobs `python` (uv sync --frozen → ruff check → ruff format --check → mypy src → pytest -m "not live" → `collector --help`/`version`), `pre-commit` (усі hooks, кеш `~/.cache/pre-commit`), `secrets` (`gitleaks/gitleaks-action@v2`, fetch-depth 0). `concurrency` group per workflow+ref з cancel-in-progress; `permissions: contents: read`; secrets тільки через `secrets.*` (`GITHUB_TOKEN`, опційний `GITLEAKS_LICENSE`). `COLLECTOR_GIT_SHA=github.sha` передається у env. Крок `docker compose config --quiet` — у PR2.
+- `.github/workflows/ci.yml`: jobs `python` (uv sync --frozen → ruff check → ruff format --check → mypy src → pytest -m "not live" → `collector --help`/`version`), `pre-commit` (усі hooks, кеш `~/.cache/pre-commit`), `secrets` (`gitleaks/gitleaks-action@v2`, fetch-depth 0). `concurrency` group per workflow+ref, cancel-in-progress поза `main` (після код-рев'ю); `push` лише для `main`, `pull_request` для решти; `permissions: contents: read`; secrets тільки через `secrets.*` (`GITHUB_TOKEN`, опційний `GITLEAKS_LICENSE`). `COLLECTOR_GIT_SHA=github.sha` передається у env. Крок `docker compose config --quiet` — у PR2.
 - `.github/ISSUE_TEMPLATE/work-package.md` за §17.3 (усі 10 полів), `.github/pull_request_template.md` за §17.1 + DoD §18.
 - `.editorconfig`; `.gitignore` доповнено (`*.egg-info/`, `.coverage`, `htmlcov/`, `.artifacts/`, `.uv-cache/`).
 
@@ -436,3 +436,141 @@ $ uv sync --frozen --no-editable && uv run --no-sync pytest -m 'not live' -q -p 
 ```
 
 Підсумок: Windows — **106 passed, 1 skipped, 0 failed** (skip — POSIX-only тест створення socket); Linux — **107 passed, 0 failed**, зокрема `test_network_block_adversarial.py::test_asyncio_open_connection_to_non_loopback_is_blocked` і `::test_httpx_async_client_to_non_loopback_is_blocked` зелені на обох платформах. Усі 7 команд картки зелені; `uv run mypy tests` також зелений.
+
+## Відповіді на код-рев'ю (gate 3, `code-review-pr1.md`, вердикт approve)
+
+Commit `ce0c942 fix(wp-00): JSON for stdlib records and secret redaction, selector policy on win32, narrower S ignores, explicit test deps, manual history scan, CI triggers, help exit 0`.
+
+| # | Severity | Статус | Що зроблено / аргумент |
+|---|---|---|---|
+| 1 | medium | **fixed** (`ce0c942`) | `core/logging.py`: handler root logger отримує `structlog.stdlib.ProcessorFormatter(foreign_pre_chain=shared, processors=[remove_processors_meta, JSONRenderer])`; structlog-ланцюг завершується `wrap_for_formatter`; спільний `_shared_processors()` (contextvars, logger name, level, `ExtraAdder`, TimeStamper, exc_info, redaction). Тест `test_logging.py::test_stdlib_records_from_third_party_loggers_are_json`: `logging.getLogger("httpx").warning(...)` → один JSON-рядок з `event/logger/level/timestamp`; `logging.getLogger("pymongo").exception(...)` → один JSON-рядок з полем `exception` (не багаторядковий traceback). |
+| 2 | low | **fixed** (`ce0c942`) | `tests/conftest.py::pytest_configure`: на `win32` `asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())` (коментар про deprecation policy API у 3.14; проєкт pinned `<3.14`); hook `pytest_asyncio_loop_factories` лишено. Docstring доповнено межею «явний `ProactorEventLoop`/`WindowsProactorEventLoopPolicy` policy не покриває». Тест `test_network_blocked.py::test_asyncio_run_in_sync_test_is_blocked_too` (`asyncio.run(open_connection)` у sync-тесті → `SocketConnectBlockedError`; на Windows додатково перевіряє тип policy). |
+| 3 | low | **fixed** (`ce0c942`) | `pyproject.toml`: `"tests/**" = ["S101", "S603", "S607"]` з коментарем; `ruff check .` зелений. |
+| 4 | low | **fixed** (`ce0c942`) | Processor `redact_secrets` у спільному ланцюгу (перед JSON): ключі `authorization`, `proxy-authorization`/`proxy_authorization`, `cookie`, `set-cookie`/`set_cookie`, `api_key`, `apikey`, `api-key`, `token`, `password`, `secret` — case-insensitive, рекурсивно у dict/list/tuple, і для structlog-подій, і для stdlib `extra=`. Тести: `test_secret_keys_are_redacted_case_insensitively` (6 варіантів), `test_redaction_is_recursive_in_nested_mappings_and_lists`, `test_redaction_applies_to_stdlib_extra_fields`. Docstring: URL із credentials у query лишається відповідальністю викликачів. |
+| 5 | low | **fixed** (`ce0c942`) | dev-group: `httpx>=0.28` (коментар: лише для тестів мережевої політики; runtime — WP-02) і `pyyaml>=6.0`; `uv.lock` перегенеровано (45 пакетів, версії не змінились). `test_foundation_config.py::test_foundation_dependencies_exclude_domain_libraries` уточнено: заборона стосується `[project.dependencies]`; у dev-групі виняток лише для `httpx`, решта forbidden — і там. |
+| 6 | low | **fixed** (`ce0c942`) | `gitleaks-history`: `stages: [manual]` + коментар із командою `uv run pre-commit run --hook-stage manual gitleaks-history`; staged-hook і CI job `secrets` без змін. Перевірено: job `secrets` має `actions/checkout@v5` з `fetch-depth: 0` (`ci.yml`, крок checkout job `secrets`). |
+| 7 | low | **fixed** (`ce0c942`) | `ci.yml`: `push: branches: [main]`, `pull_request` для решти; `cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}`; коментар з причиною. `test_ci_runs_spec_16_2_commands_without_hardcoded_secrets` зелений. |
+| 8 | low | **accepted** — owner WP-13 (security review), дата: етап WP-13 за ledger | Actions пінені major-тегами; SHA-pin + Dependabot `github-actions` робить WP-13 разом з іншими supply-chain перевірками (уже в «Ризики» цього звіту, п. 2). |
+| 9 | low | **fixed** (`ce0c942`), мінімально | `cli.py`: спільний callback `_help_when_no_subcommand` (`invoke_without_command=True`) для `app`, `db_app`, `release_app`: група без підкоманди друкує help і завершується **кодом 0** (Click `no_args_is_help` давав 2 — колізія зі стабами). `worker` без ролі — usage-помилка Click (код 2, `Missing argument 'role'`): це команда з обов'язковим аргументом, не sub-Typer і не стаб. Тест `test_cli.py::test_group_without_subcommand_prints_help_with_exit_0[root/db/release]`. Повне розділення usage-помилок (2) і «not implemented» (2) — кандидат spec-mismatch для пострев'ю/owner картки; код 2 для стабів зафіксований карткою і не змінюється. |
+| 10 | low | **accepted** — owner wp-tester (`test_cli_adversarial.py`, `fcb5601`), дата: пострев'ю WP-00 | Adversarial-файл належить тестувальнику; злиття в один модуль — окремим кроком після gate 4, щоб не змішувати авторство доказів. |
+| 11a | low | **accepted** — owner WP-00 PR2, дата: PR2 | `pretty_exceptions_enable=False`: стосується stderr у Docker (JSON-логи в Loki); задається разом з образом у PR2 (`TYPER_STANDARD_TRACEBACK=1` в image env або параметр Typer — вибір у PR2, де з'являється перший реальний runtime). |
+| 11b | low | **fixed** (`ce0c942`) | `core/version.py::git_sha(environ: Mapping[str, str] | None)` замість `os._Environ[str] | dict[str, str] | None`. |
+| info: `caplog` | info | **fixed** (`ce0c942`) | Docstring `core/logging.py`: «замінює handlers root logger, зокрема `caplog`; у тестах — `stream=`». |
+| info: невідомий level → INFO | info | **accepted** — owner WP-01D (env-конфігурація workers), дата: WP-01D | Docstring `configure_logging` тепер явно каже «невідомий level трактується як INFO»; `ValueError` на етапі парсингу env — рішення WP-01D разом із конфігом. |
+| info: ruff у pre-commit vs `uv.lock` | info | **not applicable** для PR1 | Обидва джерела зараз 0.16.8; `repo: local` hook з `uv run ruff` вимагав би `.venv` у всіх, хто комітить. Дрейф ловить CI (`uv run ruff` у job `python`). Переглянути при реальному дрейфі. |
+| info: `.python-version` = 3.13 (не patch) | info | **not applicable** | Картка вимагає `3.13`; `test_package_is_typed_and_python_pinned` тестувальника перевіряє саме `"3.13"`; patch-відтворюваність дає Docker image digest у PR2. |
+| info: `mypy tests` у CI | info | **not applicable** для PR1 (виконано локально) | Крок `mypy src` у `ci.yml` — команда-контракт §16.2; `uv run mypy tests` виконується локально у прогоні нижче (зелений). До CI можна додати у PR2 разом з compose-кроками, не змінюючи контракт картки PR1. |
+| info: ADR-0001 / deps-файл | info | **not applicable** (процес) | `docs/decisions/**` — етап docs (docs-writer); матеріал для ADR — розділ «Вибір CLI framework — Typer». `docs/plan/deps/WP-00-to-repo-config.md` — процесний файл конвеєра (§4.2 плану), стан resolved. |
+
+### Команди та вивід після код-рев'ю
+
+Чистий стан (`git clean -xfd` → `uv sync --frozen`), Windows 11, `PYTHONUTF8=1`, commit `ce0c942`:
+
+```text
+$ git clean -xfd
+(видалено .venv, .*_cache, __pycache__)
+[exit 0]
+
+$ uv sync --frozen
+Using CPython 3.13.9
+Creating virtual environment at: .venv
+Installed 45 packages in 1.07s
+[exit 0]
+
+$ uv run ruff check .
+All checks passed!
+[exit 0]
+
+$ uv run ruff format --check .
+55 files already formatted
+[exit 0]
+
+$ uv run mypy src
+Success: no issues found in 24 source files
+[exit 0]
+
+$ uv run mypy tests
+Success: no issues found in 7 source files
+[exit 0]
+
+$ uv run pytest -m not live
+============================= test session starts =============================
+platform win32 -- Python 3.13.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\repos\webscraper\.worktrees\wp-00-1
+configfile: pyproject.toml
+testpaths: tests
+plugins: anyio-4.15.1, asyncio-1.4.0, socket-0.8.1, respx-0.23.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collected 119 items
+
+tests\unit\test_cli.py ...........................                       [ 22%]
+tests\unit\test_cli_adversarial.py ..................................... [ 53%]
+......                                                                   [ 58%]
+tests\unit\test_foundation_config.py ...........................         [ 81%]
+tests\unit\test_logging.py ...........                                   [ 90%]
+tests\unit\test_network_block_adversarial.py ......                      [ 95%]
+tests\unit\test_network_blocked.py .s...                                 [100%]
+
+============================== warnings summary ===============================
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+SKIPPED [1] tests\unit\test_network_blocked.py:27: Windows: loopback потрібен asyncio
+================= 118 passed, 1 skipped, 6 warnings in 12.16s =================
+[exit 0]
+
+$ uv run collector --help
+Usage: collector [OPTIONS] COMMAND [ARGS]...
+
+  UA Web Data Collector — CLI для workers, API, міграцій, e2e і releases
+  (§16.2).
+
+Options:
+  --help  Show this message and exit.
+
+Commands:
+  version     Друкує версію пакета, Git SHA (env COLLECTOR_GIT_SHA) і...
+  e2e         Наскрізний прогін збору для одного джерела (стаб; owner...
+  worker      Запускає worker відповідної ролі (стаб; owner WP-01D).
+  api         Запускає operator/read API (стаб; owner WP-11A).
+  scheduler   Запускає singleton scheduler з advisory lease (стаб; owner...
+  controller  Запускає desired-state controller worker pools (стаб; owner...
+  db          Схеми сховищ: PostgreSQL migrations (WP-01A), Mongo...
+  release     Immutable dataset releases (§9.9); owner — WP-11A.
+[exit 0]
+
+$ uv run pre-commit run --all-files
+fix end of files.........................................................Passed
+trim trailing whitespace.................................................Passed
+check yaml...............................................................Passed
+check toml...............................................................Passed
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+detect private key.......................................................Passed
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+Detect hardcoded secrets.................................................Passed
+markdownlint-cli2........................................................Passed
+[exit 0]
+
+$ uv run pre-commit run --hook-stage manual gitleaks-history --all-files
+Detect hardcoded secrets (git history)...................................Passed
+[exit 0]
+
+$ uv run python -c import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('ci.yml: valid YAML')
+ci.yml: valid YAML
+[exit 0]
+```
+
+Linux-паритет (контейнер `ghcr.io/astral-sh/uv:python3.13-bookworm-slim` + git, свіжа копія worktree):
+
+```text
+$ uv sync --frozen --no-editable && uv run --no-sync ruff check . && uv run --no-sync mypy src \
+  && uv run --no-sync pytest -m 'not live' -q -p no:cacheprovider
+ + virtualenv==21.9.1
+All checks passed!
+Success: no issues found in 24 source files
+119 passed, 6 warnings in 1.83s
+```
+
+Підсумок: Windows — **118 passed, 1 skipped, 0 failed**; Linux — **119 passed, 0 failed**. Усі 7 команд картки зелені, `pre-commit run --all-files` зелений, `mypy tests` зелений.
