@@ -9,8 +9,8 @@
 | WP | Під-PR | Branch | Стан | Останній gate | Примітка |
 |---|---|---|---|---|---|
 | WP-00 | PR1 python+CI | `wp/00-1-python-ci` | merged 7223bec | docs done: `reports/WP-00/docs-pr1.md`; ADR-0001 | CLI = Typer; 127 tests; Linux-паритет підтверджено в Docker |
-| WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | docs | усі gates пройдено: `reports/WP-00/{testing,code-review,security,spec-review}-pr2.md`; 586 tests; PR #2 | worktree `.worktrees/wp-00-2` |
-| WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | pending | — | після merge PR2 |
+| WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | merged 643d41b (PR #2) | усі gates + CI green incl. docker job | ADR-0002; runbooks; 586 tests |
+| WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | in_progress | — | worktree `.worktrees/wp-00-3` |
 | WP-01C | — | `wp/01c-contracts` | merged 1f2fbc8 (PR #1) | docs done; ADR-0003/0004; CI green | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
 
 ## Хвиля 1
