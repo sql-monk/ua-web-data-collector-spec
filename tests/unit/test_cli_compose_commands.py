@@ -12,11 +12,13 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+import pymongo
 import pytest
 from pymongo.errors import OperationFailure
 from typer.testing import CliRunner
 
 from collector import cli
+from collector.api import health
 from collector.api.health import ComponentStatus
 from collector.cli import (
     MONGO_NOT_YET_INITIALIZED,
@@ -27,6 +29,10 @@ from collector.cli import (
 from collector.workers.roles import WorkerRole
 
 runner = CliRunner()
+
+
+# cli імпортує pymongo/check_postgres лише в тілах команд (lazy, gate 3 CR-12), тому підміна
+# робиться на модулях-джерелах: `pymongo.MongoClient`, `collector.api.health.check_postgres`.
 
 
 # --- db migrate -------------------------------------------------------------------------------
@@ -42,7 +48,7 @@ def _postgres(ok: bool) -> Any:
 def test_db_migrate_exits_0_with_owner_message_when_postgres_reachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cli, "check_postgres", _postgres(True))
+    monkeypatch.setattr(health, "check_postgres", _postgres(True))
     result = runner.invoke(app, ["db", "migrate"])
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == "no migrations yet; owner WP-01A"
@@ -50,7 +56,7 @@ def test_db_migrate_exits_0_with_owner_message_when_postgres_reachable(
 
 
 def test_db_migrate_exits_1_when_postgres_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "check_postgres", _postgres(False))
+    monkeypatch.setattr(health, "check_postgres", _postgres(False))
     result = runner.invoke(app, ["db", "migrate"])
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -161,7 +167,7 @@ def test_ensure_replica_set_reraises_other_operation_failures() -> None:
 @pytest.fixture
 def fake_mongo_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> type[FakeClient]:
     FakeClient.last = None
-    monkeypatch.setattr(cli, "MongoClient", FakeClient)
+    monkeypatch.setattr(pymongo, "MongoClient", FakeClient)
     password_file = tmp_path / "mongo_root_password"
     password_file.write_text("s3cret\n", encoding="utf-8")
     monkeypatch.setenv("COLLECTOR_MONGO_ROOT_USERNAME", "collector_root")
@@ -209,7 +215,7 @@ def test_db_ensure_mongo_exits_1_on_driver_error(
 
             super().__init__(Admin(initialized_as=None), **kwargs)
 
-    monkeypatch.setattr(cli, "MongoClient", Failing)
+    monkeypatch.setattr(pymongo, "MongoClient", Failing)
     result = runner.invoke(app, ["db", "ensure-mongo"])
     assert result.exit_code == 1
     assert "ensure_mongo.failed" in result.stderr

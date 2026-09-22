@@ -36,11 +36,13 @@ Parse/projector/export/maintenance/scheduler/one-shots — лише `backend`, �
 ## Секрети (§7.5, §13, FR-013)
 
 `secrets/*.example` — у git; реальні файли (`secrets/<name>` без суфікса) — у `.gitignore`.
-`./deploy/compose/secrets/init-secrets.sh` створює відсутні файли: паролі копіює з
-прикладів (змініть для чогось, крім локальної розробки), `mongo_keyfile` генерує
-(`openssl rand -base64 756`). Файли мають бути readable для uid контейнерів (10001 —
-collector, 999 — postgres/mongo); Compose bind-mount-ить їх у `/run/secrets/<name>` з
-правами хоста. У `environment` сервісів дозволені лише `*_FILE`-посилання.
+`./deploy/compose/secrets/init-secrets.sh` створює відсутні файли: паролі генерує
+випадково (`openssl rand -hex 24`, fallback `python3 secrets`/`/dev/urandom`), `mongo_keyfile`
+— `openssl rand -base64 756`; з прикладу копіюється лише не-секретне `minio_root_user`.
+Файли отримують 0644 свідомо: Compose bind-mount-ить їх у `/run/secrets/<name>` з правами
+хоста, а читають non-root uid контейнерів (10001 — collector, 999 — postgres/mongo);
+0600 → `Permission denied` на Linux. У `environment` сервісів дозволені лише
+`*_FILE`-посилання.
 
 | Secret | Споживач |
 |---|---|
@@ -59,6 +61,11 @@ docker compose -f docker-compose.yml -f deploy/compose/dev.override.yml --profil
 ```
 
 Base-файл портів не публікує; на shared/production host override не використовувати.
+
+Клієнти MongoDB з хоста через override мають підключатися з `directConnection=true`
+(`mongosh "mongodb://127.0.0.1:27017/?directConnection=true"`): конфігурація replica set
+містить `members[0].host = mongo:27017`, і RS-aware клієнт після discovery спробує
+з'єднатися з `mongo:27017`, який з хоста не резолвиться, — зависне на server selection.
 
 ## Змінні оточення Compose
 

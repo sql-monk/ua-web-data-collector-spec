@@ -9,9 +9,12 @@
 - Docker Engine 27+ з Compose plugin v2.30+ (перевірено на Docker 29.8 / Compose v5.5.1);
 - доступ до registry: `docker.io` (python, postgres, mongo), `ghcr.io` (uv), `quay.io` (minio);
 - `git clone` репозиторію; `uv`/Python на хості **не потрібні** — image збирається у Docker;
-- вільні ресурси: ліміти сумарно ≈ 12 CPU / 12 ГБ для core+workers за замовчуванням
-  (`deploy.resources.limits` у `docker-compose.yml`); хост може мати менше — ліміти є
-  верхньою межею, не резервуванням.
+- вільні ресурси: ліміти сумарно **16 CPU / 16 ГіБ** для core+workers за замовчуванням
+  (`deploy.resources.limits` у `docker-compose.yml`: postgres 2/2G + mongo 2/2G + minio 1/1G +
+  api 1/1G + scheduler 0.5/512M + discovery 0.5/512M + fetch 2×1/1G + parse 2×2/2G +
+  projector 1/1G + translation 0.5/512M + export 1/1G + maintenance 0.5/512M; one-shots
+  0.5/512M короткочасно); хост може мати менше — ліміти є верхньою межею, не резервуванням.
+  Фактичне споживання placeholder-стека — < 1 CPU / ~1.5 ГіБ.
 
 ## Кроки
 
@@ -42,6 +45,16 @@ docker compose ps
 docker compose exec api python -m collector.api.health
 # postgres: ok (...)  mongo: ok (writable primary of replica set 'rs0')  minio: ok (liveness HTTP 200)
 ```
+
+## Секрети: права файлів
+
+`init-secrets.sh` генерує випадкові паролі (`openssl rand -hex 24`) і keyfile; файли мають
+режим **0644** свідомо: Compose bind-mount-ить file-secrets з правами хоста, а читають їх
+non-root uid контейнерів (999, 10001) — 0600 від користувача хоста дає `Permission denied`
+на Linux. Наслідок: секрети читає будь-який локальний користувач хоста з доступом до
+каталогу репозиторію — прийнятно лише для single-host MVP (ADR-0002); для спільного хоста
+обмежте каталог (`chmod 0700 deploy/compose/secrets` не допоможе контейнерам — потрібні
+Swarm secrets, WP-01D).
 
 ## Локальна розробка з портами на 127.0.0.1
 

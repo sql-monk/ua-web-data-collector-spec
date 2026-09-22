@@ -26,16 +26,20 @@ import signal
 import threading
 import time
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated, NoReturn
 
 import typer
-from pymongo import MongoClient
-from pymongo.errors import OperationFailure, PyMongoError
 
-from collector.api.health import check_postgres, env_or_file, mongo_address
+from collector.core.config import env_or_file, mongo_address
 from collector.core.logging import configure_logging, get_logger
 from collector.core.version import version_info
 from collector.workers.roles import WorkerRole
+
+if TYPE_CHECKING:
+    from pymongo import MongoClient
+
+# pymongo/fastapi/uvicorn імпортуються лише в тілах команд, які їх потребують (gate 3, CR-12):
+# `collector version`/`--help` — це image HEALTHCHECK і CI-контракт, вони мають бути дешевими.
 
 NOT_IMPLEMENTED_EXIT_CODE = 2
 # Placeholder-процеси (scheduler/worker): період heartbeat-логу, с.
@@ -43,6 +47,9 @@ PLACEHOLDER_HEARTBEAT_SECONDS = 30.0
 # ensure-mongo: скільки чекати, поки ініційований член стане primary, с.
 MONGO_PRIMARY_WAIT_SECONDS = 60.0
 MONGO_NOT_YET_INITIALIZED = 94  # код помилки replSetGetStatus до replSetInitiate
+MONGO_ALREADY_INITIALIZED = 23  # replSetInitiate програв гонку паралельному ensure-mongo
+# Мережеві таймаути клієнта ensure-mongo, мс: завислий replSetInitiate не тримає one-shot вічно.
+MONGO_CLIENT_TIMEOUT_MS = 30_000
 
 app = typer.Typer(
     name="collector",
@@ -108,10 +115,13 @@ def placeholder_process(
         log.info("placeholder.stop_requested", signal=signal.Signals(signum).name)
         stop_event.set()
 
+    previous_handlers: dict[signal.Signals, object] = {}
     if threading.current_thread() is threading.main_thread():
-        # PID 1 у контейнері ігнорує SIGTERM без явного handler — ставимо його самі.
-        signal.signal(signal.SIGTERM, _request_stop)
-        signal.signal(signal.SIGINT, _request_stop)
+        # PID 1 у контейнері ігнорує SIGTERM без явного handler — ставимо його самі;
+        # попередні handlers відновлюються у finally (gate 3, CR-9: pytest/embedding).
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _request_stop)
 
     log.warning(
         "placeholder.started",
@@ -119,8 +129,12 @@ def placeholder_process(
         owner=owner,
         detail="lease/queue logic not implemented yet; process stays alive for Compose",
     )
-    while not stop_event.wait(heartbeat_seconds):
-        log.info("placeholder.heartbeat", component=name)
+    try:
+        while not stop_event.wait(heartbeat_seconds):
+            log.info("placeholder.heartbeat", component=name)
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)  # type: ignore[arg-type]  # getsignal → Handlers | None
     log.info("placeholder.stopped", component=name)
 
 
@@ -133,19 +147,29 @@ def ensure_mongo_replica_set(
 ) -> bool:
     """Ініціалізувати single-member replica set, якщо ще не ініціалізовано (ідемпотентно).
 
-    Повертає True, якщо `replSetInitiate` виконано зараз, False — якщо RS уже існував.
-    В обох випадках чекає, поки член стане writable primary (`hello`).
+    Повертає True, якщо `replSetInitiate` виконано зараз, False — якщо RS уже існував
+    (зокрема коли паралельний `ensure-mongo` встиг першим — код 23 `AlreadyInitialized`).
+    В обох випадках чекає, поки член стане writable primary (`hello`); transient помилки
+    драйвера під час election (`AutoReconnect`, `NotPrimaryError`) — повтор до deadline.
     """
+    from pymongo.errors import AutoReconnect, NotPrimaryError, OperationFailure
+
     try:
         status = client.admin.command("replSetGetStatus")
     except OperationFailure as exc:
         if exc.code != MONGO_NOT_YET_INITIALIZED:
             raise
-        client.admin.command(
-            "replSetInitiate",
-            {"_id": replica_set, "members": [{"_id": 0, "host": member_host}]},
-        )
-        initiated = True
+        try:
+            client.admin.command(
+                "replSetInitiate",
+                {"_id": replica_set, "members": [{"_id": 0, "host": member_host}]},
+            )
+        except OperationFailure as race:
+            if race.code != MONGO_ALREADY_INITIALIZED:
+                raise
+            initiated = False
+        else:
+            initiated = True
     else:
         if status.get("set") != replica_set:
             raise ValueError(
@@ -156,7 +180,10 @@ def ensure_mongo_replica_set(
 
     deadline = time.monotonic() + wait_seconds
     while True:
-        hello = client.admin.command("hello")
+        try:
+            hello = client.admin.command("hello")
+        except (AutoReconnect, NotPrimaryError):
+            hello = {}
         if hello.get("isWritablePrimary"):
             return initiated
         if time.monotonic() >= deadline:
@@ -185,6 +212,9 @@ def db_ensure_mongo(
     (типово `rs0`), `COLLECTOR_MONGO_ROOT_USERNAME`, `COLLECTOR_MONGO_ROOT_PASSWORD[_FILE]`
     (Docker secret). Member host у конфігурації RS = `COLLECTOR_MONGO_HOST:PORT`.
     """
+    from pymongo import MongoClient
+    from pymongo.errors import PyMongoError
+
     configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
     log = get_logger("collector.db.ensure_mongo")
     host, port = mongo_address()
@@ -199,6 +229,8 @@ def db_ensure_mongo(
         authSource="admin",
         directConnection=True,
         serverSelectionTimeoutMS=10_000,
+        connectTimeoutMS=MONGO_CLIENT_TIMEOUT_MS,
+        socketTimeoutMS=MONGO_CLIENT_TIMEOUT_MS,
     )
     try:
         initiated = ensure_mongo_replica_set(
@@ -228,6 +260,8 @@ def db_migrate() -> None:
     Перевірка лише TCP (`COLLECTOR_POSTGRES_HOST`/`PORT`), без credentials — драйвер
     і `alembic upgrade head` додає WP-01A.
     """
+    from collector.api.health import check_postgres
+
     configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
     log = get_logger("collector.db.migrate")
     status = check_postgres()
@@ -325,6 +359,8 @@ def api() -> None:
         # Логи uvicorn ідуть через structlog ProcessorFormatter (collector.core.logging).
         log_config=None,
         access_log=False,
+        # Без заголовка `server: uvicorn` (SEC L-4).
+        server_header=False,
     )
 
 

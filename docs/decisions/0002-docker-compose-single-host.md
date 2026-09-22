@@ -75,8 +75,12 @@ multi-arch index digest, named volumes (`postgres-data`, `mongo-data`, `mongo-co
 5432/27017/9000/9001/8000 лише на `127.0.0.1`. PostgreSQL і MongoDB працюють non-root
 (`postgres`, `999:999`) із `cap_drop: ALL`. **MinIO лишається root** (прийняте відхилення):
 vendor image тримає `/data` під root, а non-root потребує окремого chown-init контейнера;
-MinIO — не application image (§13 «де можливо»). MinIO Docker Hub образи більше не
-оновлюються; використовується `quay.io`.
+MinIO — не application image (§13 «де можливо»). Gate 3 (SEC M-1): root, але **без
+capabilities** (`cap_drop: ALL`, `no-new-privileges`) і з **read-only rootfs** + tmpfs `/tmp`
+(`MC_CONFIG_DIR`/`MINIO_CONFIG_DIR` у tmpfs) — запис лише у volume `/data`; перевірено
+`up --wait` + `mc mb/pipe/cat`. Залишкове відхилення — лише uid 0 (owner WP-01D, ADR для
+Swarm/production, 2026-09-22). MinIO Docker Hub образи більше не оновлюються; використовується
+`quay.io`.
 
 MongoDB — single-member replica set `rs0` з `--keyFile` (auth). Keyfile — Docker secret;
 file-secrets у Compose bind-mount-яться з правами хоста (на Docker Desktop — 0777, `mode`
@@ -132,10 +136,18 @@ PID 1 ігнорує SIGTERM). `controller` лишається стабом (Swa
 ### Секрети
 
 `deploy/compose/secrets/*.example` у git; реальні файли — `.gitignore`;
-`init-secrets.sh` копіює приклади і генерує keyfile (`openssl rand -base64 756`). Жодного
-секрету в `ARG`/`ENV`/image layer (`docker history`, `env`), у `environment` лише `*_FILE`.
-Файли мають бути readable для uid 10001/999 (0644 для локальної розробки; production —
-Swarm secrets, WP-01D).
+`init-secrets.sh` генерує випадкові паролі (`openssl rand -hex 24`; gate 3 SEC L-3 — жодних
+default credentials) і keyfile (`openssl rand -base64 756`); з прикладу копіюється лише
+не-секретний `minio_root_user`. Жодного секрету в `ARG`/`ENV`/image layer (`docker history`,
+`env`), у `environment` лише `*_FILE`.
+
+**Права файлів секретів — 0644 (risk acceptance, 2026-09-22, owner WP-01D):** Compose
+bind-mount-ить file-secrets у `/run/secrets/<name>` з правами хоста (перевірено: `uid/gid/mode`
+long syntax ігнорується, Docker Desktop показує 0777), а читають їх non-root uid контейнерів
+(postgres/mongo 999, collector 10001) — 0600 від користувача хоста дає EACCES на Linux.
+Альтернатива `secrets.<name>.environment` (Compose копіює значення в контейнер як 0444 root,
+перевірено) потребує секретів у env/`.env` хоста, що суперечить §7.5 «не committed .env» за
+духом; прийнято 0644 для single-host MVP, production — Swarm secrets (Q-013).
 
 ### CI
 
@@ -150,12 +162,33 @@ core+workers → `ps`/health → `down -v`. Локально SBOM/CVE — `docke
 cves`.
 
 **Risk acceptance (дата 2026-09-22, owner WP-13 — security/log tests §16.1 п.8;
-переглянути при кожному оновленні digest `python:3.13-slim`, не пізніше 2026-12-22):**
+тригери перегляду: кожне оновлення digest `python:3.13-slim`; **злиття WP-02 fetch** (zlib
+почне розпаковувати недовірений gzip sitemap/body — §13 decompression bomb, обґрунтування
+«довірені дані» перестає діяти); не пізніше 2026-12-22):**
 2 HIGH без fix у base image Debian 13 trixie — `perl 5.40.1-6+deb13u1` (CVE-2026-82560) і
-`zlib 1:1.3.dfsg+really1.3.1-1`; 0 CRITICAL. Обидва — системні пакети base image, не
-виконуються application-кодом (perl не викликається; zlib — через stdlib Python лише для
-довірених даних у PR2). Прийнято до появи fix у Debian; CI `HIGH ignore-unfixed` їх не блокує,
-`CRITICAL` без `ignore-unfixed` заблокує будь-яке підвищення severity.
+`zlib 1:1.3.dfsg+really1.3.1-1` (CVE-2026-85091); 0 CRITICAL. Обидва — системні пакети base
+image, не виконуються application-кодом (perl не викликається; zlib — через stdlib Python лише
+для довірених даних у PR2). Прийнято до появи fix у Debian; CI `HIGH ignore-unfixed` їх не
+блокує, `CRITICAL` без `ignore-unfixed` заблокує будь-яке підвищення severity. Механізм
+датованих винятків для unfixed CRITICAL (`trivyignores: .trivyignore`, gate 3 CR-11) — owner
+WP-13 разом із security-тестами; до того unfixed CRITICAL блокує PR, і acceptance вноситься
+сюди правкою workflow.
+
+### Прийняті знахідки gate 3 (дата 2026-09-22)
+
+- `api` у `ingress` (не internal) має необмежений egress; §7.5 — «лише OIDC egress» (CR-14,
+  SEC L-2). Owner **WP-00 PR3**: gui↔api через окрему internal-мережу, `ingress` лише gui
+  (рядок додано до картки PR3); **WP-11A**: OIDC egress api — окрема мережа/allowlist.
+- Health endpoint без auth повертає версії й `detail` (SEC L-4). Зараз: `detail` на помилці —
+  лише клас/код без текстів винятків і host:port, `server_header=False`; версії/`detail` за
+  RBAC і не проксіювати без auth у PR3 — owner **WP-11A / PR3**.
+- `trivyignores` для датованих unfixed CRITICAL — owner **WP-13** (див. risk acceptance).
+- Access log uvicorn вимкнено (`access_log=False`); коли WP-11A увімкне його — URL/query з
+  токенами фільтрує викликач, redaction structlog діє лише за ключами (SEC I-1, owner
+  **WP-11A** security-рев'ю). Плоска мережа `backend` — production network policies §13
+  (SEC I-5, owner WP-12/WP-01D).
+- pymongo лишається module-level у `collector.api.health` (healthcheck mongo його потребує);
+  fastapi — lazy у `create_app`, cli — lazy усе (CR-12): `import collector.cli` 0.88 с → 0.44 с.
 
 ### Прийняті знахідки gate 2 (дата 2026-09-22)
 

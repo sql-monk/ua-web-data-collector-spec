@@ -122,7 +122,7 @@ def test_addresses_default_to_compose_service_names() -> None:
 def test_check_mongo_ok_on_writable_primary(fake_mongo: type[FakeMongoClient]) -> None:
     status = check_mongo({}, timeout=1.5)
     assert status.ok and status.name == "mongo"
-    assert "rs0" in status.detail
+    assert status.detail == "writable primary of replica set"  # без назви RS/host (SEC L-4)
     client = fake_mongo.instances[0]
     assert client.closed
     assert client.kwargs["directConnection"] is True
@@ -134,7 +134,7 @@ def test_check_mongo_not_ok_before_replica_set_init(fake_mongo: type[FakeMongoCl
     fake_mongo.hello = {"isWritablePrimary": False, "setName": None}
     status = check_mongo({})
     assert not status.ok
-    assert "ensure-mongo" in status.detail
+    assert status.detail == "not_primary"
     assert fake_mongo.instances[0].closed
 
 
@@ -144,7 +144,7 @@ def test_check_mongo_not_ok_on_driver_error(fake_mongo: type[FakeMongoClient]) -
     fake_mongo.hello = ServerSelectionTimeoutError("no servers")
     status = check_mongo({})
     assert not status.ok
-    assert status.detail.startswith("ServerSelectionTimeoutError")
+    assert status.detail == "ServerSelectionTimeoutError", "клас без тексту (SEC L-4)"
 
 
 # --- report / app / main ----------------------------------------------------------------------

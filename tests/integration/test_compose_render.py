@@ -22,7 +22,6 @@ pytestmark = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SECRETS_DIR = REPO_ROOT / "deploy" / "compose" / "secrets"
 PROFILES = ("core", "workers", "browser")
 
 
@@ -57,13 +56,8 @@ def _compose_config(*files: str) -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def rendered() -> dict[str, Any]:
-    missing = [
-        p.name.removesuffix(".example")
-        for p in SECRETS_DIR.glob("*.example")
-        if not (SECRETS_DIR / p.name.removesuffix(".example")).exists()
-    ]
-    if missing:
-        pytest.skip(f"секрети не ініціалізовані (init-secrets.sh): {missing}")
+    # Файли секретів не потрібні: `docker compose config` не читає `secrets.*.file`
+    # (gate 3, CR-3 — раніше skip ховав тести від CI job `python`).
     return _compose_config("docker-compose.yml")
 
 

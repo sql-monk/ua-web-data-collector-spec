@@ -7,7 +7,7 @@
 | Картка | `docs/plan/cards/WP-00.md`, розділ «PR2» + «Спільні правила» |
 | Розділи ТЗ | §1 п.8/10, §7.5, §7.6, §8, §13, §16.1 п.14, §16.2, §16.3, FR-030, FR-035; REVIEW.md R-51, R-55; ADR-0001 |
 | Середовище | Windows 11, Docker Desktop 29.8.0 (Linux containers), Compose v5.5.1, uv 0.12.13, CPython 3.13.9; Docker Scout 1.24 (SBOM/CVE локально); `syft`/`trivy` локально відсутні |
-| Commits | `d0360e3 feat(wp-00): Docker image collector, Compose profiles, health stub, one-shots (PR2)` + `f6ae1c2 docs(wp-00): PR2 implementation report, compose render skip message`; після gate 2 — `71f5903 fix(wp-00): gate 2 — mongo healthcheck init-phase, trivy CRITICAL, COPY chmod, profiles docs` |
+| Commits | `d0360e3 feat(wp-00): Docker image collector, Compose profiles, health stub, one-shots (PR2)` + `f6ae1c2 docs(wp-00): PR2 implementation report, compose render skip message`; після gate 2 — `71f5903 fix(wp-00): gate 2 — mongo healthcheck init-phase, trivy CRITICAL, COPY chmod, profiles docs`; після gate 3 — `fix(wp-00): gate 3 — IPv4 mongo healthcheck, CI health assert, minio hardening, lazy imports, random secrets` |
 
 ## Що зроблено
 
@@ -489,4 +489,109 @@ $ uv run pre-commit run --all-files
 11 hooks Passed
 $ docker ps --filter name=collector- (після down -v)
 0
+```
+
+## Відповіді на код-рев'ю та security-рев'ю
+
+Gate 3: `docs/plan/reports/WP-00/code-review-pr2.md` (approve; 3 medium, 11 low) і
+`docs/plan/reports/WP-00/security-pr2.md` (approve; 1 medium, 6 low, 5 info). Дата відповідей —
+2026-09-22. Коміт: `fix(wp-00): gate 3 — …` (див. таблицю Commits).
+
+### Код-рев'ю
+
+| # | Sev | Знахідка | Статус | Що зроблено / обґрунтування |
+|---|---|---|---|---|
+| 1 | medium | `hostname -i` на dual-stack → кілька адрес → `mongosh --host` невалідний | **fixed** | Healthcheck бере першу IPv4 явно: `ip="$(hostname -I \| tr ' ' '\n' \| grep -m1 -E '^[0-9]+(\.[0-9]+){3}$')" && test -n "$ip" && mongosh --host "$ip" …` (порожня адреса → fail healthcheck, а не mongosh без host). Рендер перевірено (`config --format json`), 3/3 цикли `down -v → up -d --wait` зелені, `RestartCount=0`; unit-assert `test_mongo_healthcheck_is_robust_to_entrypoint_init_phase` оновлено (`hostname -I`, regex IPv4, `test -n`). |
+| 2 | medium | `grep -vc healthy` рахує `unhealthy` як healthy | **fixed** | Крок CI тепер `docker compose ps -a --format json \| python3 deploy/compose/check-healthy.py` — явний парсер (running+healthy або exited 0; `unhealthy/starting/restarting/created/exit≠0` → exit 1 з переліком; порожній ps → 1). Unit-тести `tests/unit/test_check_healthy.py` (6) + `test_ci_health_assert_parses_ps_json_not_grep`; проти живого стека: «all 16 containers healthy or exited 0» (нижче). |
+| 3 | medium | `test_compose_render.py`: skip на відсутні secret-файли → тести ніколи не виконуються в CI | **fixed** | Guard прибрано (`docker compose config` файли секретів не читає — підтверджено: 5/5 PASSED без файлів секретів, вивід нижче); skip лише без Compose plugin. У CI тести виконуються в job `python` (`uv run pytest -m "not live" -rs` на ubuntu-latest з docker compose v2; `-rs` робить skip видимим; тест `test_ci_python_job_shows_skips`). |
+| 4 | low | паралельний `ensure-mongo`: `AlreadyInitialized` (23) → exit 1 | **fixed** | Код 23 на `replSetInitiate` → `initiated=False`, далі звичайне очікування primary; тест `test_ensure_replica_set_tolerates_already_initialized_race`. |
+| 5 | low | wait-loop не толерує `AutoReconnect`; клієнт без connect/socket timeouts | **fixed** | У циклі `hello` ловляться `AutoReconnect`/`NotPrimaryError` → повтор до deadline; `MongoClient(connectTimeoutMS=30000, socketTimeoutMS=30000)`; тести `test_ensure_replica_set_survives_transient_errors_during_election`, `test_db_ensure_mongo_sets_network_timeouts`. |
+| 6 | low | `depends_on` workers не містить залежностей healthcheck | **fixed** | fetch/parse ← `minio: service_healthy`; projector ← `mongo`; export ← `mongo` + `minio`; тест `test_worker_depends_on_covers_its_healthcheck_dependencies`. |
+| 7 | low | stateful без `logging` rotation | **fixed** | Anchor `x-logging` (json-file 20m×5) для всіх 15 сервісів; тест `test_every_service_has_pids_limit_and_log_rotation`; `docker inspect postgres` → `Log=map[max-file:5 max-size:20m]`. |
+| 8 | low | runbook «≈ 12 CPU / 12 ГБ» — фактично 16/16 | **fixed** | Runbook: 16 CPU / 16 ГіБ з поелементною сумою; фактичне споживання placeholder-стека. |
+| 9 | low | `placeholder_process` не відновлює signal handlers | **fixed** | `signal.getsignal` → відновлення у `finally`; тест `test_placeholder_process_restores_signal_handlers`. |
+| 10 | low | `http.client.HTTPException` → 500 замість 503 | **fixed** | Додано до кортежу `_timed`; тест `test_minio_probe_http_exception_is_503_not_500`. |
+| 11 | low | trivy CRITICAL без wired risk-acceptance (`trivyignores`) | **accepted** (owner WP-13, 2026-09-22) | Зафіксовано в ADR-0002 (risk acceptance): до появи `.trivyignore` unfixed CRITICAL блокує PR, acceptance — правкою workflow; SHA-pin actions — разом із WP-13 hardening CI. |
+| 12 | low | module-level `pymongo`/`fastapi` у `cli.py` — важкий `collector version`/`--help` | **fixed** | Lazy import: `pymongo` у `db ensure-mongo`, `check_postgres` у `db migrate`, `uvicorn` у `api`; `env_or_file`/`*_address` перенесено в `collector.core.config` (health re-export); `fastapi` — lazy у `create_app` (`Response` зі `starlette.responses`, бо FastAPI резолвить string-анотації через globals). Виміряно: `import collector.cli` 0.95 с → 0.52 с, fastapi/pymongo/uvicorn у дереві cli = 0. `pymongo` у `collector.api.health` лишається module-level (healthcheck mongo його потребує; тести підміняють `health.MongoClient`) — **accepted** (WP-11A при заміні стаба). Тести підміняють `pymongo.MongoClient`/`health.check_postgres`. |
+| 13 | low | `directConnection=true` для host-клієнтів через override не задокументовано | **fixed** | `deploy/compose/README.md` («Override для розробки»): `mongosh "mongodb://127.0.0.1:27017/?directConnection=true"` і чому. |
+| 14 | low spec-mismatch | `api` в `ingress` має необмежений egress; §7.5 «лише OIDC egress» | **accepted** (owner WP-00 PR3 / WP-11A, 2026-09-22) | Коментар у `docker-compose.yml` (`api.networks`), рядок у картці PR3 (`docs/plan/cards/WP-00.md`, вимога 4: gui↔api через internal-мережу, `ingress` лише gui, health не проксіювати без auth), ADR-0002 «Прийняті знахідки gate 3». |
+
+### Security-рев'ю
+
+| # | Sev | Знахідка | Статус | Що зроблено / обґрунтування |
+|---|---|---|---|---|
+| M-1 | medium | `minio` root без `cap_drop`/`read_only` | **fixed** | `cap_drop: [ALL]`, `no-new-privileges`, `read_only: true` + tmpfs `/tmp` (`MC_CONFIG_DIR`/`MINIO_CONFIG_DIR` у tmpfs). `docker inspect`: `RO=true CapDrop=[ALL]`; запис у volume працює (`mc mb/pipe/cat` → `gate3`); `up --wait` 3/3. Залишок — лише uid 0 (ADR-0002, owner WP-01D). Тест `test_minio_is_capability_dropped_and_read_only`. |
+| L-1 | low | відсутній `pids_limit` | **fixed** | `deploy.resources.limits.pids`: 256 application, 1024 stateful (окремі anchors `*-stateful`, бо Compose не дозволяє різні `pids` на одному anchor). `docker inspect`: fetch-worker 256, postgres/minio 1024. |
+| L-2 | low | api egress ширший за §7.5 | **accepted** (WP-00 PR3 / WP-11A) | Як CR-14: коментар у compose, рядок у картці PR3, ADR. |
+| L-3 | low | default credentials з `*.example`, 0644 | **fixed** (паролі) / **accepted** (0644; owner WP-01D, 2026-09-22) | `init-secrets.sh` генерує всі паролі випадково (`openssl rand -hex 24`, fallback `python3 secrets`/`urandom`), приклади паролів більше не є значеннями (`GENERATED…`); CR прибирається (`tr -d '\r\n'` — Windows openssl друкує CRLF, це ламало auth під час перевірки). Права **0644 свідомо**: Compose bind-mount-ить file-secrets з правами хоста, а читають non-root uid 999/10001 — 0600 дає EACCES на Linux (альтернатива `secrets.*.environment` копіює як 0444 root, перевірено, але потребує секретів в env/.env хоста). Задокументовано: скрипт, README compose, runbook «Секрети: права файлів», ADR-0002 risk acceptance. Тест `test_init_secrets_generates_random_passwords_not_examples`. |
+| L-4 | low | health без auth розкриває версії, host:port, тексти винятків | **fixed** (зараз) / **accepted** (решта, WP-11A / PR3) | `detail` на помилці — лише клас винятку або код (`not_primary`, `http_503`, `ServerSelectionTimeoutError`), без текстів і host:port (текст → у логи `probe.failed`); success-`detail` без host:port/назви RS; `server_header=False` (`server= None` у відповіді). Версії та `detail` за RBAC, не проксіювати без auth у PR3 — картка PR3 + ADR. Тести оновлено (`test_health*.py`). |
+| L-5 | low | stateful без ротації логів | **fixed** | Як CR-7. |
+| L-6 | low | risk acceptance без CVE ID zlib і тригера WP-02 | **fixed** | ADR-0002: `CVE-2026-85091` (zlib), тригер перегляду «злиття WP-02 fetch» (недовірений gzip), плюс digest/дата. |
+| I-1 | info | access log вимкнено; redaction URL/query — викликач | **accepted** (WP-11A) | Без змін; зафіксовано в ADR-0002 як очікування від WP-11A security-рев'ю. |
+| I-2 | info | keyfile 0400 у tmpfs, auth увімкнено | **not applicable** (підтвердження) | Без змін. |
+| I-3 | info | сканери: gitleaks 0, scout 0C/2H | **not applicable** | Без змін. |
+| I-4 | info | лише `ensure-mongo`/`mongo` мають root-credentials Mongo | **not applicable** (підтвердження §13) | Без змін; per-component ролі — WP-01A/WP-01B. |
+| I-5 | info | плоска мережа `backend` | **accepted** (production network policies, §13; owner WP-12/WP-01D) | Без змін у PR2. |
+
+### Вивід перевірок після gate 3
+
+```text
+$ docker compose config --quiet
+exit=0
+$ docker compose --profile core --profile workers --profile browser config --quiet
+exit=0
+$ docker compose build --pull
+ Image collector:dev Building
+ Image collector:dev Built
+exit=0
+# 3 цикли down -v → up -d --wait (новий healthcheck mongo з IPv4, minio read-only/cap_drop, random secrets)
+cycle 1: up --wait exit=0 elapsed=22s mongo.RestartCount=0
+cycle 2: up --wait exit=0 elapsed=24s mongo.RestartCount=0
+cycle 3: up --wait exit=0 elapsed=26s mongo.RestartCount=0
+$ docker compose ps -a --format json | python3 deploy/compose/check-healthy.py
+all 16 containers healthy or exited 0
+exit=0
+$ mongo: hostname -I / обрана IPv4 / healthcheck log
+172.22.0.2
+ip=172.22.0.2
+0 (ok)
+0 (ok)
+$ docker inspect minio / fetch-worker
+minio User= RO=true CapDrop=[ALL] Pids=1024 Log=map[max-file:5 max-size:20m]
+fetch-worker Pids=256
+postgres Pids=1024 Log=map[max-file:5 max-size:20m]
+$ minio write (root, cap_drop ALL, read-only rootfs)
+gate3
+$ health response (без текстів винятків / host:port; server header)
+server= None
+{"ready":true,"components":[{"name":"postgres","ok":true,"latency_ms":0.7,"detail":"tcp reachable (no SQL check yet; owner WP-01A)"},{"name":"mongo","ok":true,"latency_ms":11.6,"detail":"writable primary of replica set"},{"name":"minio","ok":true,"latency_ms":1.2,"detail":"liveness HTTP 200"}],"version":{"package_version":"0.1.0","git_sha":"5b3cb6a4a53f8c6fc56d5add35f5bb2146c6a714","schema_version":"0.0.0-placeholder"}}
+$ health при зупиненому mongo → 503, detail = клас винятку
+503 {"ready":false,"components":[{"name":"postgres","ok":true,"latency_ms":1.0,"detail":"tcp reachable (no SQL check yet; owner WP-01A)"},{"name":"mongo","ok":false,"latency_ms":3004.0,"detail":"ServerSelectionTimeoutError"},{"name":"minio","ok":true,"latency_ms":1.2,"detail":"liveness HTTP 200"}],"vers
+$ docker compose down -v
+24
+volumes: 0
+
+$ uv run pytest tests/integration/test_compose_render.py -v -rs   (без файлів секретів — тимчасово перейменовано)
+tests/integration/test_compose_render.py::test_workers_have_no_container_name_ports_or_volumes PASSED [ 20%]
+tests/integration/test_compose_render.py::test_no_docker_socket_and_no_published_ports PASSED [ 40%]
+tests/integration/test_compose_render.py::test_dev_override_binds_loopback_only PASSED [ 60%]
+tests/integration/test_compose_render.py::test_application_services_read_only_non_root PASSED [ 80%]
+tests/integration/test_compose_render.py::test_secrets_render_as_files PASSED [100%]
+============================== 5 passed in 1.00s ==============================
+$ uv run ruff check . / ruff format --check . / mypy src / mypy tests
+All checks passed!
+77 files already formatted
+Success: no issues found in 26 source files
+Success: no issues found in 15 source files
+$ uv run pytest -m "not live" -rs
+SKIPPED [1] tests\unit\test_network_blocked.py:27: Windows: loopback потрібен asyncio
+229 passed, 1 skipped, 8 warnings in 18.11s
+$ import time (python -X importtime): main → gate 3
+  before: import time:    107692 |     954846 | collector.cli
+  after:  import time:    106482 |     520190 | collector.cli
+  fastapi/pymongo/uvicorn imported by cli: 0
+$ uv run pre-commit run --all-files
+11 hooks Passed
+$ uv run pytest -m "not live" (після додавання tests/unit/test_gate3_fixes.py)
+234 passed, 1 skipped
 ```

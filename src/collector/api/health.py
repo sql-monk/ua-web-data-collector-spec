@@ -12,6 +12,10 @@ operator API (§9.10), OIDC/BFF і решта endpoints — owner WP-11A, яки
   (`collector db ensure-mongo`); health не потребує Mongo credentials (§13);
 - `minio` — HTTP `GET /minio/health/live` (офіційний liveness endpoint MinIO).
 
+Відповідь не містить текстів винятків (gate 3, SEC L-4): у `detail` на помилці — лише клас
+винятку (`unreachable`, `not_primary`, `http_503`, ...), без host:port і повідомлень драйверів;
+подробиці — у логах процесу. Версії/`detail` за RBAC — owner WP-11A.
+
 `ready` = усі компоненти `ok`. Контейнер `api` у Compose стартує лише після
 `migrate-postgres`/`ensure-mongo` (`depends_on: service_completed_successfully`), тому
 readiness додатково не потребує прапорця «міграції виконані»; WP-01A/WP-01B додають
@@ -24,21 +28,51 @@ Docker healthcheck workers/one-shots («process + критична dependency»,
 
 from __future__ import annotations
 
-import os
+import http.client
 import socket
 import sys
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from fastapi import FastAPI, Response
 from pydantic import BaseModel, ConfigDict
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
+# Response — на рівні модуля: FastAPI резолвить string-анотації endpoint-а через globals
+# модуля; сам fastapi імпортується лише у create_app (gate 3, CR-12).
+from starlette.responses import Response
+
+from collector.core.config import (
+    env_or_file,
+    minio_health_url,
+    mongo_address,
+    postgres_address,
+)
+from collector.core.logging import get_logger
 from collector.core.version import VersionInfo, version_info
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+__all__ = [
+    "COMPONENT_NAMES",
+    "HEALTH_PATH",
+    "ComponentStatus",
+    "HealthReport",
+    "check_components",
+    "check_minio",
+    "check_mongo",
+    "check_postgres",
+    "create_app",
+    "env_or_file",
+    "main",
+    "minio_health_url",
+    "mongo_address",
+    "postgres_address",
+]
 
 ComponentName = Literal["postgres", "mongo", "minio"]
 COMPONENT_NAMES: tuple[ComponentName, ...] = ("postgres", "mongo", "minio")
@@ -67,40 +101,12 @@ class HealthReport(BaseModel):
     version: VersionInfo
 
 
-def env_or_file(name: str, environ: Mapping[str, str] | None = None) -> str | None:
-    """Значення `NAME` або вміст файлу з `NAME_FILE` (Docker secrets), без trailing newline.
+class ProbeError(ValueError):
+    """Помилка перевірки з коротким кодом для відповіді (текст — лише в логи)."""
 
-    Секрет ніколи не потрапляє в логи: викликачі логують лише факт наявності.
-    """
-    env: Mapping[str, str] = os.environ if environ is None else environ
-    value = env.get(name)
-    if value:
-        return value
-    path = env.get(f"{name}_FILE")
-    if path:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read().strip()
-    return None
-
-
-def postgres_address(environ: Mapping[str, str] | None = None) -> tuple[str, int]:
-    """Хост/порт PostgreSQL з env (`COLLECTOR_POSTGRES_HOST`/`COLLECTOR_POSTGRES_PORT`)."""
-    env: Mapping[str, str] = os.environ if environ is None else environ
-    return env.get("COLLECTOR_POSTGRES_HOST", "postgres"), int(
-        env.get("COLLECTOR_POSTGRES_PORT", "5432")
-    )
-
-
-def mongo_address(environ: Mapping[str, str] | None = None) -> tuple[str, int]:
-    """Хост/порт MongoDB з env (`COLLECTOR_MONGO_HOST`/`COLLECTOR_MONGO_PORT`)."""
-    env: Mapping[str, str] = os.environ if environ is None else environ
-    return env.get("COLLECTOR_MONGO_HOST", "mongo"), int(env.get("COLLECTOR_MONGO_PORT", "27017"))
-
-
-def minio_health_url(environ: Mapping[str, str] | None = None) -> str:
-    """URL liveness endpoint MinIO (`COLLECTOR_MINIO_URL`, типово `http://minio:9000`)."""
-    env: Mapping[str, str] = os.environ if environ is None else environ
-    return env.get("COLLECTOR_MINIO_URL", "http://minio:9000").rstrip("/") + "/minio/health/live"
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _timed(name: ComponentName, probe: Callable[[], str], *, timeout: float) -> ComponentStatus:
@@ -108,9 +114,17 @@ def _timed(name: ComponentName, probe: Callable[[], str], *, timeout: float) -> 
     try:
         detail = probe()
         ok = True
-    except (OSError, PyMongoError, ValueError, TimeoutError) as exc:
-        detail = f"{type(exc).__name__}: {exc}"[:200]
+    except ProbeError as exc:
+        detail = exc.code
         ok = False
+        get_logger("collector.api.health").warning("probe.failed", component=name, code=exc.code)
+    except (OSError, PyMongoError, ValueError, TimeoutError, http.client.HTTPException) as exc:
+        # Клас винятку у відповіді, повний текст — лише в логи (SEC L-4).
+        detail = type(exc).__name__
+        ok = False
+        get_logger("collector.api.health").warning(
+            "probe.failed", component=name, code=detail, error=str(exc)[:300]
+        )
     latency_ms = round((time.perf_counter() - started) * 1000, 1)
     if ok and latency_ms > timeout * 1000:
         # Защитний випадок: probe відповів, але довше за timeout — трактуємо як деградацію.
@@ -126,7 +140,7 @@ def check_postgres(
 
     def probe() -> str:
         with socket.create_connection((host, port), timeout=timeout):
-            return f"tcp {host}:{port} reachable (no SQL check yet; owner WP-01A)"
+            return "tcp reachable (no SQL check yet; owner WP-01A)"
 
     return _timed("postgres", probe, timeout=timeout)
 
@@ -152,11 +166,12 @@ def check_mongo(
         finally:
             client.close()
         if not hello.get("isWritablePrimary"):
-            raise ValueError(
+            raise ProbeError(
+                "not_primary",
                 f"member is not writable primary (setName={hello.get('setName')!r}); "
-                "run `collector db ensure-mongo`"
+                "run `collector db ensure-mongo`",
             )
-        return f"writable primary of replica set {hello.get('setName')!r}"
+        return "writable primary of replica set"
 
     return _timed("mongo", probe, timeout=timeout)
 
@@ -175,7 +190,7 @@ def check_minio(
         except urllib.error.HTTPError as exc:
             status = exc.code
         if status != 200:
-            raise ValueError(f"liveness returned HTTP {status}")
+            raise ProbeError(f"http_{status}", f"liveness returned HTTP {status}")
         return "liveness HTTP 200"
 
     return _timed("minio", probe, timeout=timeout)
@@ -204,7 +219,13 @@ def check_components(
 
 
 def create_app() -> FastAPI:
-    """FastAPI-застосунок лише з `GET /api/v1/health/components` (стаб; owner WP-11A)."""
+    """FastAPI-застосунок лише з `GET /api/v1/health/components` (стаб; owner WP-11A).
+
+    FastAPI імпортується тут, а не на рівні модуля: `python -m collector.api.health` — це
+    healthcheck workers кожні 30 с, йому FastAPI не потрібен (gate 3, CR-12).
+    """
+    from fastapi import FastAPI
+
     app = FastAPI(
         title="UA Web Data Collector — operator API (стаб WP-00)",
         version=version_info().package_version,

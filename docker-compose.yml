@@ -40,6 +40,13 @@ x-collector-image: &collector-image
 
 # Application container (§7.5, §13): read-only rootfs, tmpfs /tmp, non-root, без capabilities,
 # без privilege escalation, init для zombie-reaping. Local persistent state відсутній.
+# Ротація json-file логів для ВСІХ сервісів (stateful теж): log flood не заповнює диск хоста.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 x-collector-runtime: &collector-runtime
   <<: *collector-image
   read_only: true
@@ -59,11 +66,7 @@ x-collector-runtime: &collector-runtime
     COLLECTOR_MONGO_PORT: "27017"
     COLLECTOR_MONGO_REPLICA_SET: rs0
     COLLECTOR_MINIO_URL: http://minio:9000
-  logging:
-    driver: json-file
-    options:
-      max-size: "20m"
-      max-file: "5"
+  logging: *logging
 
 # Worker pool (§7.5/§7.6): масштабується `--scale`, тому без container_name/ports/volumes;
 # stop_grace_period ≥ 90 с — довший за bounded task shutdown (drain по SIGTERM).
@@ -89,23 +92,43 @@ x-worker: &worker
     start_period: 15s
     retries: 3
 
+# Ліміти ресурсів (FR-030). `pids` — захист від fork-exhaustion (gate 3, SEC L-1): application
+# 256 (parse у WP-03 запускає сторонні парсери), stateful 1024. Окремі anchors для stateful, бо
+# Compose не дозволяє різні `pids` на одному anchor.
 x-limits-small: &limits-small
   resources:
     limits:
       cpus: "0.50"
       memory: 512M
+      pids: 256
 
 x-limits-medium: &limits-medium
   resources:
     limits:
       cpus: "1.00"
       memory: 1G
+      pids: 256
 
 x-limits-large: &limits-large
   resources:
     limits:
       cpus: "2.00"
       memory: 2G
+      pids: 256
+
+x-limits-medium-stateful: &limits-medium-stateful
+  resources:
+    limits:
+      cpus: "1.00"
+      memory: 1G
+      pids: 1024
+
+x-limits-large-stateful: &limits-large-stateful
+  resources:
+    limits:
+      cpus: "2.00"
+      memory: 2G
+      pids: 1024
 
 # ---------------------------------------------------------------------------------------------
 # Stateful (profile core): pinned digests, named volumes, без published ports (dev.override.yml)
@@ -123,6 +146,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    logging: *logging
     stop_grace_period: 60s
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-collector}
@@ -142,7 +166,7 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 6
-    deploy: *limits-large
+    deploy: *limits-large-stateful
 
   mongo:
     # MongoDB 8.0 single-member replica set з keyFile (auth) (§8, Q-010). Keyfile копіюється
@@ -157,6 +181,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    logging: *logging
     tmpfs:
       - /run/mongo-keyfile:mode=0700,uid=999,gid=999,size=1m
     stop_grace_period: 60s
@@ -181,37 +206,51 @@ services:
       - backend
     healthcheck:
       # Стійкий до init-фази entrypoint (gate 2, H-1): під час init тимчасовий mongod слухає
-      # ЛИШЕ 127.0.0.1 і БЕЗ --replSet, тому (а) з'єднуємось на IP контейнера (hostname -i) —
-      # його слухає лише фінальний mongod з --bind_ip_all; (б) `hello` має бути від члена RS
-      # (`isreplicaset` до ініціалізації або `setName` після). Healthy ≠ primary: RS ініціалізує
-      # `ensure-mongo` (depends_on service_healthy), primary перевіряє health api.
+      # ЛИШЕ 127.0.0.1 і БЕЗ --replSet, тому (а) з'єднуємось на IPv4 контейнера — його слухає
+      # лише фінальний mongod з --bind_ip_all; перша IPv4 з `hostname -I` явно (gate 3, CR-1:
+      # на dual-stack `hostname -i` віддає кілька адрес, IPv6 першою → невалідний --host);
+      # (б) `hello` має бути від члена RS (`isreplicaset` до ініціалізації або `setName` після).
+      # Healthy ≠ primary: RS ініціалізує `ensure-mongo` (depends_on service_healthy), primary
+      # перевіряє health api.
       test:
         - CMD-SHELL
         - >-
-          mongosh --quiet --norc --host "$(hostname -i)" --eval
+          ip="$$(hostname -I | tr ' ' '\n' | grep -m1 -E '^[0-9]+(\.[0-9]+){3}$$')"
+          && test -n "$$ip"
+          && mongosh --quiet --norc --host "$$ip" --eval
           'const h = db.hello(); (h.isreplicaset || h.setName) ? quit(0) : quit(1)'
       interval: 10s
       timeout: 10s
       start_period: 40s
       retries: 10
-    deploy: *limits-large
+    deploy: *limits-large-stateful
 
   minio:
     # MinIO (S3-compatible, §8). Vendor image працює від root (volume /data належить root у
     # image; non-root потребує окремого chown-init) — прийняте відхилення для stateful vendor
-    # image; application images — non-root (див. ADR-0002).
+    # image; application images — non-root (див. ADR-0002). Gate 3 (SEC M-1): root без
+    # capabilities (cap_drop ALL — запис у volume /data працює), read-only rootfs + tmpfs.
     image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     profiles: [core]
     restart: unless-stopped
     init: true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *logging
     stop_grace_period: 30s
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       MINIO_BROWSER: "off"
+      # read-only rootfs: конфіг mc/minio лише у tmpfs.
+      MC_CONFIG_DIR: /tmp/.mc
+      MINIO_CONFIG_DIR: /tmp/.minio
     secrets:
       - minio_root_user
       - minio_root_password
@@ -225,7 +264,7 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 6
-    deploy: *limits-medium
+    deploy: *limits-medium-stateful
 
   # -------------------------------------------------------------------------------------------
   # One-shots (profile core): завершуються 0 → api/workers стартують (readiness §7.5)
@@ -283,6 +322,10 @@ services:
       COLLECTOR_API_PORT: "8000"
     expose:
       - "8000"
+    # §7.5 «API — лише OIDC egress»: `ingress` не internal (публічний порт gui у PR3), тому api
+    # поки має default route назовні. Прийнято (gate 3 CR-14/SEC L-2, owner WP-00 PR3 / WP-11A):
+    # PR3 переводить gui↔api в окрему internal-мережу, `ingress` лишається лише gui; egress
+    # api до OIDC — окрема мережа/allowlist разом з OIDC у WP-11A.
     networks:
       - backend
       - ingress
@@ -359,6 +402,13 @@ services:
     networks:
       - backend
       - source-egress
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "collector.api.health", "postgres", "minio"]
       interval: 30s
@@ -373,6 +423,13 @@ services:
     # Без network egress (§7.6): лише внутрішня мережа backend.
     <<: *worker
     command: ["collector", "worker", "parse"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "collector.api.health", "postgres", "minio"]
       interval: 30s
@@ -388,6 +445,8 @@ services:
     command: ["collector", "worker", "projector"]
     depends_on:
       postgres:
+        condition: service_healthy
+      mongo:
         condition: service_healthy
       migrate-postgres:
         condition: service_completed_successfully
@@ -418,6 +477,10 @@ services:
     command: ["collector", "worker", "export"]
     depends_on:
       postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      minio:
         condition: service_healthy
       migrate-postgres:
         condition: service_completed_successfully

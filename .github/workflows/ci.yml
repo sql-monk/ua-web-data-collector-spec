@@ -50,8 +50,10 @@ jobs:
       - name: mypy src
         run: uv run mypy src
 
+      # Включно з tests/integration/test_compose_render.py — `docker compose config` через docker
+      # CLI runner-а (gate 3, CR-3: render-тести мають реально виконуватись у CI, не skip).
       - name: pytest (без live)
-        run: uv run pytest -m "not live"
+        run: uv run pytest -m "not live" -rs
 
       - name: contracts JSON Schema snapshots без drift (WP-01C)
         run: uv run collector contracts export --check
@@ -174,10 +176,12 @@ jobs:
         run: docker compose up -d --wait --wait-timeout 300
 
       - name: docker compose ps + health
+        # Регресійний assert (gate 3, CR-2): кожен контейнер або running+healthy, або one-shot
+        # exited 0 — явний парсинг JSON (підрядковий grep рахував `unhealthy` як healthy).
         run: |
-          docker compose ps
+          docker compose ps -a
           docker compose exec -T api python -m collector.api.health
-          test "$(docker compose ps --status running --format '{{.Health}}' | grep -vc healthy)" = "0"
+          docker compose ps -a --format json | python3 deploy/compose/check-healthy.py
 
       - name: docker compose down -v
         if: always()

@@ -385,7 +385,10 @@ def test_mongo_healthcheck_is_robust_to_entrypoint_init_phase(
     """Gate 2, H-1: init-mongod слухає лише loopback і без --replSet — healthcheck його омине."""
     healthcheck = services["mongo"]["healthcheck"]
     test = " ".join(map(str, healthcheck["test"]))
-    assert "hostname -i" in test, "з'єднання з IP контейнера, не 127.0.0.1"
+    # Gate 3 CR-1: перша IPv4 з `hostname -I` явно (dual-stack: `hostname -i` віддає й IPv6).
+    assert "hostname -I" in test and "hostname -i" not in test, "явно IPv4, не hostname -i"
+    assert "grep -m1 -E '^[0-9]+(\.[0-9]+){3}$$'" in test, test  # `$$` — escape Compose
+    assert 'test -n "$' in test, "порожня адреса → healthcheck fail, не mongosh без --host"
     assert "127.0.0.1" not in test and "localhost" not in test
     assert "isreplicaset" in test and "setName" in test, "ознака члена RS, не лише ping"
     # Не вимагати primary: до `ensure-mongo` (depends_on service_healthy) член ще не primary.
@@ -408,3 +411,68 @@ def test_ci_trivy_critical_without_ignore_unfixed_and_high_with() -> None:
     assert "ignore-unfixed" not in by_severity["CRITICAL"], "§13: unfixed CRITICAL не пропускати"
     assert str(by_severity["CRITICAL"]["exit-code"]) == "1"
     assert by_severity["HIGH"]["ignore-unfixed"] is True
+
+
+# --- gate 3 (код-рев'ю / security-рев'ю) -----------------------------------------------------
+
+
+def test_every_service_has_pids_limit_and_log_rotation(services: dict[str, dict[str, Any]]) -> None:
+    """SEC L-1/L-5, CR-7: fork-exhaustion і log flood обмежені для всіх, включно зі stateful."""
+    for name, svc in services.items():
+        pids = svc["deploy"]["resources"]["limits"]["pids"]
+        assert pids == (1024 if name in STATEFUL else 256), name
+        logging = svc["logging"]
+        assert logging["driver"] == "json-file" and logging["options"]["max-size"], name
+
+
+def test_minio_is_capability_dropped_and_read_only(services: dict[str, dict[str, Any]]) -> None:
+    """SEC M-1: root лишається (vendor image), але без capabilities і з read-only rootfs."""
+    minio = services["minio"]
+    assert minio["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in minio["security_opt"]
+    assert minio["read_only"] is True
+    assert any(str(t).startswith("/tmp") for t in minio["tmpfs"])  # noqa: S108 — tmpfs mount
+    assert minio["environment"]["MC_CONFIG_DIR"].startswith("/tmp")  # noqa: S108
+    for name in STATEFUL:
+        assert services[name]["cap_drop"] == ["ALL"], name
+
+
+def test_worker_depends_on_covers_its_healthcheck_dependencies(
+    services: dict[str, dict[str, Any]],
+) -> None:
+    """CR-6: усе, що перевіряє healthcheck worker-а, є в depends_on як service_healthy."""
+    for name in SPEC_7_5_PROFILES["workers"]:
+        svc = services[name]
+        checked = {c for c in ("postgres", "mongo", "minio") if c in svc["healthcheck"]["test"]}
+        deps = svc["depends_on"]
+        for component in checked:
+            assert deps[component]["condition"] == "service_healthy", f"{name}: {component}"
+
+
+def test_init_secrets_generates_random_passwords_not_examples() -> None:
+    """SEC L-3: жодних default credentials — паролі генеруються, приклади не копіюються."""
+    script = (SECRETS_DIR / "init-secrets.sh").read_text(encoding="utf-8")
+    assert "openssl rand -hex" in script and "*_password)" in script
+    assert "random_hex > " in script
+    for example in SECRETS_DIR.glob("*_password.example"):
+        assert "GENERATED" in example.read_text(encoding="utf-8"), example.name
+    assert (
+        (SECRETS_DIR / "mongo_keyfile.example")
+        .read_text(encoding="utf-8")
+        .startswith("GENERATE-ME")
+    )
+
+
+def test_ci_health_assert_parses_ps_json_not_grep() -> None:
+    """CR-2: `grep -vc healthy` рахував unhealthy як healthy — тепер явний парсер."""
+    ci_text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "grep -vc healthy" not in ci_text
+    assert "--format json | python3 deploy/compose/check-healthy.py" in ci_text
+    assert (REPO_ROOT / "deploy" / "compose" / "check-healthy.py").is_file()
+
+
+def test_ci_python_job_shows_skips() -> None:
+    """CR-3: render-тести виконуються у job python; skip видимий (-rs)."""
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    runs = [s.get("run", "") for s in ci["jobs"]["python"]["steps"]]
+    assert any('pytest -m "not live" -rs' in r for r in runs)

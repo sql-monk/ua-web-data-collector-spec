@@ -15,12 +15,12 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+import pymongo
 import pytest
 from fastapi.testclient import TestClient
 from pymongo.errors import OperationFailure
 from typer.testing import CliRunner
 
-from collector import cli
 from collector.api import health
 from collector.api.health import (
     HEALTH_PATH,
@@ -56,7 +56,7 @@ def test_probe_exception_detail_is_truncated_and_typed() -> None:
 
     status = _timed("minio", probe, timeout=1.0)
     assert not status.ok
-    assert status.detail.startswith("OSError: ")
+    assert status.detail == "OSError"  # лише клас винятку, текст — у логах (SEC L-4)
     assert len(status.detail) <= 200
 
 
@@ -154,7 +154,7 @@ def test_check_mongo_not_ready_unless_writable_primary(
     monkeypatch.setattr(health, "MongoClient", _Client)
     status = check_mongo({})
     assert not status.ok
-    assert "ensure-mongo" in status.detail
+    assert status.detail == "not_primary"  # без текстів/host:port у відповіді (SEC L-4)
 
 
 def test_check_mongo_uses_env_timeout_and_no_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -228,7 +228,7 @@ def test_ensure_mongo_missing_secret_file_fails_without_leaking(
         def __init__(self, **kwargs: Any) -> None:
             connected.append(True)
 
-    monkeypatch.setattr(cli, "MongoClient", NeverConnect)
+    monkeypatch.setattr(pymongo, "MongoClient", NeverConnect)
     result = runner.invoke(app, ["db", "ensure-mongo"])
     assert result.exit_code != 0
     assert not connected, "без секрету клієнт не створюється"
@@ -301,7 +301,7 @@ def test_db_ensure_mongo_cli_exit_1_when_set_name_mismatch(
     (tmp_path / "pw").write_text("topsecret\n", encoding="utf-8")
     monkeypatch.setenv("COLLECTOR_MONGO_ROOT_PASSWORD_FILE", str(tmp_path / "pw"))
     monkeypatch.setenv("COLLECTOR_MONGO_REPLICA_SET", "rs0")
-    monkeypatch.setattr(cli, "MongoClient", Client)
+    monkeypatch.setattr(pymongo, "MongoClient", Client)
     result = runner.invoke(app, ["db", "ensure-mongo"])
     assert result.exit_code == 1
     assert "legacy" in result.stderr
@@ -312,7 +312,7 @@ def test_db_migrate_never_prints_stub_line_nor_reads_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        cli,
+        health,
         "check_postgres",
         lambda *a, **k: ComponentStatus(name="postgres", ok=True, latency_ms=0.1, detail="tcp"),
     )
