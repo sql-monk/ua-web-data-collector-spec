@@ -20,7 +20,7 @@
 
 ### Вибір CLI framework — Typer (матеріал для ADR-0001)
 
-Обрано **Typer** (`typer>=0.27`, поверх Click), а не «чистий» Click:
+Обрано **Typer** (`typer>=0.27`; з 0.2x має власне ядро і не залежить від `click` — `click` у `uv.lock` відсутній), а не Click:
 
 1. Сигнатури команд — типізовані Python-функції з `Annotated[...]`; `mypy --strict` перевіряє параметри без обгорток, а Enum `WorkerRole` (§7.6) стає валідованим аргументом `collector worker <role>` автоматично (невідома роль → usage error, а не стаб).
 2. Той самий підхід «типи → контракт», що у Pydantic v2/FastAPI (§8): один стиль для CLI, API і контрактів.
@@ -279,7 +279,7 @@ INF no leaks found
 | `uv run mypy src` | зелена |
 | `uv run pytest -m "not live"` | зелена (Windows: 30 passed, 1 skipped; Linux: 31 passed) |
 | `uv run collector --help` | зелена, усі команди §16.2 |
-| `uv run pre-commit run --all-files` | **червона лише hook `markdownlint-cli2`** на `docs/plan/cards/WP-00.md` (MD024, 5 знахідок) — файл поза owned files; решта 10 hooks зелені; dependency-запит нижче |
+| `uv run pre-commit run --all-files` | зелена після rebase на `main` (`b3dafd8`, MD024 siblings_only); у первинному прогоні була червоною лише через hook `markdownlint-cli2` на `docs/plan/cards/WP-00.md` (див. Dependency-запити, resolved) |
 
 ## Що не перевірено
 
@@ -305,3 +305,134 @@ PR не має runtime-ефекту (каркас, стаби з кодом 2, C
 
 - `docs/plan/deps/WP-00-to-repo-config.md` — власнику repo-level конфігів: додати `"MD024": { "siblings_only": true }` у `.markdownlint-cli2.jsonc` (файл поза owned files WP-00). Після цього `uv run pre-commit run --all-files` очікувано повністю зелений.
 - Для docs-writer (етап 5, поза scope цього PR): ADR-0001 «Стек та інструменти foundation» — матеріал у розділі «Вибір CLI framework — Typer»; README «Швидкий старт розробника»: `uv sync --frozen`, `uv run pre-commit install`, команди §16.2.
+
+## Виправлення після gate 2 (тестування, звіт `testing-pr1.md`, вердикт fail)
+
+Commit `52c4166 fix(wp-00): selector event loop under network block, literal exit code, adapters owners, gitleaks history hook`. Branch перебазовано на `main` (`b3dafd8`); тести тестувальника (`fcb5601`) не змінювались.
+
+| # | Severity | Виправлення |
+|---|---|---|
+| 1 | high | `tests/conftest.py`: hook `pytest_asyncio_loop_factories` повертає єдиний factory `asyncio.SelectorEventLoop` для всіх async-тестів (pytest-asyncio 1.4: override fixture `event_loop_policy` deprecated, hook — рекомендований шлях; один factory → id тестів не змінюються, `HIDDEN_PARAM`). На Windows selector loop іде через `sock_connect` → `socket.connect`, тож `asyncio.open_connection` і `httpx.AsyncClient` кидають `SocketConnectBlockedError`; loopback працює. На POSIX `SelectorEventLoop` = default loop, поведінка без змін (повне `disable_socket`). Docstring conftest: знято хибне твердження «інваріант діє на всіх платформах» для async, задокументовано межі allow-hosts (знахідка 3: `connect_ex`, UDP, `getaddrinfo`, subprocess) і ціну selector loop на Windows (без asyncio subprocess). |
+| 2 | medium | `tests/unit/test_cli.py::test_stub_returns_exit_code_2_and_owner`: `assert result.exit_code == 2` (літерал контракту), імпорт константи прибрано. |
+| 3 | low | `src/collector/adapters/__init__.py`: «news (SDK WP-05, WP-06A–G), vehicles (WP-08A–D), catalogs (WP-10A–H)». |
+| 5 | low | `.pre-commit-config.yaml`: другий hook `gitleaks` з alias `gitleaks-history` (`entry: gitleaks git --redact --no-banner --verbose`, `always_run`) — при `run --all-files` сканує всю доступну git-історію (13 commits, no leaks); staged-hook лишається для commit-time. CI job `secrets` (`fetch-depth: 0`) незмінний. |
+| 6 | info | `docs/plan/deps/WP-00-to-repo-config.md`: стан `resolved` (застосовано на `main`). |
+| 7 | info | Формулювання «Typer поверх Click» виправлено вище (typer 0.27 не залежить від click). |
+| — | — | `types-pyyaml` додано в dev-group (`uv.lock` перегенеровано), щоб `uv run mypy tests` був зелений для `test_foundation_config.py` (імпорт `yaml`); `mypy src` — без змін. |
+
+Знахідки 8–11 (info: код 2 у usage-помилках Typer, `PYTHONUTF8` для консолі, перенос у help, major-теги Actions) — без змін коду; 9 і 11 передаються docs-writer/WP-13.
+
+### Команди та вивід після виправлень
+
+Чистий стан (`git clean -xfd` → `uv sync --frozen`), Windows 11, `PYTHONUTF8=1`, commit `52c4166`:
+
+```text
+$ git clean -xfd
+(видалено .venv, .*_cache, __pycache__ — 26 рядків пропущено)
+[exit 0]
+
+$ uv sync --frozen
+Using CPython 3.13.9
+Creating virtual environment at: .venv
+Installed 45 packages in 875ms
+(перелік пакетів пропущено; див. uv.lock)
+[exit 0]
+
+$ uv run ruff check .
+All checks passed!
+[exit 0]
+
+$ uv run ruff format --check .
+54 files already formatted
+[exit 0]
+
+$ uv run mypy src
+Success: no issues found in 24 source files
+[exit 0]
+
+$ uv run mypy tests
+Success: no issues found in 7 source files
+[exit 0]
+
+$ uv run pytest -m not live
+============================= test session starts =============================
+platform win32 -- Python 3.13.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\repos\webscraper\.worktrees\wp-00-1
+configfile: pyproject.toml
+testpaths: tests
+plugins: anyio-4.15.1, asyncio-1.4.0, socket-0.8.1, respx-0.23.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collected 107 items
+
+tests\unit\test_cli.py .........................                         [ 23%]
+tests\unit\test_cli_adversarial.py ..................................... [ 57%]
+......                                                                   [ 63%]
+tests\unit\test_foundation_config.py ...........................         [ 88%]
+tests\unit\test_logging.py ..                                            [ 90%]
+tests\unit\test_network_block_adversarial.py ......                      [ 96%]
+tests\unit\test_network_blocked.py .s..                                  [100%]
+
+============================== warnings summary ===============================
+tests/unit/test_network_block_adversarial.py::test_asyncio_open_connection_to_non_loopback_is_blocked
+tests/unit/test_network_block_adversarial.py::test_httpx_async_client_to_non_loopback_is_blocked
+tests/unit/test_network_block_adversarial.py::test_httpx_sync_client_to_non_loopback_is_blocked
+tests/unit/test_network_block_adversarial.py::test_urllib_to_non_loopback_is_blocked
+tests/unit/test_network_block_adversarial.py::test_raw_socket_connect_to_non_loopback_is_blocked
+  C:\repos\webscraper\.worktrees\wp-00-1\.venv\Lib\site-packages\pytest_socket\__init__.py:365: UserWarning: A test tried to use socket.socket.connect() with host "192.0.2.1" (allowed: "127.0.0.1,::1").
+    raise SocketConnectBlockedError(allowed_list, host)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+SKIPPED [1] tests\unit\test_network_blocked.py:27: Windows: loopback потрібен asyncio
+================= 106 passed, 1 skipped, 5 warnings in 1.65s ==================
+[exit 0]
+
+$ uv run collector --help
+Usage: collector [OPTIONS] COMMAND [ARGS]...
+
+  UA Web Data Collector — CLI для workers, API, міграцій, e2e і releases
+  (§16.2).
+
+Options:
+  --help  Show this message and exit.
+
+Commands:
+  version     Друкує версію пакета, Git SHA (env COLLECTOR_GIT_SHA) і...
+  e2e         Наскрізний прогін збору для одного джерела (стаб; owner...
+  worker      Запускає worker відповідної ролі (стаб; owner WP-01D).
+  api         Запускає operator/read API (стаб; owner WP-11A).
+  scheduler   Запускає singleton scheduler з advisory lease (стаб; owner...
+  controller  Запускає desired-state controller worker pools (стаб; owner...
+  db          Схеми сховищ: PostgreSQL migrations (WP-01A), Mongo...
+  release     Immutable dataset releases (§9.9); owner — WP-11A.
+[exit 0]
+
+$ uv run pre-commit run --all-files
+fix end of files.........................................................Passed
+trim trailing whitespace.................................................Passed
+check yaml...............................................................Passed
+check toml...............................................................Passed
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+detect private key.......................................................Passed
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+Detect hardcoded secrets.................................................Passed
+Detect hardcoded secrets (git history)...................................Passed
+markdownlint-cli2........................................................Passed
+[exit 0]
+
+$ uv run python -c import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('ci.yml: valid YAML')
+ci.yml: valid YAML
+[exit 0]
+```
+
+Linux-паритет (контейнер `ghcr.io/astral-sh/uv:python3.13-bookworm-slim` + `git`, копія worktree як свіжий git-репозиторій, бо `test_env_files_are_gitignored_but_example_is_not` потребує `git check-ignore`/`git ls-files`):
+
+```text
+$ uv sync --frozen --no-editable && uv run --no-sync pytest -m 'not live' -q -p no:cacheprovider
+ + virtualenv==21.9.1
+107 passed, 5 warnings in 1.81s
+```
+
+Підсумок: Windows — **106 passed, 1 skipped, 0 failed** (skip — POSIX-only тест створення socket); Linux — **107 passed, 0 failed**, зокрема `test_network_block_adversarial.py::test_asyncio_open_connection_to_non_loopback_is_blocked` і `::test_httpx_async_client_to_non_loopback_is_blocked` зелені на обох платформах. Усі 7 команд картки зелені; `uv run mypy tests` також зелений.
