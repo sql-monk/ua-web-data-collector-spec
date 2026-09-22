@@ -43,7 +43,7 @@ def _compose_config(*files: str) -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def rendered() -> dict[str, Any]:
     missing = [
-        p.name
+        p.name.removesuffix(".example")
         for p in SECRETS_DIR.glob("*.example")
         if not (SECRETS_DIR / p.name.removesuffix(".example")).exists()
     ]
