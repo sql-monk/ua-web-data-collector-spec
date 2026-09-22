@@ -17,10 +17,14 @@
   `--validators`/`--indexes` лишаються стабом WP-01B (після ініціалізації RS → код 2);
 - `api` — запускає uvicorn зі стабом `GET /api/v1/health/components`
   (`collector.api.health`; owner WP-11A);
-- `scheduler` і `worker <role>` — placeholder-процеси: тримають контейнер живим, логують,
-  що lease/queue-логіка не реалізована (owner WP-01D), коректно зупиняються по SIGTERM
-  (код 0). У stderr при старті друкується той самий рядок `not implemented: owned by
-  WP-01D`, щоб скрипти могли відрізнити placeholder від реалізації;
+- `worker <role>` — реальна (WP-01D PR1): реєстрація instance, claim із черги §7.2,
+  lease heartbeat, hot-change `desired_concurrency` з `worker_pools`, drain по SIGTERM
+  (exit 0); доменний `handle(task)` додають WP-02/03/04/01B, до того працює `NoopHandler`;
+- `scheduler` — реальна (WP-01D PR1): singleton через PostgreSQL advisory lease
+  (другий процес чекає), maintenance tick `recover_expired_leases` + `mark_stale_instances`;
+- обидві команди повертаються до placeholder-процесу WP-00 (`not implemented: owned by
+  WP-01D` у stderr + живий процес) за `COLLECTOR_WORKER_PLACEHOLDER=1` — це rollback-прапорець
+  картки WP-01D, а не режим за замовчуванням;
 - решта (`e2e` — WP-14, `release build|verify` — WP-11A, `controller` — WP-01D) — стаби.
 """
 
@@ -38,6 +42,7 @@ import typer
 from collector.core.config import env_or_file, mongo_address
 from collector.core.logging import configure_logging, get_logger
 from collector.core.version import version_info
+from collector.workers.config import placeholder_requested
 from collector.workers.roles import WorkerRole
 
 if TYPE_CHECKING:
@@ -46,6 +51,7 @@ if TYPE_CHECKING:
     from pymongo import MongoClient
 
     from collector.persistence.postgres.config import PostgresSettings
+    from collector.workers.config import SchedulerRuntimeConfig, WorkerRuntimeConfig
 
 # pymongo/fastapi/uvicorn/asyncio/sqlalchemy імпортуються лише в тілах команд, які їх потребують
 # (gate 3, CR-12): `collector version`/`--help` — це image HEALTHCHECK і CI-контракт, вони мають
@@ -351,6 +357,62 @@ def _postgres_settings() -> PostgresSettings:
         raise typer.Exit(code=1) from exc
 
 
+def _worker_config(role: WorkerRole) -> WorkerRuntimeConfig:
+    from collector.workers.config import WorkerConfigError, WorkerRuntimeConfig
+
+    try:
+        return WorkerRuntimeConfig.from_env(role)
+    except WorkerConfigError as exc:
+        typer.echo(f"worker config: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _scheduler_config() -> SchedulerRuntimeConfig:
+    from collector.workers.config import SchedulerRuntimeConfig, WorkerConfigError
+
+    try:
+        return SchedulerRuntimeConfig.from_env()
+    except WorkerConfigError as exc:
+        typer.echo(f"scheduler config: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+async def _run_worker(settings: PostgresSettings, config: WorkerRuntimeConfig) -> None:
+    """Engine на процес + `WorkerRuntime.run()`; повертається після drain (exit code 0).
+
+    Розмір pool рахується від default concurrency ролі (§7.6) з запасом на heartbeat/claim/
+    report: кожна паралельна операція бере власну session. Гарячого підвищення concurrency
+    понад цю межу чекає `max_overflow`, а не відмова claim.
+    """
+    from collector.persistence.postgres.engine import create_engine, create_session_factory
+    from collector.workers.roles import default_pool_spec
+    from collector.workers.runtime import WorkerRuntime
+
+    slots = default_pool_spec(config.role).desired_concurrency
+    engine = create_engine(
+        settings,
+        pool_size=slots + 2,
+        max_overflow=slots + 4,
+        application_name=f"collector-worker-{config.role.value}",
+    )
+    try:
+        await WorkerRuntime(config, create_session_factory(engine)).run()
+    finally:
+        await engine.dispose()
+
+
+async def _run_scheduler(settings: PostgresSettings, config: SchedulerRuntimeConfig) -> None:
+    """Engine + `SchedulerRuntime.run()`; advisory lease тримає окреме з'єднання поза pool-ом."""
+    from collector.persistence.postgres.engine import create_engine, create_session_factory
+    from collector.workers.scheduler import SchedulerRuntime
+
+    engine = create_engine(settings, pool_size=2, max_overflow=2, application_name="collector-sch")
+    try:
+        await SchedulerRuntime(config, engine, create_session_factory(engine)).run()
+    finally:
+        await engine.dispose()
+
+
 def _is_postgres_error(exc: BaseException) -> bool:
     """Помилка з'єднання/запиту PostgreSQL.
 
@@ -446,8 +508,20 @@ def contracts_export(
 def worker(
     role: Annotated[WorkerRole, typer.Argument(help="Роль worker pool за §7.6.")],
 ) -> None:
-    """Запускає worker відповідної ролі (placeholder-процес; owner WP-01D)."""
-    placeholder_process(f"worker.{role.value}", "WP-01D")
+    """Запускає stateless worker ролі: claim із черги, lease heartbeat, graceful drain (§7.6).
+
+    Env: `COLLECTOR_POSTGRES_DSN[_FILE]`, `COLLECTOR_WORKER_*` (див.
+    `collector.workers.config`). `desired_concurrency` береться з `worker_pools` і
+    змінюється без рестарту. SIGTERM → drain у межах `COLLECTOR_WORKER_STOP_GRACE_SECONDS`
+    і exit 0. `COLLECTOR_WORKER_PLACEHOLDER=1` повертає placeholder-процес WP-00 (rollback).
+    """
+    if placeholder_requested():
+        placeholder_process(f"worker.{role.value}", "WP-01D")
+        return
+    configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
+    settings = _postgres_settings()
+    config = _worker_config(role)
+    _run_async(_run_worker(settings, config))
 
 
 @app.command()
@@ -477,8 +551,20 @@ def api() -> None:
 
 @app.command()
 def scheduler() -> None:
-    """Запускає singleton scheduler (placeholder-процес; advisory lease — owner WP-01D)."""
-    placeholder_process("scheduler", "WP-01D")
+    """Запускає singleton scheduler: PostgreSQL advisory lease + maintenance tick (§7.5).
+
+    Другий процес не стає активним, а чекає на звільнення lease; при втраті lease активний
+    процес припиняє планування. Env: `COLLECTOR_POSTGRES_DSN[_FILE]`,
+    `COLLECTOR_SCHEDULER_*`; SIGTERM → exit 0; `COLLECTOR_WORKER_PLACEHOLDER=1` — rollback
+    до placeholder-процесу WP-00.
+    """
+    if placeholder_requested():
+        placeholder_process("scheduler", "WP-01D")
+        return
+    configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
+    settings = _postgres_settings()
+    config = _scheduler_config()
+    _run_async(_run_scheduler(settings, config))
 
 
 @app.command()

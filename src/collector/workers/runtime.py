@@ -1,0 +1,565 @@
+"""`WorkerRuntime` — stateless runtime-каркас worker pool (§7.6, FR-031, FR-032, R-52).
+
+Життєвий цикл процесу:
+
+```text
+boot → register(starting) → readiness → ready ⇄ claim/handle/heartbeat
+                                          │
+                       SIGTERM / drain barrier ▼
+                                       draining → (активні tasks дотягуються
+                                       у межах stop_grace_period) → stopped → exit 0
+```
+
+Інваріанти:
+
+- **жодного стану на локальному диску** (§15): `worker_instance_id` — UUIDv7, згенерований на
+  boot; усе, що переживає рестарт, лежить у PostgreSQL. Docker hostname пишеться лише як
+  metadata `worker_instances.hostname` і ні на що не впливає;
+- **lease належить instance**: claim/heartbeat/complete/retry ідуть із `lease_owner =
+  str(instance_id)`; heartbeat чужої job-и відхиляє сам репозиторій
+  (`LeaseNotOwnedError`), і runtime негайно скасовує локальний task — після
+  `recover_expired_leases` job уже може виконувати інший instance;
+- **desired concurrency живе в БД**: кожен heartbeat перечитує `worker_pools`, тому зміна
+  concurrency застосовується без рестарту — нові слоти відкриваються одразу, зайві просто
+  більше не claim-ляться після завершення активних tasks (§7.6);
+- **drain не покладається на вибір контейнера orchestrator-ом** (R-57): крім SIGTERM, claim
+  зупиняє і `drain_requested_at` у власному рядку `worker_instances`, який ставить
+  role-wide барʼєр контролера (PR3);
+- **SIGKILL — fault case**: при скасуванні (`asyncio.CancelledError`) runtime не повертає
+  leases і не пише `stopped` — саме так поводиться вбитий контейнер; lease підбирає
+  `recover_expired_leases` іншого instance після експірації.
+
+Транзакційні межі: claim — окрема транзакція (row locks звільняються одразу після commit);
+звіт про кожну task — окрема транзакція; heartbeat instance + продовження leases активних
+tasks — одна транзакція на тік.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from time import monotonic
+from typing import TYPE_CHECKING, Final
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+
+from collector.contracts import new_entity_id
+from collector.core.logging import get_logger
+from collector.persistence.postgres.clock import utcnow
+from collector.persistence.postgres.errors import (
+    ConflictError,
+    InvalidTransitionError,
+    LeaseNotOwnedError,
+    PersistenceError,
+)
+from collector.persistence.postgres.repositories import pools as pools_repo
+from collector.persistence.postgres.repositories import queue as queue_repo
+from collector.workers.config import WorkerRuntimeConfig
+from collector.workers.handlers import (
+    Task,
+    TaskHandler,
+    TaskResult,
+    resolve_handler,
+    result_for_exception,
+)
+from collector.workers.roles import WorkerRole, default_pool_spec
+from collector.workers.signals import StopSignalHandlers, install_stop_signal_handlers
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from collector.persistence.postgres.models import CrawlJob
+
+IMMEDIATE_RETRY_POLICY: Final = queue_repo.BackoffPolicy(
+    base=timedelta(0), multiplier=1.0, maximum=timedelta(0), jitter_ratio=0.0
+)
+"""Повернення lease без backoff: job має стати claimable одразу, бо її ніхто не «зіпсував» —
+процес просто не встиг доробити її у межах `stop_grace_period`."""
+
+DRAIN_TIMEOUT_ERROR_CODE = "drain_timeout"
+BOOTSTRAP_REASON = "bootstrap default pool (§7.6)"
+
+
+def _task_from_job(job: CrawlJob) -> Task:
+    return Task(
+        job_id=job.job_id,
+        job_type=job.job_type,
+        args=dict(job.args),
+        attempt=job.attempt,
+        max_attempts=job.max_attempts,
+        priority=job.priority,
+        not_before=job.not_before,
+        run_id=job.run_id,
+        source_id=job.source_id,
+    )
+
+
+@dataclass(slots=True)
+class _ActiveTask:
+    task: Task
+    handle: asyncio.Task[None]
+
+
+@dataclass(frozen=True, slots=True)
+class PoolSnapshot:
+    """Прочитаний desired state pool: те, що runtime підтверджує у heartbeat."""
+
+    desired_concurrency: int
+    revision: int
+
+
+class WorkerRuntime:
+    """Один worker-процес ролі: claim-loop, lease heartbeat, drain, реєстрація instance."""
+
+    def __init__(
+        self,
+        config: WorkerRuntimeConfig,
+        sessions: async_sessionmaker[AsyncSession],
+        handler: TaskHandler | None = None,
+        *,
+        clock: Callable[[], datetime] = utcnow,
+    ) -> None:
+        self.config = config
+        self.instance_id = new_entity_id()
+        self.handler = handler if handler is not None else resolve_handler(config.role)
+        self._sessions = sessions
+        self._clock = clock
+        self._log = get_logger(f"collector.worker.{config.role.value}").bind(
+            instance_id=str(self.instance_id), role=config.role.value
+        )
+        self._active: dict[UUID, _ActiveTask] = {}
+        self._pool = PoolSnapshot(
+            desired_concurrency=default_pool_spec(config.role).desired_concurrency, revision=0
+        )
+        self._status = "starting"
+        self._drain_barrier = False
+        self._stop = asyncio.Event()
+        self._wakeup = asyncio.Event()
+        self.heartbeats = 0
+        self.lost_leases = 0
+
+    # --- стан для тестів і логів -------------------------------------------------------------
+
+    @property
+    def owner(self) -> str:
+        """`crawl_jobs.lease_owner` цього instance."""
+        return str(self.instance_id)
+
+    @property
+    def status(self) -> str:
+        """Локальний стан (`starting | ready | draining | stopped`), дзеркало `worker_instances`."""
+        return self._status
+
+    @property
+    def desired_concurrency(self) -> int:
+        """Останнє прочитане з `worker_pools` значення (джерело істини — БД)."""
+        return self._pool.desired_concurrency
+
+    @property
+    def pool_revision(self) -> int:
+        return self._pool.revision
+
+    @property
+    def active_tasks(self) -> int:
+        return len(self._active)
+
+    @property
+    def claiming(self) -> bool:
+        """Чи бере runtime нові jobs (drain барʼєр або зупинка знімають claim)."""
+        return not self._stop.is_set() and not self._drain_barrier and self._status == "ready"
+
+    def request_stop(self) -> None:
+        """Попросити graceful drain (те саме, що SIGTERM); безпечно з будь-якого місця loop-у."""
+        self._stop.set()
+        self._wakeup.set()
+
+    # --- головний цикл -----------------------------------------------------------------------
+
+    async def run(self, *, stop: asyncio.Event | None = None, install_signals: bool = True) -> None:
+        """Повний життєвий цикл процесу; повертає керування після drain (exit code 0).
+
+        `stop` — зовнішня подія зупинки (тести, вбудований запуск); якщо не задано, зупинку
+        дає SIGTERM/SIGINT. `install_signals=False` не чіпає глобальні handlers процесу — це
+        режим вбудованого запуску (кілька runtime в одному процесі, pytest). Скасування самої
+        корутини = SIGKILL-сценарій: leases лишаються простроченими для
+        `recover_expired_leases`.
+        """
+        if stop is not None:
+            self._stop = stop
+        signals = (
+            install_stop_signal_handlers(self._on_signal)
+            if install_signals
+            else StopSignalHandlers()
+        )
+        heartbeat: asyncio.Task[None] | None = None
+        try:
+            await self._boot()
+            heartbeat = asyncio.create_task(
+                self._heartbeat_loop(), name=f"worker-heartbeat-{self.instance_id}"
+            )
+            await self._claim_loop()
+            await self._drain()
+        except asyncio.CancelledError:
+            self._log.warning("worker.cancelled", active_tasks=len(self._active))
+            raise
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
+            signals.restore()
+
+    def _on_signal(self, signum: object) -> None:
+        self._log.info("worker.stop_requested", signal=str(signum))
+        self.request_stop()
+
+    async def _boot(self) -> None:
+        self._pool = await self._ensure_pool()
+        async with self._sessions() as session, session.begin():
+            await pools_repo.register_instance(
+                session,
+                self.instance_id,
+                self.config.role,
+                version=self.config.version,
+                slots_total=self._pool.desired_concurrency,
+                deployment=self.config.deployment,
+                container_id=self.config.container_id,
+                hostname=self.config.hostname,
+                pool_revision=self._pool.revision,
+                now=self._now(),
+            )
+        self._log.info(
+            "worker.registered",
+            status="starting",
+            desired_concurrency=self._pool.desired_concurrency,
+            pool_revision=self._pool.revision,
+            job_types=list(self.handler.job_types),
+        )
+        await self._check_ready()
+        await self._set_status("ready")
+
+    async def _ensure_pool(self) -> PoolSnapshot:
+        """Прочитати desired state ролі; на чистій БД створити pool із defaults §7.6."""
+        async with self._sessions() as session, session.begin():
+            pool = await pools_repo.get_pool(session, self.config.role)
+            if pool is not None:
+                return PoolSnapshot(pool.desired_concurrency, pool.revision)
+        spec = default_pool_spec(self.config.role)
+        state = pools_repo.PoolDesiredState(
+            desired_replicas=spec.desired_replicas,
+            desired_concurrency=spec.desired_concurrency,
+            min_replicas=spec.min_replicas,
+            max_replicas=spec.max_replicas,
+            resource_profile=spec.resource_profile,
+        )
+        try:
+            async with self._sessions() as session, session.begin():
+                created = await pools_repo.upsert_pool(
+                    session,
+                    self.config.role,
+                    state,
+                    actor=f"worker:{self.instance_id}",
+                    reason=BOOTSTRAP_REASON,
+                    expected_revision=None,
+                    now=self._now(),
+                )
+                return PoolSnapshot(created.desired_concurrency, created.revision)
+        except (ConflictError, IntegrityError):
+            # Інша репліка ролі створила pool одночасно — desired state уже є, читаємо його.
+            async with self._sessions() as session, session.begin():
+                pool = await pools_repo.get_pool(session, self.config.role)
+            if pool is None:  # pragma: no cover — можливо лише при видаленні pool під час boot
+                msg = f"worker pool {self.config.role.value!r} зник під час реєстрації"
+                raise ConflictError(msg) from None
+            return PoolSnapshot(pool.desired_concurrency, pool.revision)
+
+    async def _check_ready(self) -> None:
+        """Readiness §7.5: БД відповідає і доменні залежності ролі готові."""
+        async with self._sessions() as session:
+            await session.execute(text("SELECT 1"))
+        await self.handler.check_ready()
+
+    async def _claim_loop(self) -> None:
+        while not self._stop.is_set():
+            if not self.claiming:
+                await self._idle(self.config.poll_seconds)
+                continue
+            free = self._pool.desired_concurrency - len(self._active)
+            claimed = 0
+            if free > 0:
+                claimed = await self._claim(min(free, self.config.claim_batch))
+            if claimed == 0:
+                await self._idle(self.config.poll_seconds)
+            else:
+                await asyncio.sleep(0)
+
+    async def _claim(self, limit: int) -> int:
+        try:
+            async with self._sessions() as session, session.begin():
+                jobs = await queue_repo.claim(
+                    session,
+                    self.handler.job_types,
+                    self.owner,
+                    self.config.lease_seconds,
+                    limit=limit,
+                    now=self._now(),
+                )
+                tasks = [_task_from_job(job) for job in jobs]
+        except (SQLAlchemyError, OSError, PersistenceError) as exc:
+            self._log.warning("worker.claim_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+            return 0
+        for task in tasks:
+            self._start(task)
+        if tasks:
+            self._log.info("worker.claimed", count=len(tasks), active_tasks=len(self._active))
+        return len(tasks)
+
+    def _start(self, task: Task) -> None:
+        handle = asyncio.create_task(self._execute(task), name=f"worker-task-{task.job_id}")
+        self._active[task.job_id] = _ActiveTask(task=task, handle=handle)
+
+    async def _execute(self, task: Task) -> None:
+        cancelled = False
+        try:
+            try:
+                result = await self.handler.handle(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            except Exception as exc:  # noqa: BLE001 — будь-яка помилка handler-а стає TaskResult
+                self._log.warning(
+                    "worker.task_failed",
+                    job_id=str(task.job_id),
+                    error=f"{type(exc).__name__}: {exc}"[:300],
+                )
+                result = result_for_exception(exc)
+            await self._report(task, result)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if not cancelled:
+                # Скасована task лишається в `_active`, щоб drain повернув її lease.
+                self._active.pop(task.job_id, None)
+            self._wakeup.set()
+
+    async def _report(self, task: Task, result: TaskResult) -> None:
+        now = self._now()
+        try:
+            async with self._sessions() as session, session.begin():
+                if result.disposition == "complete":
+                    await queue_repo.complete(session, task.job_id, self.owner, now=now)
+                elif result.disposition == "retry":
+                    await queue_repo.retry(
+                        session,
+                        task.job_id,
+                        self.owner,
+                        error_code=result.error_code or "unknown",
+                        error_message=result.error_message,
+                        now=now,
+                    )
+                else:
+                    await queue_repo.quarantine(
+                        session,
+                        task.job_id,
+                        self.owner,
+                        error_code=result.error_code or "unknown",
+                        error_message=result.error_message,
+                        now=now,
+                    )
+        except LeaseNotOwnedError:
+            # Lease забрав `recover_expired_leases` (або оператор) — результат уже не наш.
+            self.lost_leases += 1
+            self._log.warning("worker.lease_lost", job_id=str(task.job_id), phase="report")
+        except (SQLAlchemyError, OSError) as exc:
+            self._log.error(
+                "worker.report_failed",
+                job_id=str(task.job_id),
+                error=f"{type(exc).__name__}: {exc}"[:300],
+            )
+        else:
+            self._log.info(
+                "worker.task_done", job_id=str(task.job_id), disposition=result.disposition
+            )
+
+    # --- heartbeat ---------------------------------------------------------------------------
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.config.heartbeat_seconds)
+            await self._heartbeat()
+
+    async def _heartbeat(self) -> None:
+        """Один тік: instance heartbeat + продовження lease активних tasks + читання pool."""
+        now = self._now()
+        lost: list[UUID] = []
+        active = list(self._active)
+        snapshot = self._pool
+        drain_requested = self._drain_barrier
+        try:
+            async with self._sessions() as session, session.begin():
+                pool = await pools_repo.get_pool(session, self.config.role)
+                snapshot = (
+                    PoolSnapshot(pool.desired_concurrency, pool.revision)
+                    if pool is not None
+                    else self._pool
+                )
+                instance = await pools_repo.heartbeat_instance(
+                    session,
+                    self.instance_id,
+                    slots_total=snapshot.desired_concurrency,
+                    slots_active=len(active),
+                    active_leases=len(active),
+                    pool_revision=snapshot.revision,
+                    now=now,
+                )
+                drain_requested = instance.drain_requested_at is not None
+                for job_id in active:
+                    try:
+                        await queue_repo.heartbeat(
+                            session, job_id, self.owner, self.config.lease_seconds, now=now
+                        )
+                    except LeaseNotOwnedError:
+                        lost.append(job_id)
+        except InvalidTransitionError:
+            # Instance уже позначений `stopped` (оператор/контролер) — процес має завершитись.
+            self._log.warning("worker.heartbeat_rejected", reason="instance stopped")
+            self.request_stop()
+            return
+        except (SQLAlchemyError, OSError, PersistenceError) as exc:
+            self._log.warning("worker.heartbeat_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+            return
+        self.heartbeats += 1
+        self._apply_pool(snapshot)
+        self._apply_drain_barrier(drain_requested)
+        for job_id in lost:
+            self._abandon(job_id)
+
+    def _apply_pool(self, snapshot: PoolSnapshot) -> None:
+        previous = self._pool
+        self._pool = snapshot
+        if snapshot.desired_concurrency != previous.desired_concurrency:
+            self._log.info(
+                "worker.concurrency_changed",
+                previous=previous.desired_concurrency,
+                desired=snapshot.desired_concurrency,
+                pool_revision=snapshot.revision,
+                active_tasks=len(self._active),
+            )
+            # Нові слоти відкриваються одразу; зайві закриються самі, коли активні tasks
+            # завершаться (claim-loop бере не більше `desired - active`).
+            self._wakeup.set()
+
+    def _apply_drain_barrier(self, requested: bool) -> None:
+        if requested == self._drain_barrier:
+            return
+        self._drain_barrier = requested
+        self._log.info("worker.drain_barrier", active=requested)
+        self._wakeup.set()
+
+    def _abandon(self, job_id: UUID) -> None:
+        """Lease job-и більше не наш: скасувати локальний task, не чіпаючи рядок у черзі."""
+        entry = self._active.pop(job_id, None)
+        if entry is None:
+            return
+        self.lost_leases += 1
+        self._log.warning("worker.lease_lost", job_id=str(job_id), phase="heartbeat")
+        entry.handle.cancel()
+
+    # --- drain -------------------------------------------------------------------------------
+
+    async def _drain(self) -> None:
+        """SIGTERM-шлях: `draining`, дотягнути активні tasks, повернути залишки lease, `stopped`."""
+        await self._set_status("draining")
+        deadline = monotonic() + self.config.stop_grace_seconds
+        handles = [entry.handle for entry in self._active.values()]
+        if handles:
+            timeout = max(deadline - monotonic(), 0.0)
+            _, pending = await asyncio.wait(handles, timeout=timeout)
+            if pending:
+                self._log.warning("worker.drain_timeout", pending=len(pending))
+                for handle in pending:
+                    handle.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                await self._release_leases()
+        await self._set_status("stopped")
+        self._log.info("worker.stopped", heartbeats=self.heartbeats, lost_leases=self.lost_leases)
+
+    async def _release_leases(self) -> None:
+        """Повернути lease незавершених tasks у чергу (claimable одразу, без backoff)."""
+        now = self._now()
+        for job_id, entry in list(self._active.items()):
+            try:
+                async with self._sessions() as session, session.begin():
+                    await queue_repo.retry(
+                        session,
+                        job_id,
+                        self.owner,
+                        error_code=DRAIN_TIMEOUT_ERROR_CODE,
+                        error_message=(
+                            f"lease returned on drain of instance {self.instance_id} "
+                            f"(job_type={entry.task.job_type})"
+                        ),
+                        policy=IMMEDIATE_RETRY_POLICY,
+                        now=now,
+                    )
+            except LeaseNotOwnedError:
+                self._log.info("worker.lease_already_released", job_id=str(job_id))
+            except (SQLAlchemyError, OSError) as exc:
+                self._log.error(
+                    "worker.lease_release_failed",
+                    job_id=str(job_id),
+                    error=f"{type(exc).__name__}: {exc}"[:300],
+                )
+            self._active.pop(job_id, None)
+
+    async def _set_status(self, status: str) -> None:
+        try:
+            async with self._sessions() as session, session.begin():
+                await pools_repo.set_instance_status(
+                    session, self.instance_id, status, now=self._now()
+                )
+        except (SQLAlchemyError, OSError, PersistenceError) as exc:
+            self._log.error(
+                "worker.status_update_failed",
+                status=status,
+                error=f"{type(exc).__name__}: {exc}"[:300],
+            )
+            return
+        self._status = status
+        self._log.info("worker.status", status=status)
+
+    # --- утиліти -----------------------------------------------------------------------------
+
+    async def _idle(self, timeout: float) -> None:
+        """Пауза до найближчої події (звільнення слоту, зміна pool, зупинка) або таймауту."""
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self._wakeup.wait(), timeout)
+        self._wakeup.clear()
+
+    def _now(self) -> datetime:
+        return self._clock()
+
+
+def build_runtime(
+    role: WorkerRole,
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    config: WorkerRuntimeConfig | None = None,
+) -> WorkerRuntime:
+    """Runtime ролі з env-конфігурацією і handler-ом із реєстру (`collector worker <role>`)."""
+    return WorkerRuntime(config or WorkerRuntimeConfig.from_env(role), sessions)
+
+
+__all__ = [
+    "DRAIN_TIMEOUT_ERROR_CODE",
+    "IMMEDIATE_RETRY_POLICY",
+    "PoolSnapshot",
+    "WorkerRuntime",
+    "build_runtime",
+]
