@@ -86,6 +86,7 @@ async def ensure_bucket(
             },
         )
         .returning(OriginRateBucket)
+        .execution_options(populate_existing=True)
     )
     return (await session.execute(stmt)).scalar_one()
 

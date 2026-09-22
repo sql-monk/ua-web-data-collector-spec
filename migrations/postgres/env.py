@@ -15,6 +15,7 @@ Autogenerate ігнорує child-партиції (`audit_log_y2026m09`, ...) �
 from __future__ import annotations
 
 import asyncio
+from logging.config import fileConfig
 from typing import Any
 
 from alembic import context
@@ -27,6 +28,11 @@ from collector.persistence.postgres.partitions import is_partition_child_name
 
 config = context.config
 target_metadata = Base.metadata
+
+# Логування з alembic.ini лише для CLI-режиму; програмний виклик (shared connection)
+# не переналаштовує logging застосунку (structlog, collector.core.logging).
+if config.config_file_name is not None and config.attributes.get("connection") is None:
+    fileConfig(config.config_file_name)
 
 
 def include_name(

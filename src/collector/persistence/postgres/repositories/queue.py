@@ -101,7 +101,9 @@ async def enqueue(session: AsyncSession, job: NewJob, *, now: datetime | None = 
     if inserted is not None:
         return inserted
     existing = await session.scalar(
-        select(CrawlJob).where(CrawlJob.idempotency_key == job.idempotency_key)
+        select(CrawlJob)
+        .where(CrawlJob.idempotency_key == job.idempotency_key)
+        .execution_options(populate_existing=True)
     )
     if existing is None:  # pragma: no cover - неможливо без DELETE між statement-ами
         msg = f"job з idempotency_key={job.idempotency_key!r} зник між INSERT і SELECT"
@@ -151,7 +153,10 @@ async def claim(
         )
         .returning(CrawlJob)
     )
-    return list((await session.execute(stmt)).scalars().all())
+    claimed = list((await session.execute(stmt)).scalars().all())
+    # RETURNING не гарантує порядок підзапиту — впорядкувати як у claim-запиті.
+    claimed.sort(key=lambda job: (-job.priority, job.not_before, job.job_id))
+    return claimed
 
 
 async def heartbeat(

@@ -193,11 +193,13 @@ async def upsert_route(
     if route is not None:
         return route
     existing = await session.scalar(
-        select(SourceRoute).where(
+        select(SourceRoute)
+        .where(
             SourceRoute.source_id == source_pk,
             SourceRoute.route_kind == route_kind,
             SourceRoute.route_key == route_key,
         )
+        .execution_options(populate_existing=True)
     )
     if existing is None:  # pragma: no cover
         msg = "route зник між INSERT і SELECT"
@@ -282,6 +284,8 @@ async def upsert_cursor(
             },
         )
         .returning(SourceCursor)
+        # Рядок міг уже бути в identity map (той самий session) — оновити атрибути з RETURNING.
+        .execution_options(populate_existing=True)
     )
     return (await session.execute(stmt)).scalar_one()
 

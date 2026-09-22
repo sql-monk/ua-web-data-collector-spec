@@ -42,9 +42,14 @@ APPENDIX_A_PACKAGES = (
     "collector.telemetry",
 )
 # Залежності, які додають лише власники відповідних WP (картка PR1, вимога 2).
-# PR2 додав fastapi/uvicorn (стаб health для image `collector`) і pymongo (`ensure-mongo`
-# ініціалізує replica set; health `hello`) — див. docs/decisions/0002-docker-compose-single-host.md.
-FORBIDDEN_FOUNDATION_DEPS = ("scrapy", "httpx", "sqlalchemy", "alembic", "psycopg", "asyncpg")
+# WP-00 PR2 додав fastapi/uvicorn (стаб health для image `collector`) і pymongo
+# (`ensure-mongo` ініціалізує replica set; health `hello`) —
+# див. docs/decisions/0002-docker-compose-single-host.md.
+# WP-01A PR1 додав sqlalchemy[asyncio]/alembic/asyncpg як owner PostgreSQL foundation
+# (картка WP-01A, docs/plan/deps/WP-01A-to-WP-00.md), тож вони вибули зі списку;
+# `psycopg` лишається забороненим — runtime підтримує лише драйвер asyncpg
+# (collector.persistence.postgres.config.normalize_async_url).
+FORBIDDEN_FOUNDATION_DEPS = ("scrapy", "httpx", "psycopg")
 SPEC_16_2_PYTHON_COMMANDS = (
     "uv sync --frozen",
     "uv run ruff check .",

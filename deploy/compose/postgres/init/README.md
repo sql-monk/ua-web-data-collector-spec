@@ -4,10 +4,19 @@
 виконує `*.sql`/`*.sh` звідси **лише коли data directory порожня** (перший `up` після
 `down -v`), в алфавітному порядку.
 
-Файли ролей (`01-roles.sql` — NOLOGIN group-ролі per-component §13: `collector_migrate`,
-`collector_app_rw`, `collector_app_ro`, …) належать **WP-01A** і з'являться після merge
-WP-01A PR1 (`docs/plan/deps/WP-01A-to-WP-00.md`, п.2). WP-00 сюди SQL не копіює — порожня
-тека означає, що Postgres просто не виконує нічого.
+- `01-roles.sql` (WP-01A) — створює NOLOGIN group-ролі §13 (`collector_migrate`,
+  `collector_scheduler`, `collector_fetcher`, `collector_parser`, `collector_projector`,
+  `collector_translation`, `collector_api_ro`, `collector_export_ro`), щоб `collector db roles`
+  (GRANT) і login-користувачі могли посилатися на них одразу. Це лише перша частина
+  канонічного скрипта `src/collector/persistence/postgres/sql/roles.sql`: GRANT потребує
+  таблиць, які з'являються після `collector db migrate`.
+
+Порядок у dev: `docker compose up -d postgres` → `collector db migrate` → `collector db roles`.
 
 Зміна ролей після першого старту не застосовується автоматично: або `docker compose down -v`
-(втрата даних), або `collector db roles` (WP-01A) проти живого кластера.
+(втрата даних), або `collector db roles` проти живого кластера (ідемпотентно, і саме так це
+робить one-shot `migrate-postgres`).
+
+Паролів у скриптах немає: dev-login (`POSTGRES_USER`) — superuser з compose env/secret;
+runtime-login-користувачі створює оператор як членів ролей
+(`CREATE ROLE ... LOGIN IN ROLE collector_fetcher`).
