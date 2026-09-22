@@ -40,6 +40,12 @@ WP-01A PR1 замінив тіло команди на Alembic, три тест�
 | `test_health_adversarial.py::test_db_migrate_never_prints_stub_line_nor_reads_secrets` | exit 0 + `owner WP-01A` | відсутній secret-файл DSN → exit 1 з назвою env, без stub-рядка і без traceback |
 | `test_compose_config.py::test_postgres_init_scripts_are_mounted_read_only_for_wp_01a` | `init/` не містить `*.sql` (WP-00 їх не копіює) | `init/` містить рівно `01-roles.sql`, і у виконуваному SQL немає GRANT/паролів/DDL таблиць — тобто перевіряється саме те, що туди не можна класти |
 
+Після першого прогону CI на PR #3 до цього переліку додався ще один рядок того самого
+класу: `test_cli_compose_commands.py::test_db_migrate_exits_1_when_postgres_unreachable`
+зʼєднувався з реальним закритим портом `127.0.0.1:1`, що на POSIX блокує `pytest-socket`
+(на Windows loopback дозволений) — відмову тепер підставляють у `asyncpg.connect`, без socket.
+Інваріант тесту незмінний: exit 1, порожній stdout, `postgres error` у stderr, без traceback.
+
 Жодну перевірку не послаблено: кожен тест зберіг свій інваріант (немає stub-рядка, немає
 traceback, секрети не витікають, у initdb немає GRANT/паролів) і лише перевів його на реальну
 поведінку команди. Монтування `./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro`

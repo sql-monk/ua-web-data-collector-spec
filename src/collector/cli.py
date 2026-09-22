@@ -26,29 +26,34 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import signal
 import threading
 import time
-from collections.abc import Coroutine
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 import typer
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from collector.core.config import env_or_file, mongo_address
 from collector.core.logging import configure_logging, get_logger
 from collector.core.version import version_info
-from collector.persistence.postgres.config import PostgresSettings
 from collector.workers.roles import WorkerRole
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from pymongo import MongoClient
 
-# pymongo/fastapi/uvicorn імпортуються лише в тілах команд, які їх потребують (gate 3, CR-12):
-# `collector version`/`--help` — це image HEALTHCHECK і CI-контракт, вони мають бути дешевими.
+    from collector.persistence.postgres.config import PostgresSettings
+
+# pymongo/fastapi/uvicorn/asyncio/sqlalchemy імпортуються лише в тілах команд, які їх потребують
+# (gate 3, CR-12): `collector version`/`--help` — це image HEALTHCHECK і CI-контракт, вони мають
+# бути дешевими. Те саме стосується `collector worker <role>`/`scheduler`: 11 контейнерів
+# стартують одночасно, і зайвий важкий імпорт у кожному з'їдає CPU рівно у вікні `start_period`
+# healthcheck-ів (CI PR #3: `collector db …` тягнув sqlalchemy+asyncio у ЦЕЙ модуль → fetch-worker
+# unhealthy). Тест-вартовий: tests/unit/persistence/postgres/test_cli_db.py::
+# test_importing_cli_does_not_pull_heavy_database_stack.
 
 NOT_IMPLEMENTED_EXIT_CODE = 2
 # Placeholder-процеси (scheduler/worker): період heartbeat-логу, с.
@@ -337,7 +342,7 @@ def db_roles(
 
 
 def _postgres_settings() -> PostgresSettings:
-    from collector.persistence.postgres.config import PostgresConfigError
+    from collector.persistence.postgres.config import PostgresConfigError, PostgresSettings
 
     try:
         return PostgresSettings.from_env()
@@ -353,7 +358,12 @@ def _is_postgres_error(exc: BaseException) -> bool:
     напряму під час connect/auth (`InvalidPasswordError`) і при виконанні скрипта ролей через
     simple query protocol, а SQLAlchemy їх не обгортає. Клас визначаємо за модулем — у asyncpg
     немає `py.typed`, тож імпортувати його в типізований код не можна (L-3 код-рев'ю).
+
+    `sqlalchemy.exc` імпортується тут, а не в модулі: виклик відбувається лише після того, як
+    команда `db …` уже підтягнула SQLAlchemy (див. коментар про lazy-імпорти вище).
     """
+    from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+
     return (
         isinstance(exc, OSError | DBAPIError | SQLAlchemyError)
         or type(exc).__module__.split(".")[0] == "asyncpg"
@@ -362,6 +372,8 @@ def _is_postgres_error(exc: BaseException) -> bool:
 
 def _run_async[T](coro: Coroutine[Any, Any, T]) -> T:
     """`asyncio.run` з перекладом помилок БД у exit code 1 без traceback у stderr."""
+    import asyncio
+
     try:
         return asyncio.run(coro)
     except Exception as exc:

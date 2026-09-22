@@ -7,7 +7,7 @@
 | Картка | `docs/plan/cards/WP-01A.md` — «Спільні вимоги» + «PR1» |
 | Розділи ТЗ | §5.5, §7.2, §7.6, §9.1 (рядки PR1), §9.3, §13, §15, §18; REVIEW.md R-27, R-28, R-32, R-53 |
 | Середовище | Windows 11, uv 0.12.13, CPython 3.13, Docker 29.8, PostgreSQL 18 (`postgres:18@sha256:86c951e0…`) |
-| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2); після gate 3 — `fix(wp-01a)` (H-1, M-1…M-5, 7 low); після пострев'ю — `fix(wp-01a)` (S-1…S-4); rebase на main (WP-00 PR2 + WP-01C) |
+| Commits | `84e946f` міграції/моделі, `ed402b7` queue/runs/sources/audit, `f46aa03` limiter, `325fd03` pools, `418fc80` CLI + ролі, `09171ac` тести + CI; після gate 2 — `fix(wp-01a)` (L-1, L-2, I-1, I-2); після gate 3 — `fix(wp-01a)` (H-1, M-1…M-5, 7 low); після пострев'ю — `fix(wp-01a)` (S-1…S-4); rebase на main (WP-00 PR2 + WP-01C); після CI PR #3 — `fix(wp-01a)` (socket-free driver tests, lazy DB imports) |
 
 ## Що зроблено
 
@@ -620,6 +620,109 @@ $ uv run pre-commit run --all-files
 
 Зростання `-m "not live"` з 622 до 734 тестів — це тести WP-00 PR2 (Compose config, health,
 placeholder-процеси), що прийшли з `main`; 104 integration — набір WP-01A без змін.
+
+## Виправлення після CI PR #3
+
+Перший прогін CI на PR #3 дав два збої (jobs `integration (PostgreSQL 18)` — 54 с, уперше в CI,
+`pre-commit` і `gitleaks` — зелені). Обидва спричинені відмінностями CI від локального
+середовища, які локальний прогін на Windows приховував.
+
+### 1. `python`: два тести залежали від реального socket (Linux ≠ Windows)
+
+`tests/unit/persistence/postgres/test_cli_db.py::test_db_roles_translates_driver_errors_without_traceback`
+і `tests/unit/test_cli_compose_commands.py::test_db_migrate_exits_1_when_postgres_unreachable`
+перевіряли трансляцію помилок драйвера, зʼєднуючись із завідомо закритим портом
+`127.0.0.1:1`. На POSIX `pytest-socket` блокує **створення** socket у звичайних тестах, тому
+замість `postgres error` тести отримували `SocketBlockedError`, а `result.output` був порожній.
+На Windows conftest дозволяє loopback (asyncio інакше не створює event loop), тож локально
+обидва були зелені — класичне «зелено в мене, червоно в CI».
+
+Виправлено без зміни того, що перевіряється: відмова підставляється у `asyncpg.connect`
+(SQLAlchemy бере функцію з модуля на кожен виклик — `creator_fn = kw.pop("async_creator_fn",
+self.asyncpg.connect)`), тож жодного socket не створюється і поведінка однакова на обох
+платформах. Перший тест ще й параметризовано двома класами помилок — `asyncpg`-виняток
+(`InvalidPasswordError`) і `OSError` (`ConnectionRefusedError`), — бо `_is_postgres_error`
+розпізнає їх різними гілками; додано перевірку, що пароль із DSN не потрапляє у вивід.
+
+Другий тест належить WP-00, але зламався саме через реалізацію `db migrate` у WP-01A — правку
+зафіксовано в `docs/plan/deps/WP-01A-to-WP-00.md` (той самий approved dependency, п.1).
+
+**Перевірено на Linux-паритеті** (контейнер `ghcr.io/astral-sh/uv:python3.13-bookworm-slim`,
+де діє повний `--disable-socket`): 66 passed для чотирьох CLI-файлів; повний `-m "not live"` —
+629 passed, 106 skipped, 2 failed лише через відсутній у тому образі `git`
+(`test_secrets_are_files_with_examples_and_gitignored`, `test_env_files_are_gitignored_but_example_is_not`
+викликають `git check-ignore`; на runner-і git є).
+
+### 2. `docker`: `container collector-fetch-worker-1 is unhealthy`
+
+Причина — **важкі імпорти в `collector/cli.py`**. WP-00 PR2 свідомо тримає `pymongo`/`fastapi`/
+`uvicorn` у тілах команд (gate 3, CR-12: «`collector version`/`--help` — це image HEALTHCHECK і
+CI-контракт, вони мають бути дешевими»), а WP-01A додав у **модуль** `import asyncio`,
+`from sqlalchemy.exc import …` і `from collector.persistence.postgres.config import
+PostgresSettings` (останній тягне `sqlalchemy.engine`).
+
+Вимір у контейнері (`python -X importtime -c "import collector.cli"`): **1 208 721 мкс** до
+виправлення, з них `sqlalchemy.exc` 277 160 мкс і `asyncio` 408 397 мкс. Це коштувало ~0.3–0.7 с
+CPU **кожному** з 11 контейнерів, які стартують одночасно (`collector worker <role>` × 9,
+`scheduler`, `api`) — саме у вікні `start_period` їхніх healthcheck-ів. На 2-ядерному
+GitHub-runner-і probe-и (timeout 5 с) не встигали: у логах CI `export-worker` став healthy аж
+через 92 с після старту, а `fetch-worker-1` (найважчий probe — postgres + minio) вичерпав
+3 retries і був оголошений unhealthy на 93-й секунді.
+
+Виправлення — повернути політику WP-00: `asyncio`, `sqlalchemy.exc` і `PostgresSettings`
+імпортуються в тілах `db migrate`/`db roles` та хелперів (`_postgres_settings`,
+`_is_postgres_error`, `_run_async`); анотації — під `TYPE_CHECKING`. Після цього
+`import collector.cli` у контейнері — **831 355 мкс** (−31 %), `sqlalchemy` не імпортується
+взагалі.
+
+Щоб регресія не повторилася, додано тест-вартовий
+`tests/unit/persistence/postgres/test_cli_db.py::test_importing_cli_does_not_pull_heavy_database_stack`:
+у **чистому інтерпретаторі** (subprocess) після `import collector.cli` у `sys.modules` не має
+бути ні `sqlalchemy`, ні `asyncpg`, ні `alembic`, ні `pymongo`/`fastapi`/`uvicorn`. Коментар
+про політику lazy-імпортів у `cli.py` доповнено поясненням саме про worker-контейнери.
+
+### Локальне відтворення і перевірка
+
+```text
+$ bash ./deploy/compose/secrets/init-secrets.sh && docker build -t collector:ci .
+$ COMPOSE_PROFILES=core,workers docker compose up -d --wait --wait-timeout 300   # ДО фіксу
+… Container collector-migrate-postgres-1 Error … exit 1
+migrate-postgres-1  | postgres error: password authentication failed for user "collector"
+```
+
+Перший локальний прогін упав інакше, ніж CI, — через **stale volume** `collector_postgres-data`
+від попередніх запусків WP-00: `POSTGRES_PASSWORD_FILE` діє лише на initdb, тож новий
+`postgres_dsn` не збігався зі старим паролем у томі. Це не дефект PR, але показове: після
+`down -v` той самий стек піднявся повністю (саме тому CI, який завжди починає з чистого хоста,
+цієї помилки не бачив). Варто памʼятати в runbook: `collector db migrate` тепер справді
+автентифікується, тому розбіжність «том ↔ secret» більше не проходить непоміченою.
+
+Після виправлення імпортів — три повні цикли `down -v → up -d --wait → check-healthy → down -v`:
+
+```text
+=== cycle 1 ===  up --wait OK (47s)   all 17 containers healthy or exited 0
+=== cycle 2 ===  up --wait OK (65s)   all 16 containers healthy or exited 0
+=== cycle 3 ===  up --wait OK (41s)   all 16 containers healthy or exited 0
+# у кожному циклі: docker compose exec -T api python -m collector.api.health
+#   postgres: ok (tcp reachable) | mongo: ok (writable primary of replica set) | minio: ok (HTTP 200)
+```
+
+(17 проти 16 — у першому циклі ще існував контейнер `ensure-mongo` з попереднього запуску;
+обидва значення проходять `deploy/compose/check-healthy.py`.)
+
+### Повний прогін після виправлень
+
+```text
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src
+All checks passed! | 180 files already formatted | Success: no issues found in 62 source files
+
+$ docker compose config --quiet                       exit=0
+$ uv run pytest -m "not live"                         736 passed, 1 skipped in 101.15s
+$ uv run pytest -m integration tests/integration/postgres   104 passed in 108.10s (testcontainers)
+$ uv run pre-commit run --all-files                   усі 11 hooks Passed
+$ Linux-паритет (uv:python3.13-bookworm-slim)         629 passed, 106 skipped (2 fail лише через
+                                                      відсутній `git` у тимчасовому образі)
+```
 
 ## Що не перевірено
 
