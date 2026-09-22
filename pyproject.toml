@@ -9,14 +9,20 @@ authors = [{ name = "UA Web Data Collector team" }]
 # Foundation-залежності (WP-00). Наступні WP додають свої залежності самостійно
 # в алфавітному порядку та перегенеровують uv.lock (docs/plan/cards/WP-00.md).
 dependencies = [
+  # fastapi/uvicorn — стаб `GET /api/v1/health/components` (WP-00 PR2; далі owner WP-11A).
+  "fastapi>=0.118",
   # idna, phonenumbers, pyyaml — WP-01C shared contracts (§9.3 п.8 нормалізація контактів;
   # read-only loader docs/research/source-registry.yaml для валідації source_id).
   "idna>=3.10",
   "phonenumbers>=9.0",
   "pydantic>=2.11,<3",
+  # pymongo — `collector db ensure-mongo` (replica set init) і health `hello` (WP-00 PR2;
+  # PyMongo Async API для domain repository додає WP-01B, §8).
+  "pymongo>=4.15",
   "pyyaml>=6.0",
   "structlog>=25.4",
   "typer>=0.27",
+  "uvicorn>=0.37",
 ]
 
 [project.scripts]

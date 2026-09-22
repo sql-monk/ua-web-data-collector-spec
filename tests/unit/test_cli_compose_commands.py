@@ -1,0 +1,273 @@
+"""CLI-команди з реальною/placeholder-поведінкою після WP-00 PR2 (картка, PR2 вимоги 5 і 7).
+
+- `db migrate`: TCP-перевірка PostgreSQL → 0 + «no migrations yet; owner WP-01A»; недоступний → 1;
+- `db ensure-mongo`: ідемпотентна ініціалізація single-member replica set (фейковий клієнт);
+  `--validators/--indexes` після ініціалізації — стаб WP-01B (код 2);
+- `worker <role>`/`scheduler`: placeholder-процес живий до stop/SIGTERM, код 0, стаб-рядок у stderr;
+- `api`: запускає uvicorn з factory `collector.api.health:create_app` (uvicorn — фейк).
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Any
+
+import pytest
+from pymongo.errors import OperationFailure
+from typer.testing import CliRunner
+
+from collector import cli
+from collector.api.health import ComponentStatus
+from collector.cli import (
+    MONGO_NOT_YET_INITIALIZED,
+    app,
+    ensure_mongo_replica_set,
+    placeholder_process,
+)
+from collector.workers.roles import WorkerRole
+
+runner = CliRunner()
+
+
+# --- db migrate -------------------------------------------------------------------------------
+
+
+def _postgres(ok: bool) -> Any:
+    def check(environ: Any = None, *, timeout: float = 3.0) -> ComponentStatus:
+        return ComponentStatus(name="postgres", ok=ok, latency_ms=0.2, detail="fake")
+
+    return check
+
+
+def test_db_migrate_exits_0_with_owner_message_when_postgres_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "check_postgres", _postgres(True))
+    result = runner.invoke(app, ["db", "migrate"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "no migrations yet; owner WP-01A"
+    assert "not implemented" not in result.output
+
+
+def test_db_migrate_exits_1_when_postgres_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "check_postgres", _postgres(False))
+    result = runner.invoke(app, ["db", "migrate"])
+    assert result.exit_code == 1
+    assert result.stdout == ""
+
+
+# --- db ensure-mongo --------------------------------------------------------------------------
+
+
+class FakeAdmin:
+    """Мінімальна модель стану RS: not-initialized → replSetInitiate → primary."""
+
+    def __init__(self, *, initialized_as: str | None, primary_after: int = 1) -> None:
+        self.set_name = initialized_as
+        self.primary_after = primary_after
+        self.commands: list[str] = []
+        self.hello_calls = 0
+
+    def command(self, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.commands.append(name)
+        if name == "replSetGetStatus":
+            if self.set_name is None:
+                raise OperationFailure("no replset config", code=MONGO_NOT_YET_INITIALIZED)
+            return {"set": self.set_name}
+        if name == "replSetInitiate":
+            assert self.set_name is None
+            config = args[0]
+            assert config["members"] == [{"_id": 0, "host": "mongo:27017"}]
+            self.set_name = config["_id"]
+            return {"ok": 1}
+        if name == "hello":
+            self.hello_calls += 1
+            primary = self.set_name is not None and self.hello_calls >= self.primary_after
+            return {"isWritablePrimary": primary, "setName": self.set_name}
+        raise AssertionError(name)
+
+
+class FakeClient:
+    last: FakeClient | None = None
+
+    def __init__(self, admin: FakeAdmin | None = None, **kwargs: Any) -> None:
+        self.admin = admin or FakeAdmin(initialized_as=None)
+        self.kwargs = kwargs
+        self.closed = False
+        FakeClient.last = self
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_ensure_replica_set_initiates_when_not_initialized() -> None:
+    client = FakeClient(FakeAdmin(initialized_as=None, primary_after=3))
+    initiated = ensure_mongo_replica_set(
+        client,  # type: ignore[arg-type]  # фейк замість MongoClient
+        replica_set="rs0",
+        member_host="mongo:27017",
+        wait_seconds=5,
+    )
+    assert initiated is True
+    assert client.admin.commands[:2] == ["replSetGetStatus", "replSetInitiate"]
+    assert client.admin.hello_calls == 3, "чекає, поки член стане primary"
+
+
+def test_ensure_replica_set_is_idempotent() -> None:
+    client = FakeClient(FakeAdmin(initialized_as="rs0"))
+    initiated = ensure_mongo_replica_set(
+        client,  # type: ignore[arg-type]  # фейк замість MongoClient
+        replica_set="rs0",
+        member_host="mongo:27017",
+    )
+    assert initiated is False
+    assert "replSetInitiate" not in client.admin.commands
+
+
+def test_ensure_replica_set_rejects_other_set_name() -> None:
+    client = FakeClient(FakeAdmin(initialized_as="other"))
+    with pytest.raises(ValueError, match="already initialised as 'other'"):
+        ensure_mongo_replica_set(
+            client,  # type: ignore[arg-type]  # фейк замість MongoClient
+            replica_set="rs0",
+            member_host="mongo:27017",
+        )
+
+
+def test_ensure_replica_set_times_out_if_never_primary() -> None:
+    client = FakeClient(FakeAdmin(initialized_as="rs0", primary_after=10**6))
+    with pytest.raises(TimeoutError):
+        ensure_mongo_replica_set(
+            client,  # type: ignore[arg-type]  # фейк замість MongoClient
+            replica_set="rs0",
+            member_host="mongo:27017",
+            wait_seconds=0.6,
+        )
+
+
+def test_ensure_replica_set_reraises_other_operation_failures() -> None:
+    class Unauthorized(FakeAdmin):
+        def command(self, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise OperationFailure("requires authentication", code=13)
+
+    with pytest.raises(OperationFailure):
+        ensure_mongo_replica_set(
+            FakeClient(Unauthorized(initialized_as=None)),  # type: ignore[arg-type]
+            replica_set="rs0",
+            member_host="mongo:27017",
+        )
+
+
+@pytest.fixture
+def fake_mongo_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> type[FakeClient]:
+    FakeClient.last = None
+    monkeypatch.setattr(cli, "MongoClient", FakeClient)
+    password_file = tmp_path / "mongo_root_password"
+    password_file.write_text("s3cret\n", encoding="utf-8")
+    monkeypatch.setenv("COLLECTOR_MONGO_ROOT_USERNAME", "collector_root")
+    monkeypatch.setenv("COLLECTOR_MONGO_ROOT_PASSWORD_FILE", str(password_file))
+    monkeypatch.delenv("COLLECTOR_MONGO_ROOT_PASSWORD", raising=False)
+    monkeypatch.setenv("COLLECTOR_MONGO_HOST", "mongo")
+    monkeypatch.setenv("COLLECTOR_MONGO_PORT", "27017")
+    monkeypatch.setenv("COLLECTOR_MONGO_REPLICA_SET", "rs0")
+    return FakeClient
+
+
+def test_db_ensure_mongo_initiates_and_exits_0(fake_mongo_client: type[FakeClient]) -> None:
+    result = runner.invoke(app, ["db", "ensure-mongo"])
+    assert result.exit_code == 0, result.output
+    client = fake_mongo_client.last
+    assert client is not None and client.closed
+    assert client.kwargs["username"] == "collector_root"
+    # S105: тестове значення з tmp-файлу, не справжній секрет.
+    assert client.kwargs["password"] == "s3cret", "секрет читається з *_FILE"  # noqa: S105
+    assert client.kwargs["authSource"] == "admin"
+    assert client.kwargs["directConnection"] is True
+    assert "replSetInitiate" in client.admin.commands
+    assert "s3cret" not in result.output, "секрет не потрапляє у логи"
+    assert "not implemented" not in result.output
+
+
+def test_db_ensure_mongo_validators_indexes_are_stub_after_init(
+    fake_mongo_client: type[FakeClient],
+) -> None:
+    result = runner.invoke(app, ["db", "ensure-mongo", "--validators", "--indexes"])
+    assert result.exit_code == 2
+    assert result.stderr.strip().endswith("not implemented: owned by WP-01B")
+    client = fake_mongo_client.last
+    assert client is not None and "replSetInitiate" in client.admin.commands
+
+
+def test_db_ensure_mongo_exits_1_on_driver_error(
+    fake_mongo_client: type[FakeClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Failing(FakeClient):
+        def __init__(self, **kwargs: Any) -> None:
+            class Admin(FakeAdmin):
+                def command(self, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                    raise OperationFailure("Authentication failed", code=18)
+
+            super().__init__(Admin(initialized_as=None), **kwargs)
+
+    monkeypatch.setattr(cli, "MongoClient", Failing)
+    result = runner.invoke(app, ["db", "ensure-mongo"])
+    assert result.exit_code == 1
+    assert "ensure_mongo.failed" in result.stderr
+    assert "s3cret" not in result.output
+
+
+# --- placeholders: worker <role>, scheduler ---------------------------------------------------
+
+
+def test_placeholder_process_runs_until_stopped(capsys: pytest.CaptureFixture[str]) -> None:
+    stop = threading.Event()
+    timer = threading.Timer(0.3, stop.set)
+    timer.start()
+    placeholder_process("worker.fetch", "WP-01D", stop=stop, heartbeat_seconds=0.05)
+    err = capsys.readouterr().err
+    assert err.splitlines()[0] == "not implemented: owned by WP-01D"
+    assert '"placeholder.started"' in err
+    assert '"placeholder.heartbeat"' in err
+    assert '"placeholder.stopped"' in err
+
+
+@pytest.mark.parametrize("role", [role.value for role in WorkerRole])
+def test_worker_command_is_placeholder_that_stays_alive(
+    role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(cli, "placeholder_process", lambda n, o: calls.append((n, o)))
+    result = runner.invoke(app, ["worker", role])
+    assert result.exit_code == 0, result.output
+    assert calls == [(f"worker.{role}", "WP-01D")]
+
+
+def test_scheduler_command_is_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(cli, "placeholder_process", lambda n, o: calls.append((n, o)))
+    result = runner.invoke(app, ["scheduler"])
+    assert result.exit_code == 0, result.output
+    assert calls == [("scheduler", "WP-01D")]
+
+
+# --- api --------------------------------------------------------------------------------------
+
+
+def test_api_command_runs_uvicorn_with_health_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    import uvicorn
+
+    captured: dict[str, Any] = {}
+
+    def fake_run(target: str, **kwargs: Any) -> None:
+        captured["target"] = target
+        captured.update(kwargs)
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.setenv("COLLECTOR_API_HOST", "127.0.0.1")
+    monkeypatch.setenv("COLLECTOR_API_PORT", "18000")
+    result = runner.invoke(app, ["api"])
+    assert result.exit_code == 0, result.output
+    assert captured["target"] == "collector.api.health:create_app"
+    assert captured["factory"] is True
+    assert (captured["host"], captured["port"]) == ("127.0.0.1", 18000)
+    assert captured["log_config"] is None, "логи uvicorn — через structlog"

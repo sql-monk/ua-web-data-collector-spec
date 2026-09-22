@@ -1,0 +1,496 @@
+# UA Web Data Collector — single-host Docker Compose (§7.5, §13, FR-030, FR-035; ADR-0002).
+#
+# Profiles (§7.5):
+#   core          postgres, mongo, minio, one-shot migrate-postgres/ensure-mongo, api, scheduler
+#   workers       discovery/fetch/parse/projector/translation/export/maintenance-worker
+#   browser       browser-worker (0 replicas за замовчуванням; окремий image — WP-02 PR3)
+#   gui           gui (WP-00 PR3 — сервіс ще не оголошено; профіль зарезервовано)
+#   observability OpenTelemetry Collector, Prometheus, Grafana, Loki (WP-12 — ще не оголошено)
+#   tools         one-shot admin, release verifier, DuckDB research (WP-11A/WP-14 — ще не оголошено)
+#
+# Clean-host start (§16.2/§16.3; runbook docs/runbooks/clean-host-start.md):
+#   ./deploy/compose/secrets/init-secrets.sh
+#   docker compose --profile core --profile workers --profile gui up -d --wait
+# Локальна розробка з портами на 127.0.0.1:
+#   docker compose -f docker-compose.yml -f deploy/compose/dev.override.yml --profile core up -d --wait
+# Масштабування (§7.5): docker compose up -d --no-recreate --scale fetch-worker=4
+#
+# Інваріанти (перевіряються tests/unit/test_compose_config.py):
+#   - worker services без container_name, host ports і local persistent state;
+#   - жодного Docker socket mount; application services read_only + non-root + tmpfs /tmp;
+#   - публічних портів у base-файлі немає (лише dev.override.yml → 127.0.0.1; gui — PR3);
+#   - секрети лише через Docker secrets/files (deploy/compose/secrets/), не ARG/ENV.
+
+name: collector
+
+# ---------------------------------------------------------------------------------------------
+# Спільні фрагменти
+# ---------------------------------------------------------------------------------------------
+
+x-collector-image: &collector-image
+  image: ${COLLECTOR_IMAGE:-collector:dev}
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      COLLECTOR_GIT_SHA: ${COLLECTOR_GIT_SHA:-unknown}
+      COLLECTOR_SCHEMA_VERSION: ${COLLECTOR_SCHEMA_VERSION:-0.0.0-placeholder}
+      COLLECTOR_VERSION: ${COLLECTOR_VERSION:-0.1.0}
+      COLLECTOR_CREATED: ${COLLECTOR_CREATED:-1970-01-01T00:00:00Z}
+
+# Application container (§7.5, §13): read-only rootfs, tmpfs /tmp, non-root, без capabilities,
+# без privilege escalation, init для zombie-reaping. Local persistent state відсутній.
+x-collector-runtime: &collector-runtime
+  <<: *collector-image
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777,size=64m
+  user: "10001:10001"
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  environment: &collector-env
+    COLLECTOR_LOG_LEVEL: ${COLLECTOR_LOG_LEVEL:-INFO}
+    COLLECTOR_POSTGRES_HOST: postgres
+    COLLECTOR_POSTGRES_PORT: "5432"
+    COLLECTOR_MONGO_HOST: mongo
+    COLLECTOR_MONGO_PORT: "27017"
+    COLLECTOR_MONGO_REPLICA_SET: rs0
+    COLLECTOR_MINIO_URL: http://minio:9000
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+# Worker pool (§7.5/§7.6): масштабується `--scale`, тому без container_name/ports/volumes;
+# stop_grace_period ≥ 90 с — довший за bounded task shutdown (drain по SIGTERM).
+x-worker: &worker
+  <<: *collector-runtime
+  profiles: [workers]
+  restart: unless-stopped
+  stop_grace_period: 120s
+  stop_signal: SIGTERM
+  networks:
+    - backend
+  labels:
+    collector.scalable: "true"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    migrate-postgres:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD", "python", "-m", "collector.api.health", "postgres"]
+    interval: 30s
+    timeout: 5s
+    start_period: 15s
+    retries: 3
+
+x-limits-small: &limits-small
+  resources:
+    limits:
+      cpus: "0.50"
+      memory: 512M
+
+x-limits-medium: &limits-medium
+  resources:
+    limits:
+      cpus: "1.00"
+      memory: 1G
+
+x-limits-large: &limits-large
+  resources:
+    limits:
+      cpus: "2.00"
+      memory: 2G
+
+# ---------------------------------------------------------------------------------------------
+# Stateful (profile core): pinned digests, named volumes, без published ports (dev.override.yml)
+# ---------------------------------------------------------------------------------------------
+
+services:
+  postgres:
+    # PostgreSQL 18 (§8). Digest — multi-arch index; оновлення через окремий PR (§7.5).
+    image: postgres:18@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae
+    profiles: [core]
+    restart: unless-stopped
+    user: postgres
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-collector}
+      POSTGRES_USER: ${POSTGRES_USER:-collector}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      # scram-sha-256 для всіх з'єднань (§13; ролі per-component додає WP-01A).
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\" -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+    deploy: *limits-large
+
+  mongo:
+    # MongoDB 8.0 single-member replica set з keyFile (auth) (§8, Q-010). Keyfile копіюється
+    # з Docker secret у tmpfs з правами 0400, бо file-secrets на хості можуть мати 0644/0777
+    # (Docker Desktop), а mongod відмовляє «permissions too open».
+    image: mongo:8.0@sha256:4968f22d0c6c10ef29952f3e807f62872ba22b3312f25803564fbfc08255efc2
+    profiles: [core]
+    restart: unless-stopped
+    user: "999:999"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /run/mongo-keyfile:mode=0700,uid=999,gid=999,size=1m
+    stop_grace_period: 60s
+    entrypoint:
+      - bash
+      - -ec
+      - |
+        install -m 0400 /run/secrets/mongo_keyfile /run/mongo-keyfile/keyfile
+        exec docker-entrypoint.sh mongod --replSet "$${COLLECTOR_MONGO_REPLICA_SET}" \
+          --keyFile /run/mongo-keyfile/keyfile --bind_ip_all
+    environment:
+      COLLECTOR_MONGO_REPLICA_SET: rs0
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-collector_root}
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+    secrets:
+      - mongo_root_password
+      - mongo_keyfile
+    volumes:
+      - mongo-data:/data/db
+      - mongo-config:/data/configdb
+    networks:
+      - backend
+    healthcheck:
+      # Процес живий і приймає команди; primary/RS перевіряє `ensure-mongo` та health api.
+      test: ["CMD", "mongosh", "--quiet", "--norc", "--eval", "db.adminCommand('ping').ok === 1 || quit(1)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 40s
+      retries: 6
+    deploy: *limits-large
+
+  minio:
+    # MinIO (S3-compatible, §8). Vendor image працює від root (volume /data належить root у
+    # image; non-root потребує окремого chown-init) — прийняте відхилення для stateful vendor
+    # image; application images — non-root (див. ADR-0002).
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    profiles: [core]
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+      MINIO_BROWSER: "off"
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    volumes:
+      - minio-data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 6
+    deploy: *limits-medium
+
+  # -------------------------------------------------------------------------------------------
+  # One-shots (profile core): завершуються 0 → api/workers стартують (readiness §7.5)
+  # -------------------------------------------------------------------------------------------
+
+  migrate-postgres:
+    # Стаб WP-00: перевіряє з'єднання, «no migrations yet; owner WP-01A». WP-01A замінює
+    # command на `alembic upgrade head` (§16.2) із migration role (§13).
+    <<: *collector-runtime
+    profiles: [core]
+    restart: "no"
+    command: ["collector", "db", "migrate"]
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy: *limits-small
+
+  ensure-mongo:
+    # Ініціалізує single-member replica set (реально, ідемпотентно); validators/indexes —
+    # WP-01B додає `--validators --indexes` (§16.2) після реалізації.
+    <<: *collector-runtime
+    profiles: [core]
+    restart: "no"
+    command: ["collector", "db", "ensure-mongo"]
+    environment:
+      <<: *collector-env
+      COLLECTOR_MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-collector_root}
+      COLLECTOR_MONGO_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+    secrets:
+      - mongo_root_password
+    networks:
+      - backend
+    depends_on:
+      mongo:
+        condition: service_healthy
+    deploy: *limits-small
+
+  # -------------------------------------------------------------------------------------------
+  # Application (profile core): api (backend + ingress), singleton scheduler
+  # -------------------------------------------------------------------------------------------
+
+  api:
+    # Стаб WP-00: лише GET /api/v1/health/components (503, поки залежності не ok).
+    # Порт 8000 не публікується: same-origin reverse proxy gui (PR3) або dev.override.yml.
+    <<: *collector-runtime
+    profiles: [core]
+    restart: unless-stopped
+    command: ["collector", "api"]
+    stop_grace_period: 30s
+    environment:
+      <<: *collector-env
+      COLLECTOR_API_HOST: 0.0.0.0
+      COLLECTOR_API_PORT: "8000"
+    expose:
+      - "8000"
+    networks:
+      - backend
+      - ingress
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-mongo:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health/components", timeout=5) as r:
+              sys.exit(0 if r.status == 200 else 1)
+      interval: 15s
+      timeout: 8s
+      start_period: 20s
+      retries: 3
+    deploy: *limits-medium
+
+  scheduler:
+    # Singleton (§7.5): 1 replica, не масштабується (label collector.scalable=false);
+    # advisory lease — WP-01D. У WP-00 placeholder-процес.
+    <<: *collector-runtime
+    profiles: [core]
+    restart: unless-stopped
+    command: ["collector", "scheduler"]
+    stop_grace_period: 90s
+    networks:
+      - backend
+    labels:
+      collector.scalable: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "collector.api.health", "postgres"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    deploy:
+      <<: *limits-small
+      replicas: 1
+
+  # -------------------------------------------------------------------------------------------
+  # Workers (profile workers): default replicas за §7.6; мережі за §7.5
+  # -------------------------------------------------------------------------------------------
+
+  discovery-worker:
+    <<: *worker
+    command: ["collector", "worker", "discovery"]
+    networks:
+      - backend
+      - source-egress
+    deploy:
+      <<: *limits-small
+      replicas: 1
+
+  fetch-worker:
+    <<: *worker
+    command: ["collector", "worker", "fetch"]
+    networks:
+      - backend
+      - source-egress
+    healthcheck:
+      test: ["CMD", "python", "-m", "collector.api.health", "postgres", "minio"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    deploy:
+      <<: *limits-medium
+      replicas: 2
+
+  parse-worker:
+    # Без network egress (§7.6): лише внутрішня мережа backend.
+    <<: *worker
+    command: ["collector", "worker", "parse"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "collector.api.health", "postgres", "minio"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    deploy:
+      <<: *limits-large
+      replicas: 2
+
+  projector-worker:
+    <<: *worker
+    command: ["collector", "worker", "projector"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-mongo:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "collector.api.health", "postgres", "mongo"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    deploy:
+      <<: *limits-medium
+      replicas: 1
+
+  translation-worker:
+    <<: *worker
+    command: ["collector", "worker", "translation"]
+    networks:
+      - backend
+      - provider-egress
+    deploy:
+      <<: *limits-small
+      replicas: 1
+
+  export-worker:
+    <<: *worker
+    command: ["collector", "worker", "export"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-mongo:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "collector.api.health", "postgres", "mongo", "minio"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    deploy:
+      <<: *limits-medium
+      replicas: 1
+
+  maintenance-worker:
+    <<: *worker
+    command: ["collector", "worker", "maintenance"]
+    deploy:
+      <<: *limits-small
+      replicas: 1
+
+  # -------------------------------------------------------------------------------------------
+  # Browser (profile browser): 0 replicas за замовчуванням (§7.6)
+  # -------------------------------------------------------------------------------------------
+
+  browser-worker:
+    # TODO(WP-02 PR3): окремий image з pinned Playwright browser (§7.5); до того — image
+    # collector з placeholder `collector worker browser`. replicas: 0 → контейнери не
+    # створюються; вмикати `--scale browser-worker=1` після canary (§8).
+    <<: *worker
+    profiles: [browser]
+    command: ["collector", "worker", "browser"]
+    networks:
+      - backend
+      - source-egress
+    shm_size: 512m
+    deploy:
+      <<: *limits-large
+      replicas: 0
+
+  # gui (profile gui) — WP-00 PR3: nginx-unprivileged, публікує 80/443 в ingress, бачить лише api.
+  # observability (profile observability) — WP-12: otel-collector, prometheus, grafana, loki у
+  #   мережі telemetry.
+  # tools (profile tools) — WP-11A/WP-14: one-shot admin, release verifier, DuckDB research.
+
+# ---------------------------------------------------------------------------------------------
+# Мережі (§7.5): backend/telemetry — internal (без egress); source/provider egress — окремі;
+# ingress — єдина публічна (gui у PR3).
+# ---------------------------------------------------------------------------------------------
+
+networks:
+  ingress:
+    name: collector_ingress
+  backend:
+    name: collector_backend
+    internal: true
+  source-egress:
+    name: collector_source_egress
+  provider-egress:
+    name: collector_provider_egress
+  telemetry:
+    name: collector_telemetry
+    internal: true
+
+# Named volumes лише для stateful services (§7.5, FR-030).
+volumes:
+  postgres-data:
+  mongo-data:
+  mongo-config:
+  minio-data:
+
+# Секрети — файли поза git (deploy/compose/secrets/*.example → init-secrets.sh) (§7.5, FR-013).
+secrets:
+  postgres_password:
+    file: ./deploy/compose/secrets/postgres_password
+  mongo_root_password:
+    file: ./deploy/compose/secrets/mongo_root_password
+  mongo_keyfile:
+    file: ./deploy/compose/secrets/mongo_keyfile
+  minio_root_user:
+    file: ./deploy/compose/secrets/minio_root_user
+  minio_root_password:
+    file: ./deploy/compose/secrets/minio_root_password

@@ -1,0 +1,12 @@
+# Усе, що не потрібно для збірки image `collector` (Dockerfile копіює лише pyproject.toml,
+# uv.lock, .python-version, README.md, src/ і docs/research/source-registry.yaml — реєстр
+# джерел для WP-01C). Секрети та локальні файли — ніколи в контекст.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!README.md
+!src/
+!docs/research/source-registry.yaml
+src/**/__pycache__/
+src/**/*.pyc

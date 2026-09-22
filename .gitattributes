@@ -1,0 +1,2 @@
+# Shell-скрипти виконуються у Linux-контейнерах/CI і в Git Bash: завжди LF незалежно від core.autocrlf.
+*.sh text eol=lf

@@ -41,8 +41,10 @@ APPENDIX_A_PACKAGES = (
     "collector.api",
     "collector.telemetry",
 )
-# Залежності, які додають лише власники відповідних WP (картка, вимога 2).
-FORBIDDEN_FOUNDATION_DEPS = ("scrapy", "httpx", "sqlalchemy", "pymongo", "alembic", "fastapi")
+# Залежності, які додають лише власники відповідних WP (картка PR1, вимога 2).
+# PR2 додав fastapi/uvicorn (стаб health для image `collector`) і pymongo (`ensure-mongo`
+# ініціалізує replica set; health `hello`) — див. docs/decisions/0002-docker-compose-single-host.md.
+FORBIDDEN_FOUNDATION_DEPS = ("scrapy", "httpx", "sqlalchemy", "alembic", "psycopg", "asyncpg")
 SPEC_16_2_PYTHON_COMMANDS = (
     "uv sync --frozen",
     "uv run ruff check .",

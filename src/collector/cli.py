@@ -1,21 +1,48 @@
 """CLI `collector` — контракт команд §16.2 ТЗ.
 
-У WP-00 усі команди, крім `version`, є типізованими стабами: вони друкують
+У WP-00 команди контракту є типізованими стабами: вони друкують
 `not implemented: owned by WP-XX` у stderr і завершуються з кодом 2. Власник WP
 замінює тіло відповідної команди, не змінюючи її назву та параметри.
+
+Винятки після WP-00 PR2 (Docker/Compose; картка WP-00, PR2 вимоги 5 і 7):
+
+- `version` — реальна;
+- `db migrate` — перевіряє TCP-з'єднання з PostgreSQL і завершується 0 з повідомленням
+  «no migrations yet; owner WP-01A» (Alembic додає WP-01A);
+- `db ensure-mongo` — реально ініціалізує single-member replica set (ідемпотентно);
+  `--validators`/`--indexes` лишаються стабом WP-01B (після ініціалізації RS → код 2);
+- `api` — запускає uvicorn зі стабом `GET /api/v1/health/components`
+  (`collector.api.health`; owner WP-11A);
+- `scheduler` і `worker <role>` — placeholder-процеси: тримають контейнер живим, логують,
+  що lease/queue-логіка не реалізована (owner WP-01D), коректно зупиняються по SIGTERM
+  (код 0). У stderr при старті друкується той самий рядок `not implemented: owned by
+  WP-01D`, щоб скрипти могли відрізнити placeholder від реалізації.
 """
 
 from __future__ import annotations
 
+import os
+import signal
+import threading
+import time
 from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
+from pymongo import MongoClient
+from pymongo.errors import OperationFailure, PyMongoError
 
+from collector.api.health import check_postgres, env_or_file, mongo_address
+from collector.core.logging import configure_logging, get_logger
 from collector.core.version import version_info
 from collector.workers.roles import WorkerRole
 
 NOT_IMPLEMENTED_EXIT_CODE = 2
+# Placeholder-процеси (scheduler/worker): період heartbeat-логу, с.
+PLACEHOLDER_HEARTBEAT_SECONDS = 30.0
+# ensure-mongo: скільки чекати, поки ініційований член стане primary, с.
+MONGO_PRIMARY_WAIT_SECONDS = 60.0
+MONGO_NOT_YET_INITIALIZED = 94  # код помилки replSetGetStatus до replSetInitiate
 
 app = typer.Typer(
     name="collector",
@@ -59,6 +86,84 @@ def not_implemented(owner: str) -> NoReturn:
     raise typer.Exit(code=NOT_IMPLEMENTED_EXIT_CODE)
 
 
+def placeholder_process(
+    name: str,
+    owner: str,
+    *,
+    stop: threading.Event | None = None,
+    heartbeat_seconds: float = PLACEHOLDER_HEARTBEAT_SECONDS,
+) -> None:
+    """Довгоживучий placeholder для Compose: живий процес без доменної логіки.
+
+    Друкує стаб-рядок у stderr (як інші стаби), далі логує heartbeat, доки не отримає
+    SIGTERM/SIGINT (`stop_grace_period` у Compose) або поки не встановлено `stop`
+    (тести). Завершується кодом 0 — це штатна зупинка, а не помилка.
+    """
+    typer.echo(f"not implemented: owned by {owner}", err=True)
+    configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
+    log = get_logger(f"collector.{name}")
+    stop_event = threading.Event() if stop is None else stop
+
+    def _request_stop(signum: int, _frame: object) -> None:
+        log.info("placeholder.stop_requested", signal=signal.Signals(signum).name)
+        stop_event.set()
+
+    if threading.current_thread() is threading.main_thread():
+        # PID 1 у контейнері ігнорує SIGTERM без явного handler — ставимо його самі.
+        signal.signal(signal.SIGTERM, _request_stop)
+        signal.signal(signal.SIGINT, _request_stop)
+
+    log.warning(
+        "placeholder.started",
+        component=name,
+        owner=owner,
+        detail="lease/queue logic not implemented yet; process stays alive for Compose",
+    )
+    while not stop_event.wait(heartbeat_seconds):
+        log.info("placeholder.heartbeat", component=name)
+    log.info("placeholder.stopped", component=name)
+
+
+def ensure_mongo_replica_set(
+    client: MongoClient[dict[str, object]],
+    *,
+    replica_set: str,
+    member_host: str,
+    wait_seconds: float = MONGO_PRIMARY_WAIT_SECONDS,
+) -> bool:
+    """Ініціалізувати single-member replica set, якщо ще не ініціалізовано (ідемпотентно).
+
+    Повертає True, якщо `replSetInitiate` виконано зараз, False — якщо RS уже існував.
+    В обох випадках чекає, поки член стане writable primary (`hello`).
+    """
+    try:
+        status = client.admin.command("replSetGetStatus")
+    except OperationFailure as exc:
+        if exc.code != MONGO_NOT_YET_INITIALIZED:
+            raise
+        client.admin.command(
+            "replSetInitiate",
+            {"_id": replica_set, "members": [{"_id": 0, "host": member_host}]},
+        )
+        initiated = True
+    else:
+        if status.get("set") != replica_set:
+            raise ValueError(
+                f"replica set already initialised as {status.get('set')!r}, "
+                f"expected {replica_set!r}; topology changes need a runbook/ADR (§7.5)"
+            )
+        initiated = False
+
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        hello = client.admin.command("hello")
+        if hello.get("isWritablePrimary"):
+            return initiated
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"member {member_host} did not become primary in {wait_seconds}s")
+        time.sleep(0.5)
+
+
 @app.command()
 def version() -> None:
     """Друкує версію пакета, Git SHA (env COLLECTOR_GIT_SHA) і версію схеми контрактів."""
@@ -74,14 +179,63 @@ def db_ensure_mongo(
         bool, typer.Option("--indexes", help="Створити/перевірити indexes.")
     ] = False,
 ) -> None:
-    """Ініціалізує MongoDB replica set, validators та індекси (стаб; owner WP-01B)."""
-    not_implemented("WP-01B")
+    """Ініціалізує MongoDB replica set (реально); validators та індекси — стаб WP-01B.
+
+    Env: `COLLECTOR_MONGO_HOST`/`COLLECTOR_MONGO_PORT`, `COLLECTOR_MONGO_REPLICA_SET`
+    (типово `rs0`), `COLLECTOR_MONGO_ROOT_USERNAME`, `COLLECTOR_MONGO_ROOT_PASSWORD[_FILE]`
+    (Docker secret). Member host у конфігурації RS = `COLLECTOR_MONGO_HOST:PORT`.
+    """
+    configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
+    log = get_logger("collector.db.ensure_mongo")
+    host, port = mongo_address()
+    replica_set = os.environ.get("COLLECTOR_MONGO_REPLICA_SET", "rs0")
+    username = env_or_file("COLLECTOR_MONGO_ROOT_USERNAME")
+    password = env_or_file("COLLECTOR_MONGO_ROOT_PASSWORD")
+    client: MongoClient[dict[str, object]] = MongoClient(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        authSource="admin",
+        directConnection=True,
+        serverSelectionTimeoutMS=10_000,
+    )
+    try:
+        initiated = ensure_mongo_replica_set(
+            client, replica_set=replica_set, member_host=f"{host}:{port}"
+        )
+    except (PyMongoError, ValueError, TimeoutError) as exc:
+        log.error("ensure_mongo.failed", error=f"{type(exc).__name__}: {exc}"[:300])
+        raise typer.Exit(code=1) from exc
+    finally:
+        client.close()
+    log.info(
+        "ensure_mongo.replica_set_ready",
+        replica_set=replica_set,
+        member=f"{host}:{port}",
+        initiated_now=initiated,
+    )
+    if validators or indexes:
+        # $jsonSchema validators та індекси (§8, §9.2) — owner WP-01B.
+        not_implemented("WP-01B")
 
 
 @db_app.command("migrate")
 def db_migrate() -> None:
-    """Застосовує PostgreSQL migrations (стаб; owner WP-01A)."""
-    not_implemented("WP-01A")
+    """Перевіряє з'єднання з PostgreSQL; migrations ще немає (owner WP-01A, Alembic).
+
+    У Compose це one-shot `migrate-postgres`: exit 0 = «дозволити старт api».
+    Перевірка лише TCP (`COLLECTOR_POSTGRES_HOST`/`PORT`), без credentials — драйвер
+    і `alembic upgrade head` додає WP-01A.
+    """
+    configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
+    log = get_logger("collector.db.migrate")
+    status = check_postgres()
+    if not status.ok:
+        log.error("migrate.postgres_unreachable", detail=status.detail)
+        raise typer.Exit(code=1)
+    log.info("migrate.postgres_reachable", detail=status.detail, latency_ms=status.latency_ms)
+    typer.echo("no migrations yet; owner WP-01A")
 
 
 @app.command()
@@ -147,20 +301,37 @@ def contracts_export(
 def worker(
     role: Annotated[WorkerRole, typer.Argument(help="Роль worker pool за §7.6.")],
 ) -> None:
-    """Запускає worker відповідної ролі (стаб; owner WP-01D)."""
-    not_implemented("WP-01D")
+    """Запускає worker відповідної ролі (placeholder-процес; owner WP-01D)."""
+    placeholder_process(f"worker.{role.value}", "WP-01D")
 
 
 @app.command()
 def api() -> None:
-    """Запускає operator/read API (стаб; owner WP-11A)."""
-    not_implemented("WP-11A")
+    """Запускає operator/read API: у WP-00 лише стаб health (owner WP-11A).
+
+    Env: `COLLECTOR_API_HOST` (типово `0.0.0.0` — контейнер без published port),
+    `COLLECTOR_API_PORT` (типово `8000`).
+    """
+    import uvicorn
+
+    configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
+    host = os.environ.get("COLLECTOR_API_HOST", "0.0.0.0")  # noqa: S104 — bind у контейнері
+    port = int(os.environ.get("COLLECTOR_API_PORT", "8000"))
+    uvicorn.run(
+        "collector.api.health:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        # Логи uvicorn ідуть через structlog ProcessorFormatter (collector.core.logging).
+        log_config=None,
+        access_log=False,
+    )
 
 
 @app.command()
 def scheduler() -> None:
-    """Запускає singleton scheduler з advisory lease (стаб; owner WP-01D)."""
-    not_implemented("WP-01D")
+    """Запускає singleton scheduler (placeholder-процес; advisory lease — owner WP-01D)."""
+    placeholder_process("scheduler", "WP-01D")
 
 
 @app.command()

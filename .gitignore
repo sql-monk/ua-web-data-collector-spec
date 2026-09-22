@@ -22,3 +22,8 @@ build/
 htmlcov/
 .artifacts/
 .uv-cache/
+
+# WP-00 PR2: реальні файли Docker secrets (лише *.example та init-скрипт у git)
+deploy/compose/secrets/*
+!deploy/compose/secrets/*.example
+!deploy/compose/secrets/init-secrets.sh

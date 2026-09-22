@@ -1,0 +1,27 @@
+# Override ЛИШЕ для локальної розробки: публікує порти stateful services і api на loopback
+# 127.0.0.1 (не на публічному інтерфейсі, §7.5). Base-файл портів не публікує.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose/dev.override.yml \
+#     --profile core --profile workers up -d --wait
+#
+# Не використовувати на shared/production host: DB/object ports назовні не bind-яться.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${DEV_POSTGRES_PORT:-5432}:5432"
+
+  mongo:
+    ports:
+      - "127.0.0.1:${DEV_MONGO_PORT:-27017}:27017"
+
+  minio:
+    ports:
+      - "127.0.0.1:${DEV_MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${DEV_MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_BROWSER: "on"
+
+  api:
+    ports:
+      - "127.0.0.1:${DEV_API_PORT:-8000}:8000"
