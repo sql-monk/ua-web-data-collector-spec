@@ -8,7 +8,7 @@ from importlib import metadata
 
 from pydantic import BaseModel, ConfigDict
 
-from collector.contracts import CONTRACTS_VERSION
+from collector.contracts._base import CONTRACTS_VERSION
 
 GIT_SHA_ENV = "COLLECTOR_GIT_SHA"
 UNKNOWN_GIT_SHA = "unknown"

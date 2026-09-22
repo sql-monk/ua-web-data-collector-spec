@@ -5,7 +5,7 @@
   "description": "Грошове значення без float: `amount_minor` у мінімальних одиницях + `currency` (§5.1).",
   "properties": {
     "amount_minor": {
-      "description": "Сума в мінімальних одиницях валюти (копійки, центи).",
+      "description": "Сума в мінімальних одиницях валюти (копійки, центи); лише int (§5.1).",
       "title": "Amount Minor",
       "type": "integer"
     },

@@ -4,7 +4,10 @@
 
 - ключі об'єктів відсортовані за code point, без пробілів (`separators=(",", ":")`);
 - `ensure_ascii=False` — UTF-8 без `\\uXXXX`-escape; рядки нормалізуються до Unicode NFC;
-- `datetime` — лише aware UTC, формат `YYYY-MM-DDTHH:MM:SS.ffffffZ` (завжди 6 цифр мікросекунд);
+- `datetime` — лише aware UTC, формат `YYYY-MM-DDTHH:MM:SS.ffffffZ` (завжди 6 цифр мікросекунд,
+  4-значний рік через `isoformat`, не platform `strftime`);
+- ключі, що збігаються після NFC (`é` NFC/NFD), — помилка `CanonicalEncodingError`, а не тихе
+  «останній перемагає»;
 - `date` — `YYYY-MM-DD`; `UUID` — lowercase з дефісами; `Enum` — `.value`;
 - `Decimal` — рядок без експоненти (`format(d, "f")`), нормалізований (`1.50` → `"1.5"`);
 - `bytes` — base64 (standard alphabet, з padding); `float` — лише скінченні (NaN/inf відхиляються);
@@ -31,7 +34,7 @@ from pydantic import BaseModel
 from collector.contracts._base import JsonValue
 
 CANONICAL_JSON_MEDIA_TYPE = "application/json; charset=utf-8"
-DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+DATETIME_FORMAT = "YYYY-MM-DDTHH:MM:SS.ffffffZ"  # документаційна константа; кодування — isoformat
 
 
 class CanonicalEncodingError(ValueError):
@@ -47,7 +50,8 @@ def format_utc_datetime(value: datetime) -> str:
     if offset.total_seconds() != 0:
         msg = f"canonical datetime має бути UTC, отримано offset {offset} у {value!r}"
         raise CanonicalEncodingError(msg)
-    return value.strftime(DATETIME_FORMAT)
+    # isoformat, не strftime: `%Y` на glibc не доповнює рік < 1000 нулями (CR-06).
+    return value.replace(tzinfo=None).isoformat(timespec="microseconds") + "Z"
 
 
 def format_decimal(value: Decimal) -> str:
@@ -93,7 +97,11 @@ def to_canonical_value(value: object) -> JsonValue:
             if not isinstance(key, str):
                 msg = f"canonical object key має бути str, отримано {type(key).__name__}"
                 raise CanonicalEncodingError(msg)
-            result[unicodedata.normalize("NFC", key)] = to_canonical_value(item)
+            nfc_key = unicodedata.normalize("NFC", key)
+            if nfc_key in result:
+                msg = f"canonical object: ключ {nfc_key!r} дублюється після NFC-нормалізації"
+                raise CanonicalEncodingError(msg)
+            result[nfc_key] = to_canonical_value(item)
         return result
     if isinstance(value, set | frozenset):
         items = [to_canonical_value(item) for item in value]

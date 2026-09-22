@@ -80,10 +80,17 @@ class SourceRegistry(ContractModel):
         return frozenset(entry.id for entry in self.sources)
 
 
+def _repo_roots(start: Path) -> Iterable[Path]:
+    """`start` і батьки до першого каталогу з `pyproject.toml` включно (не до кореня ФС)."""
+    for directory in (start, *start.parents):
+        yield directory
+        if (directory / "pyproject.toml").is_file():
+            return
+
+
 def _candidate_roots() -> Iterable[Path]:
-    package_root = Path(__file__).resolve()
-    yield from package_root.parents
-    yield from (Path.cwd().resolve(), *Path.cwd().resolve().parents)
+    yield from _repo_roots(Path(__file__).resolve().parent)
+    yield from _repo_roots(Path.cwd().resolve())
 
 
 def find_source_registry_path(environ: Mapping[str, str] | None = None) -> Path:
@@ -118,8 +125,9 @@ def load_source_registry(path: Path | None = None) -> SourceRegistry:
     return SourceRegistry.model_validate(raw)
 
 
+@lru_cache(maxsize=4)
 def known_source_ids(path: Path | None = None) -> frozenset[str]:
-    """Допустимі `source_id` з реєстру (кешовано)."""
+    """Допустимі `source_id` з реєстру (кешовано — викликається на кожну `SourceIdentity`)."""
     return load_source_registry(path).ids
 
 

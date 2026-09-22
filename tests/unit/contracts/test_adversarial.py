@@ -258,15 +258,22 @@ def test_encode_event_datetime_with_and_without_microseconds() -> None:
     assert whole.event_bytes != micro.event_bytes
     # round-trip зберігає точність до мікросекунди і bytes
     assert encode_event(decode_event(micro.event_bytes)).event_bytes == micro.event_bytes
-    # datetime усередині payload теж канонічний і після round-trip (уже як str) byte-equivalent
-    with_dt = encode_event(event(payload={"d": at()}))
+    # CR-01 (код-рев'ю): payload — strict JSON, datetime у ньому відхиляється на конструюванні;
+    # datetime передається як уже канонічний рядок і після round-trip byte-equivalent
+    with pytest.raises(ValidationError):
+        event(payload={"d": at()})
+    with_dt = encode_event(event(payload={"d": "2026-09-01T12:00:00.000000Z"}))
     assert b'"d":"2026-09-01T12:00:00.000000Z"' in with_dt.event_bytes
     assert encode_event(decode_event(with_dt.event_bytes)).event_bytes == with_dt.event_bytes
 
 
 def test_encode_event_decimal_vs_float_are_distinct_and_round_trip_stable() -> None:
-    """Контракт зафіксовано: Decimal → JSON string (`"1.5"`), float → JSON number (`1.5`)."""
-    as_decimal = encode_event(event(payload={"p": Decimal("1.50")}))
+    """Контракт (після CR-01): у payload Decimal заборонений — лише рядок `"1.5"` або float `1.5`;
+    у `canonical_json_bytes` Decimal → JSON string, float → JSON number."""
+    with pytest.raises(ValidationError):
+        event(payload={"p": Decimal("1.50")})
+    assert canonical_json_bytes({"p": Decimal("1.50")}) == b'{"p":"1.5"}'
+    as_decimal = encode_event(event(payload={"p": "1.5"}))
     as_float = encode_event(event(payload={"p": 1.5}))
     assert b'"p":"1.5"' in as_decimal.event_bytes
     assert b'"p":1.5' in as_float.event_bytes

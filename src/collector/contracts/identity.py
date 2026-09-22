@@ -112,7 +112,7 @@ def entity_id_timestamp(value: UUID) -> datetime:
     """Unix-time (мс) з UUIDv7 як aware UTC datetime."""
     _require_uuid7(value)
     ms = value.int >> 80
-    return datetime.fromtimestamp(ms / 1000, tz=UTC)
+    return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=ms)
 
 
 # --- Source identity --------------------------------------------------------------------------
@@ -176,7 +176,8 @@ def identity_hash_v1(canonical_url: str, stable_attributes: Mapping[str, object]
     Кроки (документ: `docs/contracts.md`):
     1. `canonical_url` — NFC, без пробілів на краях (case не змінюється: URL уже canonical);
     2. кожен атрибут: ключ → NFC + casefold; значення → `str`, NFC, пробіли стиснуті,
-       casefold; порожні значення/`None` відкидаються;
+       casefold; порожні значення/`None` відкидаються; ключі, що збігаються після
+       нормалізації (`Brand`/`brand`), — `ValueError` (помилка викликача, CR-04);
     3. `{"attributes": {...відсортовано...}, "url": ..., "v": 1}` → `canonical_json_bytes`;
     4. результат `v1:<sha256 hex>`.
     """
@@ -187,7 +188,11 @@ def identity_hash_v1(canonical_url: str, stable_attributes: Mapping[str, object]
         text = _normalize_attribute_text(str(raw_value))
         if not text:
             continue
-        attributes[_normalize_attribute_text(key)] = text
+        normalized_key = _normalize_attribute_text(key)
+        if normalized_key in attributes:
+            msg = f"identity_hash_v1: ключ {normalized_key!r} дублюється після NFC+casefold"
+            raise ValueError(msg)
+        attributes[normalized_key] = text
     payload = {
         "v": IDENTITY_HASH_VERSION,
         "url": unicodedata.normalize("NFC", canonical_url).strip(),

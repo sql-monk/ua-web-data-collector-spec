@@ -151,6 +151,37 @@
       "title": "EntityVersionRef",
       "type": "object"
     },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "ReleasePart": {
       "additionalProperties": false,
       "description": "Один Parquet part release (§9.9).",
@@ -482,9 +513,21 @@
     "quality_report": {
       "anyOf": [
         {
-          "additionalProperties": true,
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
           "type": "object"
         },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Inline quality report; альтернатива — quality_report_artifact.",
+      "title": "Quality Report"
+    },
+    "quality_report_artifact": {
+      "anyOf": [
         {
           "$ref": "#/$defs/ArtifactRef"
         },
@@ -492,15 +535,26 @@
           "type": "null"
         }
       ],
-      "default": null,
-      "title": "Quality Report"
+      "default": null
     },
     "reconciliation_result": {
       "anyOf": [
         {
-          "additionalProperties": true,
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
           "type": "object"
         },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Inline reconciliation result; альтернатива — *_artifact.",
+      "title": "Reconciliation Result"
+    },
+    "reconciliation_result_artifact": {
+      "anyOf": [
         {
           "$ref": "#/$defs/ArtifactRef"
         },
@@ -508,8 +562,7 @@
           "type": "null"
         }
       ],
-      "default": null,
-      "title": "Reconciliation Result"
+      "default": null
     },
     "release_id": {
       "format": "uuid",

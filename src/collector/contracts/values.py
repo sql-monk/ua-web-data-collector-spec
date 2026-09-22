@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from decimal import Decimal
 from typing import Annotated
@@ -28,16 +29,11 @@ CurrencyCode = Annotated[str, StringConstraints(pattern=CURRENCY_PATTERN)]
 class Money(ContractModel):
     """Грошове значення без float: `amount_minor` у мінімальних одиницях + `currency` (§5.1)."""
 
-    amount_minor: int = Field(description="Сума в мінімальних одиницях валюти (копійки, центи).")
+    amount_minor: int = Field(
+        strict=True,
+        description="Сума в мінімальних одиницях валюти (копійки, центи); лише int (§5.1).",
+    )
     currency: CurrencyCode
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_float_amount(cls, data: object) -> object:
-        if isinstance(data, dict) and isinstance(data.get("amount_minor"), float):
-            msg = "amount_minor має бути int, float заборонений (§5.1)"
-            raise ValueError(msg)
-        return data
 
 
 class ContactValue(ContractModel):
@@ -68,12 +64,8 @@ class ContactValue(ContractModel):
 
 
 def _matches_e164(value: str) -> bool:
-    return (
-        value.startswith("+")
-        and value[1:].isdigit()
-        and value[1] != "0"
-        and 2 <= len(value) - 1 <= 15
-    )
+    # ASCII-only: `str.isdigit()` приймає не-ASCII цифри, E.164 — лише [0-9] (CR-07).
+    return re.fullmatch(E164_PATTERN, value) is not None
 
 
 def normalize_phone(raw: str, default_region: str = DEFAULT_PHONE_REGION) -> str | None:

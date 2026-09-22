@@ -126,7 +126,9 @@ input: canonical_url: str, stable_attributes: Mapping[str, Any]
        if value is None: skip
        v := casefold(collapse_ws(NFC(str(value))))       # collapse_ws: split() + " ".join
        if v == "": skip
-       attrs[casefold(collapse_ws(NFC(key)))] := v
+       k := casefold(collapse_ws(NFC(key)))
+       if k in attrs: raise ValueError                    # колізія ключів — помилка викликача (CR-04)
+       attrs[k] := v
 3. payload := {"attributes": attrs, "url": url, "v": 1}
 4. bytes   := canonical_json_bytes(payload)              # розділ 6
 5. result  := "v1:" + hex(sha256(bytes))
@@ -164,8 +166,10 @@ research-позначення: `free→full`, `body_unavailable→metadata_only`
 `state_hash`, idempotency keys) і для `domain.changed` event bytes (R-37/R-42):
 
 - об'єкти: ключі відсортовані за code point, `separators=(",", ":")`, `ensure_ascii=False`;
-- рядки та ключі: Unicode NFC;
-- `datetime`: лише aware UTC → `YYYY-MM-DDTHH:MM:SS.ffffffZ` (завжди 6 цифр); naive або offset ≠ 0 —
+- рядки та ключі: Unicode NFC; два ключі, що збігаються після NFC (`é` у NFC/NFD), — помилка
+  `CanonicalEncodingError`, а не тихе «останній перемагає» (CR-03);
+- `datetime`: лише aware UTC → `YYYY-MM-DDTHH:MM:SS.ffffffZ` (завжди 6 цифр мікросекунд, 4-значний
+  рік через `isoformat`, не platform `strftime` — CR-06); naive або offset ≠ 0 —
   `CanonicalEncodingError`; `date` → ISO `YYYY-MM-DD`;
 - `UUID` → lowercase з дефісами; `Enum` → `.value`; `bool`/`int`/`null` як у JSON;
 - `Decimal` → `format(normalize(), "f")` без експоненти (`1.50`→`"1.5"`, `1E+2`→`"100"`, `-0`→`"0"`);
@@ -187,6 +191,14 @@ media type `application/vnd.ua-collector.domain-changed.v1+json`; якщо bytes
 окремі ключі (переміщення поля між блоками змінює hash). `CurrentDocumentBase` відхиляє
 документ, у якому `state_hash` не збігається з обчисленим. Lineage/time/`projection_version`
 у hash не входять — heartbeat без зміни state дає той самий hash.
+
+**Strict JSON у блоках (CR-01).** `core`, `attributes`, `latest_state` (і `DomainChangedEvent.payload`)
+типізовані як рекурсивний `JsonValue` = `str | int | float(finite) | bool | None | list | dict[str, …]`
+у strict-режимі: `datetime`, `Decimal`, `UUID`, `bytes`, NaN/inf відхиляються **на конструюванні**.
+Час у блоках — лише рядок у canonical-форматі (`…T12:00:00.000000Z`), гроші — `{"amount_minor": int,
+"currency": str}`. Наслідок: `state_hash` рахується над тими самими значеннями, що й після
+JSON/BSON round-trip, і документ, який пройшов validation при записі, читається назад без
+«зміни стану» (тест `test_state_hash_survives_json_round_trip`).
 
 ## 8. Часова модель (§9.6)
 
@@ -213,17 +225,27 @@ inline bytes ≤ 256 KiB і `event_sha256 == sha256(event_bytes)`. `ProjectionAc
 ## 10. Resolution (§9.8) і release (§9.9)
 
 - `project_groups(decisions)` — детермінований replay у порядку
-  `(effective_at, recorded_at, decision_version, decision_id)`; рішення, на яке хтось посилається
-  через `supersedes_decision_id`, пропускається разом із ефектом. `manual_block` блокує наступні
+  `(effective_at, recorded_at, decision_version, decision_id)`. `manual_block` блокує наступні
   auto `merge` для будь-якої пари members (доки блок не superseded); `manual_link` блоку не
-  підлягає; `unmerge` виводить members із груп; `reject` груп не змінює.
+  підлягає; `unmerge` виводить members із груп; `reject` груп не змінює. Складність
+  O(D + Σ|affected|) завдяки зворотному індексу група → members (CR-02).
+- **`decision_version` і `supersedes_decision_id` (CR-09).** `decision_version` — версія *того
+  самого* рішення (`decision_id`): у replay бере участь лише найвища версія кожного
+  `decision_id`, старі версії не replay-яться (виправлення рішення = нова версія). Скасування
+  *іншого* рішення — окреме рішення з `supersedes_decision_id`. Supersession діє лише від
+  **ефективного** (не superseded) рішення й обчислюється як fixed point: у ланцюжку A ← B ← C
+  (C supersede B, B supersede A) B не діє, отже A **відновлюється**; A ← B ← C ← D знову знімає A.
+  Цикл supersession — `ValueError`; dangling посилання допускається і потрапляє у
+  `superseded_decision_ids`. Тест: `test_code_review_fixes.py::test_supersedes_chain_restores_block_after_double_cancel`.
 - `ReleaseManifest`: переходи `draft→building→validating→published→superseded`, з будь-якого
   стану до `published` можливий `failed`; `failed`/`superseded` — термінальні. `published`
   immutable: `validate_manifest_update` дозволяє змінити лише `state` і `superseding_release_id`;
   `superseded` (колишній published) — жодне поле, крім ще не заданого `superseding_release_id`.
   `transition_release(..., **changes)` відхиляє `state`/`release_id` у `changes`.
-  `published/superseded` вимагають `published_at`, непорожні `parts`, `quality_report`,
-  `reconciliation_result`.
+  `published/superseded` вимагають `published_at`, непорожні `parts`, `quality_report` **або**
+  `quality_report_artifact`, `reconciliation_result` **або** `reconciliation_result_artifact`
+  (inline JSON і `ArtifactRef` — окремі поля, не union, щоб посилання не «схлопувалось» після
+  round-trip — CR-05; задати обидва для одного звіту не можна).
 
 ## 11. Тести
 

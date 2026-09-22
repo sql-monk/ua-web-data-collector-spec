@@ -9,8 +9,11 @@
 from __future__ import annotations
 
 from collector.contracts._base import (
+    CONTRACTS_VERSION,
     ContractModel,
     JsonObject,
+    JsonValue,
+    NonEmptyStr,
     SchemaVersion,
     VersionedDocument,
     parse_schema_version,
@@ -134,9 +137,6 @@ from collector.contracts.values import (
     normalize_phone,
 )
 
-CONTRACTS_VERSION = "1.0"
-"""Версія набору shared-контрактів (для `collector version` і release manifest)."""
-
 __all__ = [
     "CANONICAL_JSON_MEDIA_TYPE",
     "CONTRACTS_VERSION",
@@ -169,10 +169,12 @@ __all__ = [
     "FetchOutcome",
     "IdentityHash",
     "JsonObject",
+    "JsonValue",
     "Lineage",
     "MeasuredValue",
     "Money",
     "NormalizedArtifactRef",
+    "NonEmptyStr",
     "NormalizedUrl",
     "ObservationReason",
     "ProjectionAcknowledgement",

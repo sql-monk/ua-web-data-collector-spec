@@ -13,14 +13,18 @@ from uuid import UUID
 
 from pydantic import Field, StringConstraints, model_validator
 
-from collector.contracts._base import ContractModel, JsonObject, SchemaVersion, VersionedDocument
+from collector.contracts._base import (
+    ContractModel,
+    JsonObject,
+    NonEmptyStr,
+    SchemaVersion,
+    VersionedDocument,
+)
 from collector.contracts.artifacts import ArtifactRef, ArtifactUri
 from collector.contracts.enums import ReleaseState
 from collector.contracts.identity import EntityId, Sha256Hex
 from collector.contracts.source_registry import SourceIdString
 from collector.contracts.temporal import UtcDatetime
-
-NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
 
 RELEASE_TRANSITIONS: Final[dict[ReleaseState, frozenset[ReleaseState]]] = {
     ReleaseState.DRAFT: frozenset({ReleaseState.BUILDING, ReleaseState.FAILED}),
@@ -136,8 +140,14 @@ class ReleaseManifest(VersionedDocument):
     config_hash: Sha256Hex = Field(description="Hash sanitized config (без секретів).")
     build_command: NonEmptyStr
     parts: list[ReleasePart] = Field(default_factory=list)
-    quality_report: JsonObject | ArtifactRef | None = None
-    reconciliation_result: JsonObject | ArtifactRef | None = None
+    quality_report: JsonObject | None = Field(
+        default=None, description="Inline quality report; альтернатива — quality_report_artifact."
+    )
+    quality_report_artifact: ArtifactRef | None = None
+    reconciliation_result: JsonObject | None = Field(
+        default=None, description="Inline reconciliation result; альтернатива — *_artifact."
+    )
+    reconciliation_result_artifact: ArtifactRef | None = None
     previous_release_id: UUID | None = None
     superseding_release_id: UUID | None = None
 
@@ -150,14 +160,28 @@ class ReleaseManifest(VersionedDocument):
             if not inclusion.reason:
                 msg = f"excluded/degraded source {inclusion.source_id} потребує reason"
                 raise ValueError(msg)
+        for name, inline, artifact in (
+            ("quality_report", self.quality_report, self.quality_report_artifact),
+            (
+                "reconciliation_result",
+                self.reconciliation_result,
+                self.reconciliation_result_artifact,
+            ),
+        ):
+            if inline is not None and artifact is not None:
+                msg = f"{name}: задайте або inline, або {name}_artifact, не обидва (CR-05)"
+                raise ValueError(msg)
         if self.state in {ReleaseState.PUBLISHED, ReleaseState.SUPERSEDED}:
             missing = [
                 name
                 for name, value in (
                     ("published_at", self.published_at),
                     ("parts", self.parts),
-                    ("quality_report", self.quality_report),
-                    ("reconciliation_result", self.reconciliation_result),
+                    ("quality_report", self.quality_report or self.quality_report_artifact),
+                    (
+                        "reconciliation_result",
+                        self.reconciliation_result or self.reconciliation_result_artifact,
+                    ),
                 )
                 if not value
             ]

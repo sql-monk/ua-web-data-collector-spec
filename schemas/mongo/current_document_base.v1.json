@@ -86,6 +86,37 @@
       "title": "EntityTime",
       "type": "object"
     },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "Lineage": {
       "additionalProperties": false,
       "description": "Блок `lineage` (§9.2): fetch → raw → parser → projection task.",
@@ -179,13 +210,17 @@
       "type": "string"
     },
     "attributes": {
-      "additionalProperties": true,
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
       "description": "Source-specific поля.",
       "title": "Attributes",
       "type": "object"
     },
     "core": {
-      "additionalProperties": true,
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
       "description": "Versioned normalized поля домену.",
       "title": "Core",
       "type": "object"
@@ -209,7 +244,9 @@
       "type": "string"
     },
     "latest_state": {
-      "additionalProperties": true,
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
       "description": "Price/status/mileage summary, якщо застосовно.",
       "title": "Latest State",
       "type": "object"

@@ -361,3 +361,56 @@ $ uv run pre-commit run --all-files
 (усі hooks Passed)
 ```
 
+## Відповіді на код-рев'ю (gate 3)
+
+Звіт `docs/plan/reports/WP-01C/code-review.md` (approve; 2 medium, 8 low, 7 спрощень).
+Виправлення — коміт `fix(wp-01c): code review findings CR-01..CR-09 and simplifications`.
+
+| ID | Severity | Статус | Що зроблено / аргумент |
+|---|---|---|---|
+| CR-01 | medium | **fixed** | `_base.JsonValue` — рекурсивний PEP 695 alias strict-JSON (`Strict()` str/int/bool, float через `BeforeValidator` + `AllowInfNan(False)`, list, `dict[str, JsonValue]`, None); `JsonObject = dict[str, JsonValue]` для `core/attributes/latest_state` і `DomainChangedEvent.payload`. `datetime`/naive/`Decimal`/`UUID`/`bytes`/NaN відхиляються на конструюванні; `state_hash` стабільний після JSON round-trip. Snapshots `current_document_base`, `domain_changed_event`, `release_manifest` оновлено (`$defs/JsonValue`). Тести: `test_code_review_fixes.py::test_current_document_rejects_non_json_scalars_in_blocks[5]`, `test_state_hash_survives_json_round_trip`, `test_domain_event_payload_is_strict_json`. Два тести тестувальника (`test_adversarial.py`: `test_encode_event_datetime_with_and_without_microseconds`, `test_encode_event_decimal_vs_float_are_distinct_and_round_trip_stable`) фіксували стару поведінку (datetime/Decimal у payload) — адаптовано до нового контракту (очікують `ValidationError`; canonical-кодування Decimal перевіряється через `canonical_json_bytes`) — єдина правка чужих тестів, обумовлена обов'язковим CR-01. |
+| CR-02 | medium | **fixed** | `project_groups`: зворотний індекс `groups: dict[UUID, set[UUID]]` + `membership`; `affected = members ∪ ⋃ groups[membership[m]]`; перевірка блоку — `any(a in affected and b in affected for a, b in blocked)`. O(D + Σ affected). Тест `test_project_groups_scales_linearly_on_disjoint_merges`: 20 000 disjoint merge — 0.68 s локально (пороги: < 5 s і < 40× часу для 2 000; квадратичний давав би ×100), + `test_project_groups_chained_merges_pull_whole_groups_via_index`. |
+| CR-03 | low | **fixed** | `to_canonical_value`: ключ, що збігається після NFC з уже вставленим → `CanonicalEncodingError` (обрано «відхиляти», задокументовано в `docs/contracts.md` §6). Тест `test_canonical_rejects_keys_colliding_after_nfc`. |
+| CR-04 | low | **fixed** | `identity_hash_v1`: колізія ключів після NFC+casefold → `ValueError` (помилка викликача); golden fixtures незмінні; документ §4.3. Тест `test_identity_hash_rejects_keys_colliding_after_casefold`. |
+| CR-05 | low | **fixed** | `ReleaseManifest`: окремі поля `quality_report: JsonObject \| None` / `quality_report_artifact: ArtifactRef \| None` (те саме для `reconciliation_result`); validator: не обидва; published/superseded вимагають одне з двох. Snapshot `release_manifest.v1.json` оновлено (minor-сумісно: нові optional поля, union звужено до object — до появи споживачів). Тест `test_release_report_artifact_ref_survives_round_trip`. |
+| CR-06 | low | **fixed** | `format_utc_datetime` через `isoformat(timespec="microseconds") + "Z"` замість `strftime("%Y…")` — 4-значний рік на всіх платформах. Тест `test_format_utc_datetime_pads_year_without_strftime` (`0999-…`). |
+| CR-07 | low | **fixed** | `_matches_e164` — `re.fullmatch(E164_PATTERN, …)` (ASCII-only); мертва константа використана. Тест `test_e164_validation_is_ascii_only`. |
+| CR-08 / T-04 | low | **fixed** | `Money.amount_minor: int = Field(strict=True)`; before-validator прибрано. Тест `test_money_strict_rejects_bool_str_float_decimal`. |
+| CR-09 | low (spec-mismatch) | **fixed** | Семантика зафіксована у `docs/contracts.md` §10 і docstring `project_groups`: (а) у replay бере участь лише найвища `decision_version` кожного `decision_id`; (б) supersession діє лише від ефективного рішення (fixed point): A ← B ← C відновлює A, A ← B ← C ← D знову знімає; цикл → `ValueError`; dangling — у `superseded_decision_ids` (тест тестувальника незмінний). Тести `test_supersedes_chain_restores_block_after_double_cancel`, `test_supersedes_cycle_is_rejected`, `test_only_latest_decision_version_is_replayed`. |
+| CR-10 | low | **accepted** (owner WP-01C, 2026-09-22) | `_next_strictly_later` O(n²) лише при багатьох версіях однієї сутності з однаковим значенням осі; для однієї сутності n — сотні, не тисячі. Межа задокументована в docstring `build_intervals` («для версій однієї сутності; bulk-exporter WP-11A не має переносити підхід на всі сутності»). |
+| Спрощення: `NonEmptyStr` ×2 | — | **fixed** | винесено в `_base.NonEmptyStr`, експортується з `collector.contracts`. |
+| Спрощення: ліміт у `EncodedEvent` і `encode_event` | — | **accepted** (WP-01C, 2026-09-22) | Дві перевірки навмисно: `encode_event` кидає типізований `EventTooLargeError` до побудови моделі (викликач ловить і переносить payload в artifact), validator захищає пряме конструювання `EncodedEvent` з bytes із receipt. Один рядок дублювання, різні типи винятків. |
+| Спрощення: `EntityTime` дублює `ingested_at ≥ fetched_at` | — | **accepted** (WP-01C, 2026-09-22) | `EntityTime` — плоский блок `time` §9.2, не композиція `SystemTime`; дублювання однієї умови дешевше за зміну shape документа. |
+| Спрощення: `SourceRegistry.ids` на кожну валідацію | — | **fixed** | `known_source_ids` тепер `lru_cache` — `frozenset` будується один раз на шлях. |
+| Спрощення: `core/version.py` тягне весь пакет | — | **fixed** | `CONTRACTS_VERSION` перенесено в `_base.py`; `version.py` імпортує `collector.contracts._base`; `collector.contracts.CONTRACTS_VERSION` лишається публічним re-export. |
+| Спрощення: `entity_id_timestamp` через float | — | **fixed** | `datetime(1970,1,1,UTC) + timedelta(milliseconds=ms)`. Тест `test_entity_id_timestamp_exact_milliseconds`. |
+| Спрощення: `_candidate_roots` до кореня ФС | — | **fixed** | `_repo_roots(start)`: пошук угору зупиняється на першому каталозі з `pyproject.toml`; для встановленого пакета в site-packages сканування обмежене; env `COLLECTOR_SOURCE_REGISTRY` лишається основним для Docker. |
+| Незакомічена зміна `implementation.md` | — | not applicable | trailing newline від pre-commit `end-of-file-fixer`; увійшла в цей коміт. |
+
+Файл рев'юера `docs/plan/reports/WP-01C/code-review.md` був untracked у worktree — закомічено разом
+із виправленнями, щоб branch ніс повний ланцюжок звітів.
+
+Прогін після виправлень (Windows, `PYTHONUTF8=1`):
+
+```text
+$ uv sync --frozen
+Checked 46 packages in 19ms
+$ uv run ruff check .
+All checks passed!
+$ uv run ruff format --check .
+101 files already formatted
+$ uv run mypy src
+Success: no issues found in 38 source files
+$ uv run pytest -m "not live" -q
+SKIPPED [1] tests/unit/test_network_blocked.py:27: Windows: loopback потрібен asyncio
+474 passed, 1 skipped, 6 warnings in 14.91s          (0 failed, 0 xfailed)
+$ uv run collector contracts export --check
+schemas up to date: schemas
+$ uv run pre-commit run --all-files
+11 hooks Passed
+```
+
+Нових тестів: +20 (`tests/unit/contracts/test_code_review_fixes.py`); змінені snapshots:
+`schemas/common/money.v1.json` (description), `schemas/events/domain_changed_event.v1.json`,
+`schemas/mongo/current_document_base.v1.json`, `schemas/releases/release_manifest.v1.json`
+(`$defs/JsonValue`, `quality_report_artifact`/`reconciliation_result_artifact`).

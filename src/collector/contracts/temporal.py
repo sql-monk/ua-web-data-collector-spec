@@ -217,6 +217,10 @@ def build_intervals(versions: Sequence[VersionTimes]) -> list[VersionInterval]:
     - late arrival (менший `effective_at`, більший `ingested_at`) вставляється у valid-історію,
       не переписуючи known-вісь попередніх версій. Порядок вхідного списку не має значення;
       результат відсортовано за `projection_version`.
+
+    Межа (CR-10): вхід — версії *однієї* сутності (десятки–сотні); `_next_strictly_later`
+    O(n²) при багатьох версіях з однаковим значенням осі. Bulk-exporter (WP-11A) викликає
+    функцію per-entity, а не на всій вибірці.
     """
     if len({v.projection_version for v in versions}) != len(versions):
         msg = "projection_version мають бути унікальними"

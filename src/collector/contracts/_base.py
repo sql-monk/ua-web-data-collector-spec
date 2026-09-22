@@ -11,17 +11,51 @@ from __future__ import annotations
 
 from typing import Annotated, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    AllowInfNan,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    Strict,
+    StringConstraints,
+    model_validator,
+)
+
+CONTRACTS_VERSION = "1.0"
+"""Версія набору shared-контрактів (для `collector version` і release manifest)."""
 
 SCHEMA_VERSION_PATTERN = r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 
 SchemaVersion = Annotated[str, StringConstraints(pattern=SCHEMA_VERSION_PATTERN)]
 """Версія контракту `major.minor` (§9.4): minor — сумісне додавання, major — breaking."""
 
-JsonScalar = str | int | float | bool | None
-JsonValue = JsonScalar | list[Any] | dict[str, Any]
-JsonObject = dict[str, Any]
-"""Bounded JSON-об'єкт (`core`, `attributes`, `latest_state`, event payload)."""
+NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
+
+
+def _require_real_float(value: object) -> object:
+    # Strict float у Pydantic приймає int і Decimal; для JSON-скаляра потрібен саме float.
+    if not isinstance(value, float):
+        msg = f"очікувався float, отримано {type(value).__name__}"
+        raise ValueError(msg)
+    return value
+
+
+StrictFiniteFloat = Annotated[float, BeforeValidator(_require_real_float), AllowInfNan(False)]
+JsonScalar = (
+    Annotated[str, Strict()]
+    | Annotated[int, Strict()]
+    | StrictFiniteFloat
+    | Annotated[bool, Strict()]
+    | None
+)
+"""Strict JSON-скаляр: `datetime`/`Decimal`/`UUID`/`bytes` і NaN/inf відхиляються (CR-01)."""
+
+type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
+"""Рекурсивне strict-JSON значення — те, що без втрат переживає JSON/BSON round-trip."""
+
+JsonObject = dict[str, JsonValue]
+"""Bounded strict-JSON об'єкт (`core`, `attributes`, `latest_state`, event payload)."""
 
 
 def parse_schema_version(value: str) -> tuple[int, int]:
