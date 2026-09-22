@@ -8,7 +8,7 @@
 
 | WP | Під-PR | Branch | Стан | Останній gate | Примітка |
 |---|---|---|---|---|---|
-| WP-00 | PR1 python+CI | `wp/00-1-python-ci` | spec_review | код-рев'ю approve (1 medium + 10 low закрито/accepted): `reports/WP-00/code-review-pr1.md` | картка `docs/plan/cards/WP-00.md`; CLI = Typer |
+| WP-00 | PR1 python+CI | `wp/00-1-python-ci` | docs | пострев'ю accept (0 missing, 5 partial → наступні етапи): `reports/WP-00/spec-review-pr1.md` | картка `docs/plan/cards/WP-00.md`; CLI = Typer |
 | WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | pending | — | після merge PR1 |
 | WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | pending | — | після merge PR2 |
 | WP-01C | — | `wp/01c-contracts` | pending | — | стартує з `wp/00-1` після появи layout |
