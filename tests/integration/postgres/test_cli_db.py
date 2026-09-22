@@ -24,6 +24,27 @@ def _dsn(settings: PostgresSettings) -> str:
     return settings.url.render_as_string(hide_password=False)
 
 
+def _assert_no_password_in_output(settings: PostgresSettings, output: str) -> None:
+    """Пароля немає у виводі CLI.
+
+    Admin-DSN може бути без пароля (`trust` auth — саме так налаштований service container у
+    CI job `integration-postgres`), тому порівняння з `None` неприпустиме (H-1). Щоб гарантія
+    «DSN без пароля в логах» перевірялась і в беспарольній конфігурації, тест підставляє
+    синтетичний пароль у DSN і повторює команду.
+    """
+    password = settings.url.password
+    if password is None:
+        # `trust` auth (конфігурація CI): маскувати нічого — гарантію перевіряє окремий тест,
+        # який підставляє синтетичний пароль у той самий DSN.
+        return
+    assert password not in output, output
+    assert "***" in output, output  # redacted_dsn лишає маркер на місці пароля
+
+
+def _with_password(settings: PostgresSettings, password: str) -> str:
+    return settings.url.set(password=password).render_as_string(hide_password=False)
+
+
 def test_db_migrate_check_and_roles_from_env(pg_empty_database: PostgresSettings) -> None:
     env = {"COLLECTOR_POSTGRES_DSN": _dsn(pg_empty_database)}
     check_before = runner.invoke(app, ["db", "migrate", "--check"], env=env)
@@ -34,7 +55,7 @@ def test_db_migrate_check_and_roles_from_env(pg_empty_database: PostgresSettings
     assert migrate.exit_code == 0, migrate.output
     assert f"empty -> {head_revision()}" in migrate.output
     assert migrate.output.count("partition created: audit_log_y") == 2
-    assert pg_empty_database.url.password not in migrate.output
+    _assert_no_password_in_output(pg_empty_database, migrate.output)
 
     check_after = runner.invoke(app, ["db", "migrate", "--check"], env=env)
     assert check_after.exit_code == 0, check_after.output
@@ -61,6 +82,30 @@ def test_db_migrate_reads_dsn_file_over_inline(
     result = runner.invoke(app, ["db", "migrate"], env=env)
     assert result.exit_code == 0, result.output
     assert f"-> {head_revision()}" in result.output
+
+
+def test_db_migrate_never_prints_password_even_when_dsn_has_one(
+    pg_empty_database: PostgresSettings,
+) -> None:
+    """H-1: гарантія «пароль не потрапляє в логи» перевіряється і на беспарольному admin-DSN —
+    для цього в DSN підставляється синтетичний пароль (сервер його не вимагає при `trust`,
+    а при `scram` це справжній пароль тестового користувача)."""
+    password = "s3cret-should-never-be-logged"  # noqa: S105 — синтетичний, лише для перевірки
+    env = {"COLLECTOR_POSTGRES_DSN": _with_password(pg_empty_database, password)}
+    migrate = runner.invoke(app, ["db", "migrate", "--partitions-ahead", "0"], env=env)
+    if migrate.exit_code != 0:
+        # `scram`-сервер відхилить синтетичний пароль — вивід має бути охайним (L-3), без
+        # traceback, і сам пароль у ньому не зʼявляється.
+        assert "postgres error" in migrate.output, migrate.output
+        assert "Traceback" not in migrate.output
+        assert password not in migrate.output
+        return
+    assert password not in migrate.output
+    assert "***" in migrate.output, migrate.output
+    assert "Traceback" not in migrate.output
+
+    roles = runner.invoke(app, ["db", "roles"], env=env)
+    assert password not in roles.output
 
 
 def test_db_migrate_unreachable_server_exits_1_without_traceback() -> None:

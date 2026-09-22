@@ -40,7 +40,12 @@ async def migrate_database(
     """`alembic upgrade head` (+ місячні партиції) або лише `alembic check` (`check_only`).
 
     Transaction boundary: upgrade + партиції — одна транзакція (DDL у PostgreSQL
-    транзакційний); check — окреме read-only з'єднання.
+    транзакційний); check — окреме з'єднання, транзакція якого не комітиться.
+
+    `check_only` **нічого не лишає у схемі, але не є read-only за правами** (L-4 код-рев'ю):
+    `alembic check` конфігурує `MigrationContext`, який на порожній БД створює
+    `alembic_version` (усе відкочується разом із з'єднанням). Тому команду треба запускати тією
+    самою роллю, що й міграції (`CREATE` на схемі), а не моніторинговою read-only роллю.
     """
     own_engine = engine is None
     eng = engine or create_engine(

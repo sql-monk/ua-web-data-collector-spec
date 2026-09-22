@@ -19,7 +19,11 @@ from collector.persistence.postgres.migrations import (
     upgrade_to_head,
 )
 from collector.persistence.postgres.models import Base
-from collector.persistence.postgres.partitions import ensure_month_partitions
+from collector.persistence.postgres.partitions import (
+    default_partition_name,
+    default_partition_row_count,
+    ensure_month_partitions,
+)
 from collector.persistence.postgres.repositories.audit import append_audit
 
 pytestmark = pytest.mark.integration
@@ -115,14 +119,23 @@ async def test_month_partitions_are_created_and_idempotent(pg_engine: AsyncEngin
     assert again == []
 
 
-async def test_audit_log_insert_without_partition_fails_clearly(pg_engine: AsyncEngine) -> None:
+async def test_partitioned_table_without_default_still_fails_clearly(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Контракт «зрозуміла помилка замість auto-create» лишається для таблиць **без** DEFAULT
+    (PR2: `fetches`, `raw_objects`, `change_events`, `outbox_events` — рішення по кожній
+    приймається окремо). Перевірено на тимчасовій партиційованій таблиці, щоб не залежати від
+    наявності DEFAULT в `audit_log` (M-5)."""
     async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE probe_partitioned (created_at timestamptz NOT NULL, v int) "
+                "PARTITION BY RANGE (created_at)"
+            )
+        )
         with pytest.raises(DBAPIError, match="no partition of relation"):
             await conn.execute(
-                text(
-                    "INSERT INTO audit_log (created_at, actor, action, resource_type, resource_id)"
-                    " VALUES ('2031-01-01T00:00:00Z', 'a', 'b', 'c', 'd')"
-                )
+                text("INSERT INTO probe_partitioned VALUES ('2031-01-01T00:00:00+00', 1)")
             )
 
 
@@ -147,3 +160,104 @@ async def test_audit_log_is_append_only(pg_session: AsyncSession) -> None:
         with pytest.raises(DBAPIError, match="append-only"):
             async with pg_session.begin():
                 await pg_session.execute(text(statement), {"id": audit_id})
+
+
+@pytest.mark.parametrize("session_timezone", ["UTC", "Europe/Kyiv", "America/Los_Angeles"])
+async def test_month_partition_bounds_are_utc_regardless_of_session_timezone(
+    pg_engine: AsyncEngine, session_timezone: str
+) -> None:
+    """M-1: межі партицій не залежать від `TimeZone` сесії, що виконує DDL.
+
+    Date-літерали інтерпретувались у часовому поясі сесії, тож партиції з різних сесій або
+    перекривались (`would overlap` ламав усю `collector db migrate`), або лишали діру в
+    кілька годин, у яку не можна вставити рядок.
+    """
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f"SET LOCAL TIME ZONE '{session_timezone}'"))
+        await ensure_month_partitions(conn, months_ahead=1, start=date(2033, 6, 1))
+    async with pg_engine.connect() as conn:
+        bounds = dict(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT c.relname, pg_get_expr(c.relpartbound, c.oid) FROM pg_class c "
+                        "JOIN pg_inherits i ON i.inhrelid = c.oid "
+                        "WHERE i.inhparent = 'audit_log'::regclass AND c.relname LIKE '%y2033%'"
+                    )
+                )
+            ).all()
+        )
+    assert (
+        "FROM ('2033-06-01 00:00:00+00') TO ('2033-07-01 00:00:00+00')"
+        in bounds["audit_log_y2033m06"]
+    )
+    assert (
+        "FROM ('2033-07-01 00:00:00+00') TO ('2033-08-01 00:00:00+00')"
+        in bounds["audit_log_y2033m07"]
+    )
+
+
+async def test_partitions_created_from_different_timezones_neither_overlap_nor_leave_gaps(
+    pg_engine: AsyncEngine,
+) -> None:
+    """M-1, обидва відтворені рев'юером сценарії: сусідні місяці з різних сесій."""
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        await ensure_month_partitions(conn, months_ahead=0, start=date(2034, 3, 1))
+    async with pg_engine.begin() as conn:
+        # Раніше саме тут падало `would overlap partition "audit_log_y2034m03"`.
+        await conn.execute(text("SET LOCAL TIME ZONE 'Europe/Kyiv'"))
+        await ensure_month_partitions(conn, months_ahead=0, start=date(2034, 4, 1))
+
+    # Межа місяця у UTC: рядок 2034-03-31T22:00Z має потрапити саме у березневу партицію,
+    # а 2034-04-01T00:00Z — у квітневу; діри між ними немає.
+    async with pg_engine.begin() as conn:
+        for moment, expected in (
+            (datetime(2034, 3, 31, 22, 0, tzinfo=UTC), "audit_log_y2034m03"),
+            (datetime(2034, 4, 1, 0, 0, tzinfo=UTC), "audit_log_y2034m04"),
+        ):
+            landed = await conn.scalar(
+                text(
+                    "INSERT INTO audit_log (created_at, actor, action, resource_type, resource_id)"
+                    " VALUES (:moment, 'a', 'b', 'c', 'd') RETURNING tableoid::regclass::text"
+                ),
+                {"moment": moment},
+            )
+            assert landed == expected, moment
+
+
+async def test_audit_log_default_partition_accepts_rows_without_monthly_partition(
+    pg_engine: AsyncEngine,
+) -> None:
+    """M-5: пропущене обслуговування не зупиняє audited дії — рядок іде в DEFAULT-партицію."""
+    async with pg_engine.begin() as conn:
+        landed = await conn.scalar(
+            text(
+                "INSERT INTO audit_log (created_at, actor, action, resource_type, resource_id)"
+                " VALUES ('2039-01-01T00:00:00+00', 'a', 'b', 'c', 'd')"
+                " RETURNING tableoid::regclass::text"
+            )
+        )
+        assert landed == default_partition_name("audit_log")
+        assert await default_partition_row_count(conn, "audit_log") == 1
+
+
+async def test_fresh_upgrade_head_without_maintenance_can_write_audit(
+    pg_empty_database: PostgresSettings,
+) -> None:
+    """M-5, сценарій рев'ю: чистий `alembic upgrade head` (перший крок CI) без жодного
+    `db migrate` — `append_audit` має працювати, інакше control plane стає read-only."""
+    engine = create_async_engine(pg_empty_database.url, poolclass=None)
+    try:
+        async with engine.begin() as conn:
+            await upgrade_to_head(conn)
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO audit_log (created_at, actor, action, resource_type, resource_id)"
+                    " VALUES (now(), 'operator', 'worker_pool.scale', 'worker_pool', 'fetch')"
+                )
+            )
+            assert await conn.scalar(text("SELECT count(*) FROM audit_log")) == 1
+    finally:
+        await engine.dispose()

@@ -268,7 +268,13 @@ async def test_block_origin_with_live_permits_denies_new_but_keeps_existing(
         still_blocked = await limiter.acquire_permit(pg_session, ORIGIN_A, "b", 30, now=T0)
     assert still_blocked.reason == "blocked"
     async with pg_session.begin():
-        after = await limiter.acquire_permit(pg_session, ORIGIN_A, "b", 30, now=until)
+        # Після gate 3 (M-4) блок скидає накопичення токенів: у момент `until` видачі ще немає,
+        # вона зʼявляється після звичайного refill (10 rps → перший токен через 0.1 с).
+        at_deadline = await limiter.acquire_permit(pg_session, ORIGIN_A, "b", 30, now=until)
+        assert not at_deadline.granted and at_deadline.reason == "rate"
+        after = await limiter.acquire_permit(
+            pg_session, ORIGIN_A, "b", 30, now=until + timedelta(seconds=1)
+        )
     assert after.granted
 
 

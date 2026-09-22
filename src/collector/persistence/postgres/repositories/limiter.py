@@ -195,17 +195,32 @@ async def acquire_permit(
 
 
 async def release_permit(
-    session: AsyncSession, permit_id: UUID, *, now: datetime | None = None
+    session: AsyncSession,
+    permit_id: UUID,
+    *,
+    owner_instance: str | None = None,
+    now: datetime | None = None,
 ) -> bool:
     """Повертає concurrency slot; ідемпотентно: `True` лише при першому release, `False` для
-    уже released/expired/невідомого permit. Transaction boundary: викликач."""
+    уже released/expired/невідомого permit.
+
+    `owner_instance` (рекомендовано для workers) додає предикат власника: помилка у власному
+    стані викликача — переплутаний `permit_id`, повтор зі старої черги — тоді не звільняє чужий
+    slot і не дає origin зайвого паралельного запиту (L-5 код-рев'ю). Без нього поведінка
+    попередня (release за id), бо maintenance-sweeper власника не знає.
+
+    Transaction boundary: викликач.
+    """
     current = resolve_now(now)
-    released = await session.scalar(
+    stmt = (
         update(OriginRatePermit)
         .where(OriginRatePermit.permit_id == permit_id, OriginRatePermit.released_at.is_(None))
         .values(released_at=current, release_reason="released")
         .returning(OriginRatePermit.permit_id)
     )
+    if owner_instance is not None:
+        stmt = stmt.where(OriginRatePermit.owner_instance == owner_instance)
+    released = await session.scalar(stmt)
     return released is not None
 
 
@@ -238,7 +253,15 @@ async def block_origin(
     now: datetime | None = None,
 ) -> OriginRateBucket:
     """429/`Retry-After`/challenge: жоден permit до `until` (не скорочує вже довший block).
-    Transaction boundary: викликач."""
+
+    Скидає стан refill: `available_tokens = 0`, `last_refill_at = until`. Інакше час блокування
+    зараховувався б у накопичення токенів, і в першу ж секунду після зняття блоку origin, який
+    щойно нас забанив, отримав би повний burst (M-4 код-рев'ю) — протилежне до призначення
+    `block_origin` (§7.6/FR-033 ввічливість після 429). Активні permits не відкликаються:
+    їхній release/expiry обробляється як звичайно.
+
+    Transaction boundary: викликач.
+    """
     current = resolve_now(now)
     bucket = await session.scalar(
         select(OriginRateBucket).where(OriginRateBucket.origin == origin).with_for_update()
@@ -249,6 +272,8 @@ async def block_origin(
     if bucket.blocked_until is None or bucket.blocked_until < until:
         bucket.blocked_until = until
         bucket.block_reason = reason[:256]
+        bucket.available_tokens = Decimal(0)
+        bucket.last_refill_at = until
         bucket.revision += 1
         bucket.updated_at = current
         await session.flush()

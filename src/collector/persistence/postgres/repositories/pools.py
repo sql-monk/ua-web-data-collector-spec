@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from collector.contracts import JsonObject, new_entity_id
 from collector.persistence.postgres.clock import resolve_now
 from collector.persistence.postgres.errors import (
+    ConflictError,
     InvalidTransitionError,
     InvalidValueError,
     NotFoundError,
@@ -43,7 +44,10 @@ from collector.workers.roles import WorkerRole
 INSTANCE_TRANSITIONS: dict[str, frozenset[str]] = {
     "starting": frozenset({"ready", "stopped", "stale"}),
     "ready": frozenset({"draining", "stopped", "stale"}),
-    "draining": frozenset({"stopped", "stale"}),
+    # `draining → ready` — зняття drain-барʼєра для survivors після підтвердження нової
+    # revision (§7.6: «survivors відновлюють claim»); це єдиний спосіб скасувати drain, бо
+    # heartbeat наміру більше не стирає (M-2 код-рев'ю).
+    "draining": frozenset({"ready", "stopped", "stale"}),
     "stale": frozenset({"ready", "draining", "stopped"}),
     "stopped": frozenset[str](),
 }
@@ -105,11 +109,16 @@ async def upsert_pool(
     """Створює pool (`expected_revision=None`, revision=1) або оновлює desired state з
     optimistic revision (`StaleRevisionError` при розбіжності).
 
-    Невалідний desired state → `InvalidValueError` до будь-якого запису (L-1).
+    Невалідний desired state → `InvalidValueError` до будь-якого запису (gate 2, L-1);
+    повторне створення наявного pool → `ConflictError`, а не сирий `IntegrityError`
+    (gate 3, L-2).
     """
     state.validate()
     current = resolve_now(now)
     if expected_revision is None:
+        if await session.scalar(select(WorkerPool.role).where(WorkerPool.role == role.value)):
+            msg = f"worker pool {role.value!r} уже існує — передайте expected_revision"
+            raise ConflictError(msg)
         pool = WorkerPool(
             role=role.value,
             desired_replicas=state.desired_replicas,
@@ -205,15 +214,21 @@ async def heartbeat_instance(
     pool_revision: int | None,
     now: datetime | None = None,
 ) -> WorkerInstance:
-    """Оновлює heartbeat/slots/leases; `stale` → `ready` автоматично (instance повернувся);
-    `stopped` не оживає (`InvalidTransitionError`)."""
+    """Оновлює heartbeat/slots/leases; `stopped` не оживає (`InvalidTransitionError`).
+
+    `stale` → `ready`, **якщо не запитаний drain**: instance, якому вже сказано зупинятись
+    (`drain_requested_at`), повертається у `draining`, а не у `ready` — інакше пауза heartbeat
+    довша за TTL (`draining → stale`) мовчки скасовувала б drain, ініційований scale-командою,
+    і `observed_capacity` рахувала б зайву репліку (M-2 код-рев'ю). Скасувати drain може лише
+    явний `mark_ready`.
+    """
     current = resolve_now(now)
     instance = await _lock_instance(session, instance_id)
     if instance.status == "stopped":
         msg = f"instance {instance_id} зупинений — heartbeat відхилено"
         raise InvalidTransitionError(msg)
     if instance.status == "stale":
-        instance.status = "ready"
+        instance.status = "draining" if instance.drain_requested_at is not None else "ready"
     instance.slots_active = slots_active
     instance.active_leases = active_leases
     if slots_total is not None:
@@ -232,15 +247,26 @@ async def set_instance_status(
     *,
     now: datetime | None = None,
 ) -> WorkerInstance:
-    """`mark_ready/mark_draining/mark_stopped` — один перехід за `INSTANCE_TRANSITIONS`."""
+    """`mark_ready/mark_draining/mark_stopped` — один перехід за `INSTANCE_TRANSITIONS`.
+
+    Повтор того самого статусу — no-op, а не помилка (L-9 код-рев'ю): контролер, що не отримав
+    відповіді, безпечно повторює команду. `mark_draining` фіксує `drain_requested_at` (намір
+    переживає `stale`), `mark_ready` його знімає — це єдиний спосіб скасувати drain.
+    """
     current = resolve_now(now)
     instance = await _lock_instance(session, instance_id)
+    if instance.status == status:
+        return instance
     allowed = INSTANCE_TRANSITIONS.get(instance.status, frozenset())
     if status not in allowed:
         msg = f"instance {instance_id}: перехід {instance.status} → {status} недозволений"
         raise InvalidTransitionError(msg)
     instance.status = status
     instance.updated_at = current
+    if status == "draining":
+        instance.drain_requested_at = current
+    if status == "ready":
+        instance.drain_requested_at = None
     if status == "stopped":
         instance.stopped_at = current
         instance.slots_active = 0
@@ -350,9 +376,7 @@ async def request_scale(
     if requested_concurrency < 1:
         msg = f"requested_concurrency має бути >= 1, отримано {requested_concurrency}"
         raise InvalidValueError(msg)
-    existing = await session.scalar(
-        select(ScaleCommand).where(ScaleCommand.idempotency_key == idempotency_key)
-    )
+    existing = await _find_command(session, idempotency_key)
     if existing is not None:
         return existing
     current = resolve_now(now)
@@ -362,6 +386,12 @@ async def request_scale(
         .with_for_update()
     )
     if pool is None:
+        # Конкурент міг створити команду з тим самим ключем, поки ми чекали lock на pool:
+        # для викликача це має лишитись ідемпотентним повтором, а не `StaleRevisionError`
+        # (L-1 код-рев'ю). Перечитуємо ключ уже після зняття блокування.
+        concurrent = await _find_command(session, idempotency_key)
+        if concurrent is not None:
+            return concurrent
         await _raise_stale_or_missing_pool(session, role, expected_revision)
     if not pool.min_replicas <= requested_replicas <= pool.max_replicas:
         # Перевірка після lock: межі беруться з поточного desired state pool (L-1).
@@ -488,6 +518,15 @@ async def transition_scale_command(
 
 async def get_scale_command(session: AsyncSession, command_id: UUID) -> ScaleCommand | None:
     return await session.get(ScaleCommand, command_id)
+
+
+async def _find_command(session: AsyncSession, idempotency_key: str) -> ScaleCommand | None:
+    result = await session.execute(
+        select(ScaleCommand)
+        .where(ScaleCommand.idempotency_key == idempotency_key)
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
 
 
 async def _lock_instance(session: AsyncSession, instance_id: UUID) -> WorkerInstance:

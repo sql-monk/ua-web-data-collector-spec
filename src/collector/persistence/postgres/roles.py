@@ -11,6 +11,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 ROLE_NAMES: tuple[str, ...] = (
@@ -36,8 +37,21 @@ def load_roles_sql(path: Path | None = None) -> str:
 
 
 async def apply_roles(conn: AsyncConnection, *, sql_path: Path | None = None) -> None:
-    """Виконує скрипт ролей/GRANT; повторний виклик безпечний."""
+    """Виконує скрипт ролей/GRANT; повторний виклик безпечний.
+
+    Скрипт іде через сирий `asyncpg.Connection.execute` (simple query protocol — інакше DO-блоки
+    з `;` довелося б ділити на statements). Помилки asyncpg при цьому не є `SQLAlchemyError`,
+    тому транслюються у `DBAPIError` — щоб викликачі (CLI `_run_async`) ловили їх так само, як
+    помилки будь-якого іншого запиту, а не показували traceback (L-3 код-рев'ю).
+    """
     script = load_roles_sql(sql_path)
     raw = await conn.get_raw_connection()
     driver: Any = raw.driver_connection  # asyncpg.Connection без типізації
-    await driver.execute(script)
+    try:
+        await driver.execute(script)
+    except Exception as exc:
+        # asyncpg не має py.typed, тому клас помилки визначаємо за модулем, а не імпортом;
+        # усе, що не з asyncpg, пробрасуємо як є.
+        if type(exc).__module__.split(".")[0] != "asyncpg":
+            raise
+        raise DBAPIError(statement=None, params=None, orig=exc) from exc

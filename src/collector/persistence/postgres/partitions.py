@@ -7,9 +7,12 @@ PR1 партиціонує `audit_log`; PR2 додає `fetches`, `raw_objects`,
 - `ensure_month_partitions(conn, months_ahead=N)` створює відсутні `<table>_yYYYYmMM` від
   поточного місяця на N місяців уперед — викликається CLI `collector db migrate` після
   `upgrade head` і maintenance-worker WP-12;
-- INSERT у місяць без партиції падає з `no partition of relation ... found for row` — обрано
-  «зрозуміла помилка», а не auto-create у hot path (документовано в картці PR2), бо створення
-  партиції потребує DDL-привілеїв, яких runtime-ролі не мають;
+- кожна партиційована таблиця має DEFAULT-партицію (`<table>_default`, створюється міграцією):
+  пропущене обслуговування не повинно зупиняти записи — для `audit_log` це зупинило б **усі**
+  audited дії control plane, бо `request_scale` пише audit у тій самій транзакції (M-5
+  код-рев'ю). Рядки в DEFAULT — сигнал «партиції відстають» (`default_partition_row_count`,
+  метрика WP-12), а не нормальний режим: поки вони там, місячну партицію того самого періоду
+  створити не можна, доки maintenance їх не перенесе;
 - Alembic autogenerate ігнорує child-таблиці за `is_partition_child_name`.
 
 Transaction boundary: викликач (`AsyncConnection` у власній транзакції; DDL транзакційний).
@@ -27,7 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 PARTITIONED_TABLES: tuple[str, ...] = ("audit_log",)
 _PARTITION_SUFFIX = re.compile(r"_y(\d{4})m(\d{2})$")
 _PARTITION_CHILD = re.compile(
-    r"^(?P<parent>" + "|".join(re.escape(t) for t in PARTITIONED_TABLES) + r")_y\d{4}m\d{2}$"
+    r"^(?P<parent>"
+    + "|".join(re.escape(t) for t in PARTITIONED_TABLES)
+    + r")(_y\d{4}m\d{2}|_default)$"
 )
 _IDENT = re.compile(r"^[a-z_][a-z0-9_]*$")
 
@@ -54,17 +59,68 @@ class MonthPartition:
 
     @property
     def create_sql(self) -> str:
+        """DDL партиції з **явними UTC-межами**.
+
+        Date-літерал (`'2031-03-01'`) для колонки `timestamptz` інтерпретується у `TimeZone`
+        сесії, яка виконує DDL, і зберігається вже зсунутим. Партиції, створені з різних сесій
+        (різний `PGTZ`, змінений `postgresql.conf`, керований інстанс з іншим дефолтом), тоді
+        або перекриваються (`would overlap partition …` — падає вся `collector db migrate`,
+        бо upgrade і партиції в одній транзакції), або лишають діру між місяцями, у яку не
+        можна вставити рядок. Тому межі задані як `timestamptz` з явним `+00` — від TimeZone
+        сесії вони більше не залежать (M-1 код-рев'ю).
+        """
         if not _IDENT.match(self.parent):
             msg = f"недопустима назва таблиці {self.parent!r}"
             raise ValueError(msg)
         return (
             f"CREATE TABLE IF NOT EXISTS {self.name} PARTITION OF {self.parent} "
-            f"FOR VALUES FROM ('{self.lower.isoformat()}') TO ('{self.upper.isoformat()}')"
+            f"FOR VALUES FROM ('{self.lower.isoformat()} 00:00:00+00') "
+            f"TO ('{self.upper.isoformat()} 00:00:00+00')"
         )
 
 
+def default_partition_name(parent: str) -> str:
+    """`audit_log` → `audit_log_default` (партиція-«приймач» пропущених місяців)."""
+    return f"{parent}_default"
+
+
+def default_partition_sql(parent: str) -> str:
+    """DDL DEFAULT-партиції; створюється міграцією, не maintenance-циклом."""
+    if not _IDENT.match(parent):
+        msg = f"недопустима назва таблиці {parent!r}"
+        raise ValueError(msg)
+    return (
+        f"CREATE TABLE IF NOT EXISTS {default_partition_name(parent)} PARTITION OF {parent} DEFAULT"
+    )
+
+
+async def default_partition_row_count(conn: AsyncConnection, parent: str) -> int:
+    """Скільки рядків осіло в DEFAULT-партиції — джерело метрики/алерту «партиції відстають».
+
+    TODO(WP-12): опублікувати як метрику §14.1 і алерт §14.2 — ненульове значення означає, що
+    maintenance не створив місячну партицію вчасно. Поки рядки лежать у DEFAULT, створити
+    місячну партицію для того самого періоду **не можна** (PostgreSQL сканує DEFAULT і
+    відмовляє, якщо в ній є рядки нового діапазону), тож обслуговування має спершу перенести
+    їх: `BEGIN; CREATE TABLE … (LIKE parent); INSERT … SELECT … FROM parent_default WHERE …;
+    DELETE …; ATTACH PARTITION; COMMIT`.
+    """
+    if parent not in PARTITIONED_TABLES:
+        msg = f"{parent!r} не є партиційованою таблицею ({PARTITIONED_TABLES})"
+        raise ValueError(msg)
+    name = default_partition_name(parent)
+    exists = await conn.scalar(text("SELECT to_regclass(:name) IS NOT NULL"), {"name": name})
+    if not exists:
+        return 0
+    count = await conn.scalar(text(f"SELECT count(*) FROM {name}"))  # noqa: S608 — з allowlist
+    return int(count or 0)
+
+
 def is_partition_child_name(table_name: str) -> bool:
-    """`audit_log_y2026m09` → True; використовується Alembic `include_name`."""
+    """`audit_log_y2026m09`/`audit_log_default` → True; використовується Alembic `include_name`.
+
+    DEFAULT-партиція створюється міграцією, але autogenerate її ігнорує так само, як місячні:
+    інакше `alembic check` бачив би її як «зайву таблицю» відносно моделей.
+    """
     return _PARTITION_CHILD.match(table_name) is not None
 
 

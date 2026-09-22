@@ -63,8 +63,12 @@ class NewJob:
 
 @dataclass(frozen=True, slots=True)
 class BackoffPolicy:
-    """Експоненційний backoff з jitter: `base * multiplier**(attempt-1)`, cap `maximum`,
-    плюс рівномірний jitter у `[0, delay * jitter_ratio]`."""
+    """Експоненційний backoff з jitter: `base * multiplier**(attempt-1)`, рівномірний jitter у
+    `[0, delay * jitter_ratio]`, і **весь результат** обмежений `maximum`.
+
+    Cap застосовується після jitter (L-6 код-рев'ю): інакше фактична межа була б
+    `maximum * (1 + jitter_ratio)`, і `not_before` виходив би за обіцяні `maximum`.
+    """
 
     base: timedelta = timedelta(seconds=30)
     multiplier: float = 2.0
@@ -73,16 +77,21 @@ class BackoffPolicy:
 
     def delay_for(self, attempt: int, rng: random.Random) -> timedelta:
         exponent = max(attempt - 1, 0)
-        delay = min(
-            self.base.total_seconds() * (self.multiplier**exponent), self.maximum.total_seconds()
-        )
+        maximum = self.maximum.total_seconds()
+        delay = min(self.base.total_seconds() * (self.multiplier**exponent), maximum)
         jitter = rng.uniform(0.0, delay * self.jitter_ratio) if self.jitter_ratio > 0 else 0.0
-        return timedelta(seconds=delay + jitter)
+        return timedelta(seconds=min(delay + jitter, maximum))
 
 
 async def enqueue(session: AsyncSession, job: NewJob, *, now: datetime | None = None) -> CrawlJob:
     """Ставить job у чергу; повторний виклик з тим самим `idempotency_key` повертає існуючий
     job без дубля (`INSERT ... ON CONFLICT DO NOTHING` + SELECT).
+
+    **Ключ — це ідентичність job, а не запит «постав у чергу знову»:** якщо job із цим ключем
+    уже `succeeded`/`quarantined`, повертається саме він, і нової роботи не з'явиться. Тому
+    ключ має містити дискримінатор циклу/вікна (§9.3 п.3 — `planned_at_bucket`), інакше після
+    першого успішного обходу джерело більше ніколи не фетчиться, без жодної помилки (L-8
+    код-рев'ю). Статус повернутого job викликач перевіряє сам.
 
     Transaction boundary: викликач. **Вимога до isolation level: READ COMMITTED** (default
     PostgreSQL). Ідемпотентність тримається на тому, що після `ON CONFLICT DO NOTHING` наступний

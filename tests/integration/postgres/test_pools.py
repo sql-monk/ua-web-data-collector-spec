@@ -3,14 +3,16 @@ applied лише при відповідності heartbeat-derived capacity, s
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from collector.contracts import new_entity_id
 from collector.persistence.postgres.errors import (
+    ConflictError,
     InvalidTransitionError,
     InvalidValueError,
     NotFoundError,
@@ -358,3 +360,116 @@ async def test_invalid_pool_desired_state_is_rejected_before_write(
             now=T0,
         )
     assert created.revision == 1
+
+
+async def test_heartbeat_does_not_resurrect_draining_instance(pg_session: AsyncSession) -> None:
+    """M-2: пара `draining → stale → heartbeat` не має скасовувати drain.
+
+    Сценарій рев'ю: контролер поставив drain-барʼєр перед зменшенням реплік, instance зробив
+    паузу довшу за heartbeat TTL і повернувся — раніше він ставав `ready` і знову рахувався у
+    `observed_capacity`, мовчки скасувавши намір оператора.
+    """
+    await _fetch_pool(pg_session)
+    instance_id = new_entity_id()
+    late = T0 + timedelta(minutes=5)
+    async with pg_session.begin():
+        await pools.register_instance(
+            pg_session, instance_id, WorkerRole.FETCH, version="v", slots_total=4, now=T0
+        )
+        await pools.mark_ready(pg_session, instance_id, now=T0)
+        draining = await pools.mark_draining(pg_session, instance_id, now=T0)
+        assert draining.drain_requested_at == T0
+
+        assert await pools.mark_stale_instances(pg_session, now=late) == [instance_id]
+        revived = await pools.heartbeat_instance(
+            pg_session, instance_id, slots_active=1, active_leases=1, pool_revision=1, now=late
+        )
+        assert revived.status == "draining"
+        assert revived.drain_requested_at == T0
+        assert await pools.observed_capacity(
+            pg_session, WorkerRole.FETCH, now=late
+        ) == pools.ObservedCapacity(0, 0, None)
+
+        # Скасувати drain може лише явна команда.
+        ready = await pools.mark_ready(pg_session, instance_id, now=late)
+        assert (ready.status, ready.drain_requested_at) == ("ready", None)
+        assert await pools.observed_capacity(
+            pg_session, WorkerRole.FETCH, now=late
+        ) == pools.ObservedCapacity(1, 4, 1)
+
+
+async def test_instance_status_transitions_are_idempotent(pg_session: AsyncSession) -> None:
+    """L-9: повтор тієї самої команди (втрачена відповідь контролера) — no-op, не помилка."""
+    await _fetch_pool(pg_session)
+    instance_id = new_entity_id()
+    async with pg_session.begin():
+        await pools.register_instance(
+            pg_session, instance_id, WorkerRole.FETCH, version="v", slots_total=4, now=T0
+        )
+        await pools.mark_ready(pg_session, instance_id, now=T0)
+        assert (await pools.mark_ready(pg_session, instance_id, now=T0)).status == "ready"
+        first = await pools.mark_draining(pg_session, instance_id, now=T0)
+        repeat = await pools.mark_draining(pg_session, instance_id, now=T0 + timedelta(seconds=30))
+        assert repeat.drain_requested_at == first.drain_requested_at  # намір не «оновлюється»
+        await pools.mark_stopped(pg_session, instance_id, now=T0)
+        assert (await pools.mark_stopped(pg_session, instance_id, now=T0)).status == "stopped"
+
+
+async def test_request_scale_stays_idempotent_when_pool_revision_moved(
+    pg_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """L-1: конкурент із тим самим ключем міг перевести pool на нову revision, поки ми чекали
+    lock — це повтор, а не `StaleRevisionError`."""
+    async with pg_sessions() as setup, setup.begin():
+        await pools.upsert_pool(
+            setup,
+            WorkerRole.FETCH,
+            FETCH_STATE,
+            actor="bootstrap",
+            reason="defaults",
+            expected_revision=None,
+            now=T0,
+        )
+
+    async def request(session: AsyncSession) -> pools.ScaleCommand:
+        async with session.begin():
+            return await pools.request_scale(
+                session,
+                WorkerRole.FETCH,
+                expected_revision=1,
+                requested_replicas=4,
+                requested_concurrency=8,
+                actor="op",
+                reason="load",
+                idempotency_key="double-click",
+                now=T0,
+            )
+
+    async with pg_sessions() as first, pg_sessions() as second:
+        results = await asyncio.gather(request(first), request(second))
+    assert results[0].command_id == results[1].command_id
+    async with pg_sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(ScaleCommand)) == 1
+        assert await session.scalar(select(func.count()).select_from(AuditLog)) == 1
+        pool = await pools.get_pool(session, WorkerRole.FETCH)
+        assert pool is not None and pool.revision == 2
+
+
+async def test_creating_existing_pool_raises_conflict_not_integrity_error(
+    pg_session: AsyncSession,
+) -> None:
+    """L-2: типізована помилка замість сирого `IntegrityError`, транзакція лишається живою."""
+    await _fetch_pool(pg_session)
+    async with pg_session.begin():
+        with pytest.raises(ConflictError):
+            await pools.upsert_pool(
+                pg_session,
+                WorkerRole.FETCH,
+                FETCH_STATE,
+                actor="op",
+                reason="again",
+                expected_revision=None,
+                now=T0,
+            )
+        pool = await pools.get_pool(pg_session, WorkerRole.FETCH)
+        assert pool is not None and pool.revision == 1

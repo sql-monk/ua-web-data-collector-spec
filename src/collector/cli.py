@@ -266,7 +266,11 @@ def db_migrate(
     check: Annotated[
         bool,
         typer.Option(
-            "--check", help="Не застосовувати; exit 1, якщо схема відрізняється від моделей."
+            "--check",
+            help=(
+                "Не змінювати схему; exit 1, якщо вона відрізняється від моделей. "
+                "Потребує тих самих прав, що й міграції (не read-only роль)."
+            ),
         ),
     ] = False,
     partitions_ahead: Annotated[
@@ -342,11 +346,27 @@ def _postgres_settings() -> PostgresSettings:
         raise typer.Exit(code=1) from exc
 
 
+def _is_postgres_error(exc: BaseException) -> bool:
+    """Помилка з'єднання/запиту PostgreSQL.
+
+    Крім `sqlalchemy.exc.*` і `OSError`, сюди входять помилки самого asyncpg: драйвер кидає їх
+    напряму під час connect/auth (`InvalidPasswordError`) і при виконанні скрипта ролей через
+    simple query protocol, а SQLAlchemy їх не обгортає. Клас визначаємо за модулем — у asyncpg
+    немає `py.typed`, тож імпортувати його в типізований код не можна (L-3 код-рев'ю).
+    """
+    return (
+        isinstance(exc, OSError | DBAPIError | SQLAlchemyError)
+        or type(exc).__module__.split(".")[0] == "asyncpg"
+    )
+
+
 def _run_async[T](coro: Coroutine[Any, Any, T]) -> T:
     """`asyncio.run` з перекладом помилок БД у exit code 1 без traceback у stderr."""
     try:
         return asyncio.run(coro)
-    except (OSError, DBAPIError, SQLAlchemyError) as exc:
+    except Exception as exc:
+        if not _is_postgres_error(exc):
+            raise
         typer.echo(f"postgres error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

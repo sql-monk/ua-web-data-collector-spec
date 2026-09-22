@@ -144,7 +144,13 @@ async def test_block_origin_denies_until_deadline(pg_session: AsyncSession) -> N
             pg_session, ORIGIN, "a", 5, now=until - timedelta(seconds=1)
         )
         assert denied.reason == "blocked" and denied.retry_after == until
-        granted = await limiter.acquire_permit(pg_session, ORIGIN, "a", 5, now=until)
+        # Рівно в `until` блок знято, але токени починаються з нуля (M-4): перша видача — лише
+        # після звичайного refill, а не одразу і не повним burst-ом.
+        at_deadline = await limiter.acquire_permit(pg_session, ORIGIN, "a", 5, now=until)
+        assert not at_deadline.granted and at_deadline.reason == "rate"
+        granted = await limiter.acquire_permit(
+            pg_session, ORIGIN, "a", 5, now=until + timedelta(seconds=1)
+        )
         assert granted.granted
 
 
@@ -182,3 +188,68 @@ async def _bucket_session(
             max_concurrency=concurrency,
             now=T0,
         )
+
+
+async def test_block_origin_resets_refill_so_there_is_no_burst_after_unblock(
+    pg_session: AsyncSession,
+) -> None:
+    """M-4: після зняття 429-блокування origin не отримує накопичений burst.
+
+    Сценарій рев'ю: токени вичерпано → 429 → `block_origin(+1 год)` → через годину перші ж
+    виклики видавали повний `capacity_tokens` поспіль, тобто сплеск саме до сайта, який щойно
+    нас забанив.
+    """
+    await _bucket_session(pg_session, capacity=5, rps="0.2", concurrency=5)
+    until = T0 + timedelta(hours=1)
+    async with pg_session.begin():
+        # Вичерпати токени (capacity=5) і отримати 429.
+        for _ in range(5):
+            decision = await limiter.acquire_permit(pg_session, ORIGIN, "w", 1, now=T0)
+            assert decision.granted
+            assert decision.permit is not None
+            await limiter.release_permit(pg_session, decision.permit.permit_id, now=T0)
+        bucket = await limiter.block_origin(pg_session, ORIGIN, until, reason="429", now=T0)
+    assert bucket.available_tokens == Decimal(0)
+    assert bucket.last_refill_at == until
+
+    after = until + timedelta(seconds=1)
+    async with pg_session.begin():
+        first = await limiter.acquire_permit(pg_session, ORIGIN, "w", 1, now=after)
+        assert not first.granted
+        assert first.reason == "rate"  # блок знято, але токенів ще немає
+        # Один токен зʼявляється рівно через 1/0.2 = 5 с після зняття блоку, не одразу.
+        five_seconds_later = until + timedelta(seconds=5)
+        second = await limiter.acquire_permit(pg_session, ORIGIN, "w", 1, now=five_seconds_later)
+        assert second.granted
+        third = await limiter.acquire_permit(pg_session, ORIGIN, "w", 1, now=five_seconds_later)
+        assert not third.granted and third.reason == "rate"
+
+
+async def test_release_permit_with_owner_does_not_free_foreign_slot(
+    pg_session: AsyncSession,
+) -> None:
+    """L-5: помилка у власному стані викликача не повинна звільняти чужий concurrency slot."""
+    await _bucket_session(pg_session, capacity=10, rps="10", concurrency=2)
+    async with pg_session.begin():
+        mine = await limiter.acquire_permit(pg_session, ORIGIN, "worker-a", 60, now=T0)
+        theirs = await limiter.acquire_permit(pg_session, ORIGIN, "worker-b", 60, now=T0)
+        assert mine.permit is not None and theirs.permit is not None
+
+        # worker-a намагається звільнити permit worker-b (переплутаний id).
+        assert (
+            await limiter.release_permit(
+                pg_session, theirs.permit.permit_id, owner_instance="worker-a", now=T0
+            )
+            is False
+        )
+        assert await limiter.live_permit_count(pg_session, ORIGIN, now=T0) == 2
+
+        assert (
+            await limiter.release_permit(
+                pg_session, theirs.permit.permit_id, owner_instance="worker-b", now=T0
+            )
+            is True
+        )
+        assert await limiter.live_permit_count(pg_session, ORIGIN, now=T0) == 1
+        # Sweeper без знання власника працює як раніше.
+        assert await limiter.release_permit(pg_session, mine.permit.permit_id, now=T0) is True

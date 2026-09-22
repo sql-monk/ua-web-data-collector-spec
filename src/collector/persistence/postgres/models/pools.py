@@ -5,6 +5,8 @@
   (`repositories.pools.observed_capacity`);
 - `worker_instances.instance_id` — boot UUID; `status`: `starting | ready | draining | stopped |
   stale`; `pool_revision` — остання desired revision, яку instance підтвердив;
+  `drain_requested_at` — момент drain-запиту; поки він не скинутий, instance не може повернутись
+  у `ready` через heartbeat (лише через явний `mark_ready` оператора/контролера);
 - `scale_commands` — idempotency key, expected/applied pool revision, requested values,
   стани `requested | draining | awaiting_manual_apply | applying | applied | failed | superseded`
   (переходи `SCALE_COMMAND_TRANSITIONS`, валідація у репозиторії), `cli_command` для Compose
@@ -124,6 +126,10 @@ class WorkerInstance(Base):
     slots_active: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     active_leases: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     pool_revision: Mapped[int | None] = mapped_column(BigInteger)
+    # Намір drain зберігається окремо від `status`: інакше пара переходів
+    # `draining → stale → ready` (heartbeat після паузи) мовчки скасовувала б drain,
+    # ініційований scale-командою (M-2 код-рев'ю).
+    drain_requested_at: Mapped[datetime | None]
     started_at: Mapped[datetime] = mapped_column(nullable=False)
     last_heartbeat_at: Mapped[datetime] = mapped_column(nullable=False)
     stopped_at: Mapped[datetime | None]

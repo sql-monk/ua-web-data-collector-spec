@@ -19,7 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from collector.contracts import new_entity_id
 from collector.contracts.enums import DataDomain, RouteState, SourceState
 from collector.persistence.postgres.clock import resolve_now
-from collector.persistence.postgres.errors import NotFoundError, StaleRevisionError
+from collector.persistence.postgres.errors import (
+    ConflictError,
+    NotFoundError,
+    StaleRevisionError,
+)
 from collector.persistence.postgres.models import (
     ROUTE_KINDS,
     Source,
@@ -53,9 +57,12 @@ async def create_source(
     actor: str | None = None,
     now: datetime | None = None,
 ) -> Source:
-    """Новий рядок `sources` (revision=1). `source_id` унікальний — дубль → IntegrityError
-    викликачу (реєстрація джерела не є hot path)."""
+    """Новий рядок `sources` (revision=1); повторна реєстрація `source_id` → `ConflictError`,
+    а не сирий `IntegrityError`, який псує транзакцію викликача (L-2 код-рев'ю)."""
     current = resolve_now(now)
+    if await session.scalar(select(Source.id).where(Source.source_id == source_id)):
+        msg = f"джерело {source_id!r} уже зареєстроване"
+        raise ConflictError(msg)
     source = Source(
         id=new_entity_id(),
         source_id=source_id,

@@ -41,6 +41,19 @@ def test_backoff_is_exponential_capped_and_jittered_deterministically() -> None:
     assert timedelta(seconds=10) <= first <= timedelta(seconds=15)
 
 
+def test_backoff_never_exceeds_maximum_even_with_jitter() -> None:
+    """L-6: cap застосовується після jitter, інакше фактична межа була б `maximum*(1+ratio)`."""
+    policy = BackoffPolicy(
+        base=timedelta(seconds=30),
+        multiplier=2,
+        maximum=timedelta(hours=6),
+        jitter_ratio=0.2,
+    )
+    rng = random.Random(0)  # noqa: S311
+    for attempt in range(1, 40):
+        assert policy.delay_for(attempt, rng) <= policy.maximum, attempt
+
+
 def test_scale_command_transition_table_matches_card() -> None:
     assert set(SCALE_COMMAND_TRANSITIONS) == set(SCALE_COMMAND_STATUSES)
     for terminal in SCALE_COMMAND_TERMINAL:
