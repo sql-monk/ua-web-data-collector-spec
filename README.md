@@ -7,6 +7,86 @@
 - [docs/research/news-central-baltic.md](docs/research/news-central-baltic.md), [news-western.md](docs/research/news-western.md), [news-southern.md](docs/research/news-southern.md) — live-паспорти 58 новинних джерел у 19 країнах.
 - [docs/research/source-registry.yaml](docs/research/source-registry.yaml) — канонічні `source_id`, display names, домени та рейтинги всіх 70 джерел.
 - [REVIEW.md](REVIEW.md) — результати критичного рев’ю ТЗ і виправлення.
+- [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) — план реалізації субагентами: конвеєр work packages, картки, gate-и.
+- [docs/plan/ledger.md](docs/plan/ledger.md) — стан кожного work package/під-PR у конвеєрі.
+
+## Швидкий старт розробника
+
+Стан на PR1 (`wp/00-1-python-ci`): Python-каркас, CLI-контракт §16.2 як типізовані
+стаби та CI. Docker images/Compose (PR2) і web scaffold (PR3) додаються наступними
+під-PR роботи WP-00 — команди нижче охоплюють лише те, що вже працює.
+
+### Вимоги
+
+- [`uv`](https://docs.astral.sh/uv/) 0.12+ — керує версією Python і залежностями;
+  окремо встановлювати Python 3.13 не потрібно, `uv sync` підтягує його сам
+  (`.python-version` фіксує `3.13`);
+- Node.js 24 LTS — знадобиться для `web/` (PR3, `.nvmrc` з'явиться разом зі scaffold);
+- Docker Engine + Compose — знадобиться для `Dockerfile`/`docker-compose.yml` (PR2/PR3);
+  для PR1 не потрібен (CLI і тести працюють без Docker).
+
+### Встановлення
+
+```bash
+uv sync --frozen
+uv run pre-commit install
+```
+
+`uv sync --frozen` ставить залежності точно за `uv.lock` (без перерахунку) у
+`.venv`. `pre-commit install` вмикає локальні git-hooks
+(`.pre-commit-config.yaml`): ruff, ruff-format, gitleaks, markdownlint-cli2 —
+ті самі перевірки, що й CI (`.github/workflows/ci.yml`).
+
+### Контракт перевірки (§16.2 ТЗ, частина PR1)
+
+```bash
+uv sync --frozen
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+uv run pytest -m "not live"
+uv run collector --help
+uv run pre-commit run --all-files
+```
+
+Решта команд §16.2 (`docker compose …`, `uv run alembic upgrade head`,
+`duckdb …`, `cd web && npm …`) з'являються в PR2/PR3 і в подальших WP, коли
+відповідні стаби замінюються реальною реалізацією.
+
+### CLI `collector`
+
+```bash
+uv run collector --help
+```
+
+У PR1 усі команди контракту §16.2, крім `collector version`, — типізовані
+стаби: вони друкують `not implemented: owned by WP-XX` у stderr і завершуються
+з кодом 2, доки власник WP не замінить тіло команди (назва та параметри
+команди фіксовані карткою й тестами):
+
+| Команда | Owner-WP |
+|---|---|
+| `collector version` | WP-00 (реальна — package version, Git SHA, schema version placeholder) |
+| `collector db migrate` | WP-01A |
+| `collector db ensure-mongo --validators --indexes` | WP-01B |
+| `collector worker <role>` (`discovery\|fetch\|browser\|parse\|projector\|translation\|export\|maintenance`) | WP-01D |
+| `collector scheduler` | WP-01D |
+| `collector controller` | WP-01D |
+| `collector api` | WP-11A |
+| `collector release build --watermark <w> --output <dir>` | WP-11A |
+| `collector release verify --manifest <path>` | WP-11A |
+| `collector e2e --source <name> --offline` | WP-14 |
+
+Детальніше про вибір `typer`, логування та мережеву політику тестів —
+[docs/decisions/0001-foundation-stack.md](docs/decisions/0001-foundation-stack.md).
+
+### План і стан робіт
+
+- [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) — конвеєр
+  work packages (картка → реалізація → тестування → код-рев'ю → пострев'ю →
+  документування → інтеграція).
+- [docs/plan/ledger.md](docs/plan/ledger.md) — поточний стан кожного
+  work package/під-PR.
 
 Платформа призначена для внутрішнього дослідження і збирає всі публічно доступні поля, включно з контактами продавців. V1 звертається до джерел тільки без реєстрації, входу й source API keys. Перед масовим запуском треба підтвердити відкриті питання Q-001—Q-014, насамперед бюджет перекладу, media download, глибину backfill, production topology MongoDB, cadence releases, matching thresholds і deployment mode.
 
