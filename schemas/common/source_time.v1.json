@@ -1,0 +1,99 @@
+{
+  "$defs": {
+    "TimePrecision": {
+      "description": "Точність часу, заявленого джерелом (§9.6).",
+      "enum": [
+        "second",
+        "minute",
+        "hour",
+        "day",
+        "month",
+        "year",
+        "unknown"
+      ],
+      "title": "TimePrecision",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/common/source_time.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Час, заявлений джерелом (§5.1, §9.6); `None` ніколи не заповнюється crawler time.\n\nЗберігаються вихідний текст часу, timezone/offset, declared locale і precision (§9.6).",
+  "properties": {
+    "source_event_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Event At"
+    },
+    "source_locale_raw": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Declared locale джерела як отримано (`uk-UA`, `de`, `lang` атрибут); §9.6.",
+      "title": "Source Locale Raw"
+    },
+    "source_time_inferred": {
+      "default": false,
+      "title": "Source Time Inferred",
+      "type": "boolean"
+    },
+    "source_time_precision": {
+      "$ref": "#/$defs/TimePrecision",
+      "default": "unknown"
+    },
+    "source_time_raw_text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Time Raw Text"
+    },
+    "source_timezone_raw": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Timezone Raw"
+    },
+    "source_updated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Updated At"
+    }
+  },
+  "title": "SourceTime",
+  "type": "object",
+  "x-contract-version": "1.1"
+}

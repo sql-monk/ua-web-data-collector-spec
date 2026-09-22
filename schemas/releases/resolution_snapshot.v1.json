@@ -1,0 +1,69 @@
+{
+  "$id": "https://ua-collector.local/schemas/releases/resolution_snapshot.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Результат `project_groups`: групи, блоки та які рішення застосовано/пропущено.",
+  "properties": {
+    "applied_decision_ids": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "title": "Applied Decision Ids",
+      "type": "array"
+    },
+    "blocked_pairs": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "format": "uuid",
+            "type": "string"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Blocked Pairs",
+      "type": "array"
+    },
+    "groups": {
+      "additionalProperties": {
+        "items": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "description": "canonical_group_id → відсортовані member ids.",
+      "propertyNames": {
+        "format": "uuid"
+      },
+      "title": "Groups",
+      "type": "object"
+    },
+    "skipped_decision_ids": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "title": "Skipped Decision Ids",
+      "type": "array"
+    },
+    "superseded_decision_ids": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "title": "Superseded Decision Ids",
+      "type": "array"
+    }
+  },
+  "title": "ResolutionSnapshot",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

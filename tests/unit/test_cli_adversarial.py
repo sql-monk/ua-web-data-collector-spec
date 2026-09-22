@@ -24,7 +24,8 @@ import pytest
 from typer.testing import CliRunner
 
 from collector.cli import app
-from collector.core.version import GIT_SHA_ENV, SCHEMA_VERSION_PLACEHOLDER, UNKNOWN_GIT_SHA
+from collector.contracts import CONTRACTS_VERSION
+from collector.core.version import GIT_SHA_ENV, UNKNOWN_GIT_SHA
 from collector.workers.roles import WorkerRole
 
 runner = CliRunner()
@@ -35,6 +36,9 @@ SPEC_7_6_ROLES = frozenset(
 SPEC_16_2_TOP_LEVEL = frozenset(
     {"version", "db", "e2e", "release", "worker", "api", "scheduler", "controller"}
 )
+# §16.2 — контракт CI-команд, а не вичерпний список CLI. Явний allowlist розширень foundation;
+# нова група потрапляє сюди лише через approved dependency-запит (docs/plan/deps/).
+FOUNDATION_EXTENSIONS = frozenset({"contracts"})  # WP-01C: `collector contracts export [--check]`
 STUB_OWNER_PATTERN = re.compile(r"^not implemented: owned by WP-\d{2}[A-Z]?$")
 
 STUB_ARGV: tuple[list[str], ...] = (
@@ -117,7 +121,7 @@ def test_unknown_top_level_command_is_rejected() -> None:
 def test_help_command_set_equals_spec_16_2_exactly() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert _commands_from_help(result.output) == SPEC_16_2_TOP_LEVEL
+    assert _commands_from_help(result.output) == SPEC_16_2_TOP_LEVEL | FOUNDATION_EXTENSIONS
 
 
 @pytest.mark.parametrize(
@@ -152,7 +156,7 @@ def test_version_via_module_entry_point_without_git_sha_env() -> None:
     assert proc.stdout.splitlines() == [
         f"package_version={metadata.version('collector')}",
         f"git_sha={UNKNOWN_GIT_SHA}",
-        f"schema_version={SCHEMA_VERSION_PLACEHOLDER}",
+        f"schema_version={CONTRACTS_VERSION}",
     ]
 
 

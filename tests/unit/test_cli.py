@@ -6,13 +6,16 @@ import pytest
 from typer.testing import CliRunner
 
 from collector.cli import app
+from collector.contracts import CONTRACTS_VERSION
 from collector.core import version as version_module
-from collector.core.version import SCHEMA_VERSION_PLACEHOLDER, git_sha, version_info
+from collector.core.version import git_sha, version_info
 from collector.workers.roles import WorkerRole
 
 runner = CliRunner()
 
 TOP_LEVEL_COMMANDS = ("version", "db", "e2e", "release", "worker", "api", "scheduler", "controller")
+# §16.2 — контракт CI-команд, не вичерпний список CLI; розширення foundation через dependency-запит.
+FOUNDATION_EXTENSIONS = ("contracts",)  # WP-01C
 WORKER_ROLES = (
     "discovery",
     "fetch",
@@ -42,7 +45,7 @@ STUBS: tuple[tuple[list[str], str], ...] = (
 def test_help_lists_all_contract_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0, result.output
-    for command in TOP_LEVEL_COMMANDS:
+    for command in (*TOP_LEVEL_COMMANDS, *FOUNDATION_EXTENSIONS):
         assert f"\n  {command} " in result.output, f"{command} відсутня у --help"
 
 
@@ -94,7 +97,7 @@ def test_version_prints_package_git_sha_and_schema(monkeypatch: pytest.MonkeyPat
     lines = result.output.strip().splitlines()
     assert lines[0].startswith("package_version=") and lines[0] != "package_version="
     assert lines[1] == "git_sha=deadbeef"
-    assert lines[2] == f"schema_version={SCHEMA_VERSION_PLACEHOLDER}"
+    assert lines[2] == f"schema_version={CONTRACTS_VERSION}"
 
 
 def test_version_git_sha_defaults_to_unknown(monkeypatch: pytest.MonkeyPatch) -> None:

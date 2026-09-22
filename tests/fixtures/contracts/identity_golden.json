@@ -1,0 +1,98 @@
+{
+  "_comment": "Golden значення identity_hash_v1 / idempotency keys (§9.3). Змінюються лише разом із версією алгоритму (identity_hash_v2) — див. docs/contracts.md. canonical_json — точний рядок, SHA-256 якого є expected (можна перевірити вручну).",
+  "identity_hash_v1": [
+    {
+      "name": "plain",
+      "canonical_url": "https://rozetka.com.ua/ua/123456789/p123456789/",
+      "attributes": {
+        "brand": "Bosch",
+        "mpn": "GSB 13 RE"
+      },
+      "canonical_json": "{\"attributes\":{\"brand\":\"bosch\",\"mpn\":\"gsb 13 re\"},\"url\":\"https://rozetka.com.ua/ua/123456789/p123456789/\",\"v\":1}",
+      "expected": "v1:7e5a69928ff65f3290963a234cbb56ee4ee0fc5b77f74987f6a8b43dba302f96"
+    },
+    {
+      "name": "attribute order and case irrelevant",
+      "canonical_url": "https://rozetka.com.ua/ua/123456789/p123456789/",
+      "attributes": {
+        "MPN": "gsb 13  re",
+        "Brand": "  bosch"
+      },
+      "canonical_json": "{\"attributes\":{\"brand\":\"bosch\",\"mpn\":\"gsb 13 re\"},\"url\":\"https://rozetka.com.ua/ua/123456789/p123456789/\",\"v\":1}",
+      "expected": "v1:7e5a69928ff65f3290963a234cbb56ee4ee0fc5b77f74987f6a8b43dba302f96"
+    },
+    {
+      "name": "empty attributes",
+      "canonical_url": "https://example.com/item/1",
+      "attributes": {},
+      "canonical_json": "{\"attributes\":{},\"url\":\"https://example.com/item/1\",\"v\":1}",
+      "expected": "v1:280a8a29771a5ee8e4b2a60874c87f0bf31a121b87ecd9cfb2702197a9ff8859"
+    },
+    {
+      "name": "none and empty dropped",
+      "canonical_url": "https://example.com/item/1",
+      "attributes": {
+        "gtin": null,
+        "vin": ""
+      },
+      "canonical_json": "{\"attributes\":{},\"url\":\"https://example.com/item/1\",\"v\":1}",
+      "expected": "v1:280a8a29771a5ee8e4b2a60874c87f0bf31a121b87ecd9cfb2702197a9ff8859"
+    },
+    {
+      "name": "unicode nfc",
+      "canonical_url": "https://auto.ria.com/uk/auto_toyota_camry_1.html",
+      "attributes": {
+        "vin": "JTNBE46K",
+        "модель": "Camry"
+      },
+      "canonical_json": "{\"attributes\":{\"vin\":\"jtnbe46k\",\"модель\":\"camry\"},\"url\":\"https://auto.ria.com/uk/auto_toyota_camry_1.html\",\"v\":1}",
+      "expected": "v1:1794c8510077a757a3d6355f464be6d1a84e9950f333c64500f28efe265f44fc"
+    },
+    {
+      "name": "unicode nfd equals nfc",
+      "canonical_url": "https://auto.ria.com/uk/auto_toyota_camry_1.html",
+      "attributes": {
+        "vin": "JTNBE46K",
+        "модель": "Camry"
+      },
+      "canonical_json": "{\"attributes\":{\"vin\":\"jtnbe46k\",\"модель\":\"camry\"},\"url\":\"https://auto.ria.com/uk/auto_toyota_camry_1.html\",\"v\":1}",
+      "expected": "v1:1794c8510077a757a3d6355f464be6d1a84e9950f333c64500f28efe265f44fc"
+    }
+  ],
+  "fetch_idempotency_key": [
+    {
+      "name": "news detail default variant",
+      "source_id": "news_ua_liga",
+      "normalized_url": "https://liga.net/ua/news/1",
+      "planned_at_bucket": "2026-09-01T12:30:00+00:00",
+      "request_variant": "default",
+      "canonical_json": "{\"normalized_url\":\"https://liga.net/ua/news/1\",\"planned_at_bucket\":\"2026-09-01T12:30:00.000000Z\",\"request_variant\":\"default\",\"source_id\":\"news_ua_liga\"}",
+      "expected": "c778395a138798e89d6b2a1c01a64371d3324f9758c161e6f69d723c38256d38"
+    },
+    {
+      "name": "catalog mobile variant",
+      "source_id": "catalog_ua_rozetka",
+      "normalized_url": "https://rozetka.com.ua/ua/123/p123/",
+      "planned_at_bucket": "2026-09-01T00:00:00+00:00",
+      "request_variant": "mobile-ua",
+      "canonical_json": "{\"normalized_url\":\"https://rozetka.com.ua/ua/123/p123/\",\"planned_at_bucket\":\"2026-09-01T00:00:00.000000Z\",\"request_variant\":\"mobile-ua\",\"source_id\":\"catalog_ua_rozetka\"}",
+      "expected": "8882bfdeb073a942aa5504d387ea8472e07ee21c6db7303634f09c41a360eb93"
+    }
+  ],
+  "translation_idempotency_key": [
+    {
+      "name": "uk translation",
+      "article_version_id": "55555555-5555-4555-8555-555555555555",
+      "target_language": "UK",
+      "provider": "deepl",
+      "model_version": "v2-2026-08",
+      "glossary_version": "glossary-3",
+      "canonical_json": "{\"article_version_id\":\"55555555-5555-4555-8555-555555555555\",\"glossary_version\":\"glossary-3\",\"model_version\":\"v2-2026-08\",\"provider\":\"deepl\",\"target_language\":\"uk\"}",
+      "expected": "59c4c8b4258949ad249e5b3551fdba786e9fb2a608490d6c5b94a0b32a6a43ef"
+    }
+  ],
+  "raw_object_key": {
+    "empty": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "pryvit_utf8": "5e7d04a7d8a1d9c665fc624610114b9ec466d23b154148dd74250050fb9e7f19"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$id": "https://ua-collector.local/schemas/releases/entity_version_ref.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Пара `(entity_uuid, projection_version)` у watermark списку release (§9.5).",
+  "properties": {
+    "entity_uuid": {
+      "format": "uuid",
+      "title": "Entity Uuid",
+      "type": "string"
+    },
+    "projection_version": {
+      "minimum": 1,
+      "title": "Projection Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "entity_uuid",
+    "projection_version"
+  ],
+  "title": "EntityVersionRef",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

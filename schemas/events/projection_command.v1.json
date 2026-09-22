@@ -1,0 +1,178 @@
+{
+  "$defs": {
+    "DataDomain": {
+      "description": "Домен даних; збігається з `kind` у `docs/research/source-registry.yaml`.",
+      "enum": [
+        "news",
+        "vehicle",
+        "catalog"
+      ],
+      "title": "DataDomain",
+      "type": "string"
+    },
+    "NormalizedArtifactRef": {
+      "additionalProperties": false,
+      "description": "Normalized projection artifact (§9.1 `normalized_artifacts`) з lineage до raw/fetch.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/DataDomain"
+        },
+        "entity_uuid": {
+          "format": "uuid",
+          "title": "Entity Uuid",
+          "type": "string"
+        },
+        "fetch_id": {
+          "format": "uuid",
+          "title": "Fetch Id",
+          "type": "string"
+        },
+        "media_type": {
+          "minLength": 3,
+          "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "parser_version": {
+          "minLength": 1,
+          "title": "Parser Version",
+          "type": "string"
+        },
+        "produced_at": {
+          "format": "date-time",
+          "title": "Produced At",
+          "type": "string"
+        },
+        "raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Sha256",
+          "type": "string"
+        },
+        "raw_uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Raw Uri",
+          "type": "string"
+        },
+        "schema_version": {
+          "description": "Версія схеми normalized payload.",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domain",
+        "entity_uuid",
+        "fetch_id",
+        "media_type",
+        "parser_version",
+        "produced_at",
+        "raw_sha256",
+        "raw_uri",
+        "schema_version",
+        "sha256",
+        "size_bytes",
+        "uri"
+      ],
+      "title": "NormalizedArtifactRef",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/events/projection_command.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`projection.command` — внутрішня команда projector (§7.3 п.2), не публічна подія (R-30).",
+  "properties": {
+    "artifact": {
+      "$ref": "#/$defs/NormalizedArtifactRef"
+    },
+    "entity_uuid": {
+      "format": "uuid",
+      "title": "Entity Uuid",
+      "type": "string"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "not_before": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Not Before"
+    },
+    "priority": {
+      "default": 0,
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Priority",
+      "type": "integer"
+    },
+    "projection_version": {
+      "description": "Монотонна per-entity версія (R-36).",
+      "minimum": 1,
+      "title": "Projection Version",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "target_collection": {
+      "maxLength": 120,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Target Collection",
+      "type": "string"
+    },
+    "target_schema_version": {
+      "description": "Версія `$jsonSchema` цільової collection.",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Target Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact",
+    "entity_uuid",
+    "issued_at",
+    "projection_version",
+    "target_collection",
+    "target_schema_version",
+    "task_id"
+  ],
+  "title": "ProjectionCommand",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

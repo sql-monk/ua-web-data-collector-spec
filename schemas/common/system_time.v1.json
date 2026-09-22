@@ -1,0 +1,34 @@
+{
+  "$id": "https://ua-collector.local/schemas/common/system_time.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "System/knowledge time (§9.6): усі три обов'язкові, aware UTC.",
+  "properties": {
+    "fetched_at": {
+      "description": "Завершення HTTP fetch.",
+      "format": "date-time",
+      "title": "Fetched At",
+      "type": "string"
+    },
+    "ingested_at": {
+      "description": "Commit normalized record.",
+      "format": "date-time",
+      "title": "Ingested At",
+      "type": "string"
+    },
+    "observed_at": {
+      "description": "Логічний час source snapshot.",
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "fetched_at",
+    "ingested_at",
+    "observed_at"
+  ],
+  "title": "SystemTime",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

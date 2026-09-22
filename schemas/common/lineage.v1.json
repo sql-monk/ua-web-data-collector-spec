@@ -1,0 +1,37 @@
+{
+  "$id": "https://ua-collector.local/schemas/common/lineage.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Блок `lineage` (§9.2): fetch → raw → parser → projection task.",
+  "properties": {
+    "fetch_id": {
+      "format": "uuid",
+      "title": "Fetch Id",
+      "type": "string"
+    },
+    "parser_version": {
+      "minLength": 1,
+      "title": "Parser Version",
+      "type": "string"
+    },
+    "projection_task_id": {
+      "format": "uuid",
+      "title": "Projection Task Id",
+      "type": "string"
+    },
+    "raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Raw Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "fetch_id",
+    "parser_version",
+    "projection_task_id",
+    "raw_sha256"
+  ],
+  "title": "Lineage",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

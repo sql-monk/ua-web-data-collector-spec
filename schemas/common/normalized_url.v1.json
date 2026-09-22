@@ -1,0 +1,25 @@
+{
+  "$id": "https://ua-collector.local/schemas/common/normalized_url.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Пара URL: вихідний як отримано і нормалізований (нормалізація — WP-02).\n\nКонтракт фіксує лише інваріант: у `normalized` немає tracking-параметрів (`utm_*`,\n`fbclid`, `gclid`, ...), а `original` зберігається без змін.",
+  "properties": {
+    "normalized": {
+      "minLength": 1,
+      "title": "Normalized",
+      "type": "string"
+    },
+    "original": {
+      "minLength": 1,
+      "title": "Original",
+      "type": "string"
+    }
+  },
+  "required": [
+    "normalized",
+    "original"
+  ],
+  "title": "NormalizedUrl",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

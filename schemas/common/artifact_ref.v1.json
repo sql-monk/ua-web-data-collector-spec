@@ -1,0 +1,53 @@
+{
+  "$id": "https://ua-collector.local/schemas/common/artifact_ref.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Посилання на immutable content-addressed artifact.\n\n`schema_version` тут — версія схеми *вмісту* (наприклад, normalized payload), а не\nверсія цього контракту (`ArtifactRef.contract_version`).",
+  "properties": {
+    "media_type": {
+      "minLength": 3,
+      "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+      "title": "Media Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "anyOf": [
+        {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Версія схеми вмісту artifact (для normalized/event payload).",
+      "title": "Schema Version"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Sha256",
+      "type": "string"
+    },
+    "size_bytes": {
+      "minimum": 0,
+      "title": "Size Bytes",
+      "type": "integer"
+    },
+    "uri": {
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9+.-]*://.+",
+      "title": "Uri",
+      "type": "string"
+    }
+  },
+  "required": [
+    "media_type",
+    "sha256",
+    "size_bytes",
+    "uri"
+  ],
+  "title": "ArtifactRef",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

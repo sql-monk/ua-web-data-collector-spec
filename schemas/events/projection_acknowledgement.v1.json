@@ -1,0 +1,85 @@
+{
+  "$id": "https://ua-collector.local/schemas/events/projection_acknowledgement.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`projection_acknowledgements` (§9.1): PostgreSQL-фіксація Mongo receipt (§7.3 п.4).",
+  "properties": {
+    "acknowledged_at": {
+      "format": "date-time",
+      "title": "Acknowledged At",
+      "type": "string"
+    },
+    "applied_to_current": {
+      "title": "Applied To Current",
+      "type": "boolean"
+    },
+    "entity_uuid": {
+      "format": "uuid",
+      "title": "Entity Uuid",
+      "type": "string"
+    },
+    "event_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Sha256"
+    },
+    "projection_version": {
+      "minimum": 1,
+      "title": "Projection Version",
+      "type": "integer"
+    },
+    "receipt_cluster_time": {
+      "minLength": 1,
+      "title": "Receipt Cluster Time",
+      "type": "string"
+    },
+    "receipt_id": {
+      "description": "`projection_task_id` receipt у Mongo.",
+      "format": "uuid",
+      "title": "Receipt Id",
+      "type": "string"
+    },
+    "result_hash": {
+      "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+      "title": "Result Hash",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state_changed": {
+      "title": "State Changed",
+      "type": "boolean"
+    },
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "acknowledged_at",
+    "applied_to_current",
+    "entity_uuid",
+    "projection_version",
+    "receipt_cluster_time",
+    "receipt_id",
+    "result_hash",
+    "state_changed",
+    "task_id"
+  ],
+  "title": "ProjectionAcknowledgement",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

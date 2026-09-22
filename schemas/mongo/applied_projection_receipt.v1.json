@@ -1,0 +1,226 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Посилання на immutable content-addressed artifact.\n\n`schema_version` тут — версія схеми *вмісту* (наприклад, normalized payload), а не\nверсія цього контракту (`ArtifactRef.contract_version`).",
+      "properties": {
+        "media_type": {
+          "minLength": 3,
+          "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Версія схеми вмісту artifact (для normalized/event payload).",
+          "title": "Schema Version"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "media_type",
+        "sha256",
+        "size_bytes",
+        "uri"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/mongo/applied_projection_receipt.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`applied_projection_receipts` (§9.2): результат однієї projection task у Mongo.\n\nEvent descriptor (`event_bytes`/`event_media_type`/`event_sha256` або `event_artifact`)\nприсутній тоді й лише тоді, коли `should_emit_domain_changed(receipt)`; reconciler копіює\nbytes без повторної серіалізації (R-37, R-42).",
+  "properties": {
+    "applied_to_current": {
+      "title": "Applied To Current",
+      "type": "boolean"
+    },
+    "cluster_time": {
+      "description": "Mongo cluster time commit (рядок Timestamp `<t>:<i>`).",
+      "minLength": 1,
+      "title": "Cluster Time",
+      "type": "string"
+    },
+    "committed_at": {
+      "format": "date-time",
+      "title": "Committed At",
+      "type": "string"
+    },
+    "document_id": {
+      "format": "uuid",
+      "title": "Document Id",
+      "type": "string"
+    },
+    "entity_uuid": {
+      "format": "uuid",
+      "title": "Entity Uuid",
+      "type": "string"
+    },
+    "event_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "event_bytes": {
+      "anyOf": [
+        {
+          "format": "base64url",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Bytes"
+    },
+    "event_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Id"
+    },
+    "event_media_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Media Type"
+    },
+    "event_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Sha256"
+    },
+    "previous_hash": {
+      "anyOf": [
+        {
+          "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Previous Hash"
+    },
+    "previous_version": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Previous Version"
+    },
+    "projection_task_id": {
+      "format": "uuid",
+      "title": "Projection Task Id",
+      "type": "string"
+    },
+    "projection_version": {
+      "minimum": 1,
+      "title": "Projection Version",
+      "type": "integer"
+    },
+    "result_hash": {
+      "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+      "title": "Result Hash",
+      "type": "string"
+    },
+    "result_version": {
+      "description": "Current version після task.",
+      "minimum": 1,
+      "title": "Result Version",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state_changed": {
+      "title": "State Changed",
+      "type": "boolean"
+    },
+    "target_collection": {
+      "maxLength": 120,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Target Collection",
+      "type": "string"
+    }
+  },
+  "required": [
+    "applied_to_current",
+    "cluster_time",
+    "committed_at",
+    "document_id",
+    "entity_uuid",
+    "projection_task_id",
+    "projection_version",
+    "result_hash",
+    "result_version",
+    "state_changed",
+    "target_collection"
+  ],
+  "title": "AppliedProjectionReceipt",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

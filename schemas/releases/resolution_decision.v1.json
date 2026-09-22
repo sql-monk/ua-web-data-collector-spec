@@ -1,0 +1,179 @@
+{
+  "$defs": {
+    "ResolutionAction": {
+      "description": "Дія entity resolution decision (§9.8).",
+      "enum": [
+        "merge",
+        "unmerge",
+        "reject",
+        "manual_link",
+        "manual_block"
+      ],
+      "title": "ResolutionAction",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/releases/resolution_decision.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Одне рішення entity resolution (§9.8): append-only, versioned, з provenance.",
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/ResolutionAction"
+    },
+    "actor": {
+      "description": "`system:<worker>` для auto, інакше operator id.",
+      "minLength": 1,
+      "title": "Actor",
+      "type": "string"
+    },
+    "calibration_version": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Calibration Version"
+    },
+    "canonical_group_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Canonical Group Id"
+    },
+    "decision_id": {
+      "format": "uuid",
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "decision_version": {
+      "minimum": 1,
+      "title": "Decision Version",
+      "type": "integer"
+    },
+    "effective_at": {
+      "format": "date-time",
+      "title": "Effective At",
+      "type": "string"
+    },
+    "evidence_refs": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "feature_values": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "description": "Ознаки matcher (JSON-скаляри; гроші тут не зберігаються).",
+      "title": "Feature Values",
+      "type": "object"
+    },
+    "member_entity_ids": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Member Entity Ids",
+      "type": "array"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "recorded_at": {
+      "format": "date-time",
+      "title": "Recorded At",
+      "type": "string"
+    },
+    "rule_or_model_version": {
+      "minLength": 1,
+      "title": "Rule Or Model Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "score": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Score"
+    },
+    "supersedes_decision_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Supersedes Decision Id"
+    }
+  },
+  "required": [
+    "action",
+    "actor",
+    "decision_id",
+    "decision_version",
+    "effective_at",
+    "member_entity_ids",
+    "reason",
+    "recorded_at",
+    "rule_or_model_version"
+  ],
+  "title": "ResolutionDecision",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

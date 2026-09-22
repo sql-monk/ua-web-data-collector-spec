@@ -53,8 +53,9 @@ usage-помилками Click) — усі три відображені ниж�
 завершується з кодом `NOT_IMPLEMENTED_EXIT_CODE = 2`. `collector version`
 реалізована повністю: друкує `package_version` (`importlib.metadata`),
 `git_sha` (env `COLLECTOR_GIT_SHA`, інакше `unknown`) і
-`schema_version=0.0.0-placeholder` (`collector.core.version`; реальну версію
-контрактів визначає WP-01C).
+`schema_version=1.0` (`collector.contracts.CONTRACTS_VERSION`; у PR1 це був
+placeholder `0.0.0-placeholder`, замінений WP-01C за approved dependency-запитом
+`docs/plan/deps/WP-01C-to-WP-00.md`).
 
 **Правило стаба контракту §16.2:** стаб визначається лише рядком stderr
 `not implemented: owned by WP-XX`, а не самим кодом виходу. Typer/Click

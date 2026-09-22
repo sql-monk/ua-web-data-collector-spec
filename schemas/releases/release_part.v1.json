@@ -1,0 +1,105 @@
+{
+  "$id": "https://ua-collector.local/schemas/releases/release_part.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Один Parquet part release (§9.9).",
+  "properties": {
+    "format": {
+      "description": "Напр. `parquet`.",
+      "minLength": 1,
+      "title": "Format",
+      "type": "string"
+    },
+    "max_effective_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Effective At"
+    },
+    "max_system_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max System At"
+    },
+    "min_effective_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Min Effective At"
+    },
+    "min_system_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Min System At"
+    },
+    "partition": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Ключі партиції.",
+      "title": "Partition",
+      "type": "object"
+    },
+    "row_count": {
+      "minimum": 0,
+      "title": "Row Count",
+      "type": "integer"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Sha256",
+      "type": "string"
+    },
+    "size_bytes": {
+      "minimum": 0,
+      "title": "Size Bytes",
+      "type": "integer"
+    },
+    "uri": {
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9+.-]*://.+",
+      "title": "Uri",
+      "type": "string"
+    }
+  },
+  "required": [
+    "format",
+    "row_count",
+    "sha256",
+    "size_bytes",
+    "uri"
+  ],
+  "title": "ReleasePart",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

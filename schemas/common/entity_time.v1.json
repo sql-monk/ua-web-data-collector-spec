@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "TimePrecision": {
+      "description": "Точність часу, заявленого джерелом (§9.6).",
+      "enum": [
+        "second",
+        "minute",
+        "hour",
+        "day",
+        "month",
+        "year",
+        "unknown"
+      ],
+      "title": "TimePrecision",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/common/entity_time.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Блок `time` current document (§9.2): source і system осі в одному об'єкті.\n\nРегресія R-43: `source_event_at`/`source_updated_at`, що точно дорівнюють `fetched_at`,\nвідхиляються — це ознака підміни source time crawler time (§9.6).",
+  "properties": {
+    "fetched_at": {
+      "format": "date-time",
+      "title": "Fetched At",
+      "type": "string"
+    },
+    "ingested_at": {
+      "format": "date-time",
+      "title": "Ingested At",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "source_event_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Event At"
+    },
+    "source_time_inferred": {
+      "default": false,
+      "title": "Source Time Inferred",
+      "type": "boolean"
+    },
+    "source_time_precision": {
+      "$ref": "#/$defs/TimePrecision",
+      "default": "unknown"
+    },
+    "source_timezone_raw": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Timezone Raw"
+    },
+    "source_updated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Updated At"
+    }
+  },
+  "required": [
+    "fetched_at",
+    "ingested_at",
+    "observed_at"
+  ],
+  "title": "EntityTime",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

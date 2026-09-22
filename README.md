@@ -6,6 +6,7 @@
 - [docs/research/ua-marketplaces.md](docs/research/ua-marketplaces.md) — live-паспорти 12 українських каталогів і автобазарів: URL, sitemap, схеми сторінок, поля, блокування та рейтинги.
 - [docs/research/news-central-baltic.md](docs/research/news-central-baltic.md), [news-western.md](docs/research/news-western.md), [news-southern.md](docs/research/news-southern.md) — live-паспорти 58 новинних джерел у 19 країнах.
 - [docs/research/source-registry.yaml](docs/research/source-registry.yaml) — канонічні `source_id`, display names, домени та рейтинги всіх 70 джерел.
+- [docs/contracts.md](docs/contracts.md) — shared data contracts (WP-01C): identity/temporal/canonical serialization, `state_hash`, resolution/release, версіонування схем і ownership.
 - [REVIEW.md](REVIEW.md) — результати критичного рев’ю ТЗ і виправлення.
 - [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) — план реалізації субагентами: конвеєр work packages, картки, gate-и.
 - [docs/plan/ledger.md](docs/plan/ledger.md) — стан кожного work package/під-PR у конвеєрі.
@@ -66,7 +67,7 @@ uv run collector --help
 
 | Команда | Owner-WP |
 |---|---|
-| `collector version` | WP-00 (реальна — package version, Git SHA, schema version placeholder) |
+| `collector version` | WP-00 (реальна — package version, Git SHA, `schema_version` = `collector.contracts.CONTRACTS_VERSION`) |
 | `collector db migrate` | WP-01A |
 | `collector db ensure-mongo --validators --indexes` | WP-01B |
 | `collector worker <role>` (`discovery\|fetch\|browser\|parse\|projector\|translation\|export\|maintenance`) | WP-01D |
