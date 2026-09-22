@@ -84,3 +84,13 @@ def test_can_commit_requires_live_lease_same_generation_and_leased_status() -> N
 def test_claim_generation_positive_int() -> None:
     with pytest.raises(ValidationError):
         claim(claim_generation=0)
+
+
+def test_can_commit_rejects_naive_or_non_utc_now() -> None:
+    """Gate 2 T-06: naive `now` — контрактна ValueError, не TypeError із datetime."""
+    from datetime import datetime, timedelta, timezone
+
+    with pytest.raises(ValueError, match="aware UTC"):
+        can_commit(claim(), now=datetime(2026, 9, 1, 12, 5), generation=3)
+    with pytest.raises(ValueError, match="aware UTC"):
+        can_commit(claim(), now=at(5).astimezone(timezone(timedelta(hours=3))), generation=3)

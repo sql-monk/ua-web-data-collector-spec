@@ -219,7 +219,9 @@ inline bytes ≤ 256 KiB і `event_sha256 == sha256(event_bytes)`. `ProjectionAc
   підлягає; `unmerge` виводить members із груп; `reject` груп не змінює.
 - `ReleaseManifest`: переходи `draft→building→validating→published→superseded`, з будь-якого
   стану до `published` можливий `failed`; `failed`/`superseded` — термінальні. `published`
-  immutable: `validate_manifest_update` дозволяє змінити лише `state` і `superseding_release_id`.
+  immutable: `validate_manifest_update` дозволяє змінити лише `state` і `superseding_release_id`;
+  `superseded` (колишній published) — жодне поле, крім ще не заданого `superseding_release_id`.
+  `transition_release(..., **changes)` відхиляє `state`/`release_id` у `changes`.
   `published/superseded` вимагають `published_at`, непорожні `parts`, `quality_report`,
   `reconciliation_result`.
 

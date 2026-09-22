@@ -107,11 +107,6 @@ def test_published_manifest_frozen_and_validate_json_round_trip_identical() -> N
     assert again == published
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="WP-01C-T-01: validate_manifest_update охороняє лише published, не superseded",
-)
 def test_superseded_manifest_stays_immutable_like_published() -> None:
     """§9.9: «Published dataset release є immutable», superseded — теж колишній published.
 
@@ -128,11 +123,6 @@ def test_superseded_manifest_stays_immutable_like_published() -> None:
     assert not accepted, "superseded manifest прийняв зміну tag"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="WP-01C-T-02: transition_release(**changes) приймає state= в обхід таблиці",
-)
 def test_transition_release_cannot_override_target_state_via_changes() -> None:
     """Знахідка тестувальника: `**changes` може містити `state` і обійти таблицю переходів."""
     try:

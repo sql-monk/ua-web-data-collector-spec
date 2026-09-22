@@ -33,6 +33,8 @@ RELEASE_TRANSITIONS: Final[dict[ReleaseState, frozenset[ReleaseState]]] = {
 """Дозволені переходи станів release (§9.9)."""
 
 _MUTABLE_AFTER_PUBLISH: Final = frozenset({"state", "superseding_release_id"})
+_IMMUTABLE_STATES: Final = frozenset({ReleaseState.PUBLISHED, ReleaseState.SUPERSEDED})
+_RESERVED_TRANSITION_KEYS: Final = frozenset({"state", "release_id"})
 
 
 class ReleaseTransitionError(ValueError):
@@ -188,29 +190,43 @@ def transition_release(
     """Новий manifest у стані `target`; недозволений перехід → `ReleaseTransitionError`.
 
     `changes` — поля, які дозволено виставити разом із переходом (`published_at`,
-    `superseding_release_id`, `parts`, `quality_report`, ...); для `published` manifest
-    дозволені лише `state`/`superseding_release_id` (`validate_manifest_update`).
+    `superseding_release_id`, `parts`, `quality_report`, ...); ключі `state`/`release_id` у
+    `changes` заборонені (стан задається лише `target`, T-02); для `published` manifest
+    дозволено лише `superseding_release_id` (`validate_manifest_update`).
     """
+    reserved = sorted(_RESERVED_TRANSITION_KEYS & changes.keys())
+    if reserved:
+        msg = f"changes не може містити {reserved}: стан задає лише target, release_id незмінний"
+        raise ReleaseTransitionError(msg)
     if not can_transition(manifest.state, target):
         msg = f"перехід {manifest.state.value} → {target.value} не дозволений"
         raise ReleaseTransitionError(msg)
-    candidate = manifest.model_copy(update={"state": target, **changes})
+    candidate = manifest.model_copy(update={**changes, "state": target})
     candidate = ReleaseManifest.model_validate(candidate.model_dump(by_alias=True))
     validate_manifest_update(manifest, candidate)
     return candidate
 
 
 def validate_manifest_update(previous: ReleaseManifest, candidate: ReleaseManifest) -> None:
-    """Опублікований release immutable: змінюються лише `state` і `superseding_release_id`."""
+    """Опублікований release immutable (§9.9), і після `superseded` теж (T-01).
+
+    `published` → дозволено лише перехід у `superseded` з `superseding_release_id`;
+    `superseded` (колишній published, термінальний) → жодне поле не змінюється, крім
+    `superseding_release_id`, якщо він ще не був заданий.
+    """
     if previous.release_id != candidate.release_id:
         msg = "release_id не змінюється"
         raise ReleaseTransitionError(msg)
-    if previous.state is not ReleaseState.PUBLISHED:
+    if previous.state not in _IMMUTABLE_STATES:
         return
     before = previous.model_dump(mode="json", by_alias=True)
     after = candidate.model_dump(mode="json", by_alias=True)
     changed = sorted(key for key in before if before[key] != after.get(key))
-    illegal = [key for key in changed if key not in _MUTABLE_AFTER_PUBLISH]
+    if previous.state is ReleaseState.PUBLISHED:
+        illegal = [key for key in changed if key not in _MUTABLE_AFTER_PUBLISH]
+    else:
+        allowed_link = "superseding_release_id" if previous.superseding_release_id is None else None
+        illegal = [key for key in changed if key != allowed_link]
     if illegal:
-        msg = f"published release immutable: змінені поля {illegal}"
+        msg = f"{previous.state.value} release immutable: змінені поля {illegal}"
         raise ReleaseTransitionError(msg)

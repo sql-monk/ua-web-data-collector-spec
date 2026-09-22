@@ -246,3 +246,30 @@ def test_publish_requires_evidence_and_failed_is_terminal() -> None:
 def test_part_time_ranges_validated() -> None:
     with pytest.raises(ValidationError, match="max time"):
         part().model_validate({**part().model_dump(), "max_effective_at": at(-2000)})
+
+
+def test_superseded_is_immutable_except_missing_link() -> None:
+    """Gate 2 T-01: superseded (колишній published) не приймає зміну жодного поля."""
+    superseded = transition_release(
+        publish(draft()), ReleaseState.SUPERSEDED, superseding_release_id=NEXT_RELEASE_ID
+    )
+    for field, value in (
+        ("tag", "renamed"),
+        ("parts", []),
+        ("config_hash", SHA_A),
+        ("superseding_release_id", UUID(int=77)),
+        ("state", ReleaseState.PUBLISHED),
+    ):
+        tampered = superseded.model_copy(update={field: value})
+        with pytest.raises(ReleaseTransitionError, match="superseded release immutable"):
+            validate_manifest_update(superseded, tampered)
+    validate_manifest_update(superseded, superseded)  # ідентичний — не мутація
+
+
+def test_transition_release_rejects_state_and_release_id_in_changes() -> None:
+    """Gate 2 T-02: `state`/`release_id` у `**changes` не обходять RELEASE_TRANSITIONS."""
+    with pytest.raises(ReleaseTransitionError, match="state"):
+        transition_release(draft(), ReleaseState.FAILED, state=ReleaseState.VALIDATING)
+    with pytest.raises(ReleaseTransitionError, match="release_id"):
+        transition_release(draft(), ReleaseState.BUILDING, release_id=NEXT_RELEASE_ID)
+    assert transition_release(draft(), ReleaseState.FAILED).state is ReleaseState.FAILED

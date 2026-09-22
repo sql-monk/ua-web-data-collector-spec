@@ -327,3 +327,37 @@ $ uv run pre-commit run --all-files
 334 замість 335: `test_model_rejects_other_major` параметризований лише `VersionedDocument` (7 → 6);
 відхилення іншого major для current document покриває
 `test_current.py::test_current_document_matches_spec_9_2_shape`.
+
+## Виправлення після gate 2
+
+Звіт тестувальника `docs/plan/reports/WP-01C/testing.md` (вердикт pass, +117 тестів у `1c6c5da`,
+два strict-xfail на дефекти). Виправлено у коміті `fix(wp-01c): gate 2 findings T-01/T-02/T-06`:
+
+| Знахідка | Виправлення | Регресійний тест |
+|---|---|---|
+| T-01 (medium) `validate_manifest_update` охороняв лише `published` | Guard тепер для `{published, superseded}`: `published` → змінюються лише `state`/`superseding_release_id`; `superseded` → жодне поле, крім `superseding_release_id`, якщо він ще `None`. Повідомлення `"<state> release immutable: змінені поля [...]"` | `test_release.py::test_superseded_is_immutable_except_missing_link`; тестувальника `test_release_adversarial.py::test_superseded_manifest_stays_immutable_like_published` |
+| T-02 (low) `state` у `**changes` обходив таблицю переходів | `transition_release` відхиляє ключі `state`/`release_id` у `changes` (`ReleaseTransitionError`) до перевірки переходу; `state` ставиться після `**changes` | `test_release.py::test_transition_release_rejects_state_and_release_id_in_changes`; `test_release_adversarial.py::test_transition_release_cannot_override_target_state_via_changes` |
+| T-06 (info) `can_commit` з naive `now` → `TypeError` | Перевірка `now.utcoffset() == 0` → `ValueError("can_commit: now має бути aware UTC datetime, ...")` | `test_artifacts.py::test_can_commit_rejects_naive_or_non_utc_now` |
+
+Правка у `tests/**` поза owned files WP-01C — єдина дозволена: знято два маркери
+`@pytest.mark.xfail(strict=True, ...)` (T-01, T-02) у `tests/unit/contracts/test_release_adversarial.py`;
+тіла тестів не змінені. `docs/contracts.md` §10 доповнено правилами для `superseded` і `changes`.
+
+Прогін (Windows, `PYTHONUTF8=1`):
+
+```text
+$ uv run ruff check .
+All checks passed!
+$ uv run ruff format --check .
+99 files already formatted
+$ uv run mypy src
+Success: no issues found in 38 source files
+$ uv run pytest -m "not live" -q
+SKIPPED [1] tests/unit/test_network_blocked.py:27: Windows: loopback потрібен asyncio
+454 passed, 1 skipped, 6 warnings in 11.14s          (0 failed, 0 xfailed, 0 xpassed)
+$ uv run collector contracts export --check
+schemas up to date: schemas
+$ uv run pre-commit run --all-files
+(усі hooks Passed)
+```
+

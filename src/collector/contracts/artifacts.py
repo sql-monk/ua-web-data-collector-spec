@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -85,8 +85,12 @@ def can_commit(claim: UploadClaim, now: datetime, generation: int) -> bool:
     """Commit predicate §10 п.5: `object_key + generation + lease_expires_at > now()`.
 
     Stale generation (reacquire підняв лічильник), прострочений lease або claim не в стані
-    `leased` не можуть створити DB reference.
+    `leased` не можуть створити DB reference. `now` має бути aware UTC — naive або не-UTC
+    значення є контрактною помилкою (`ValueError`), не порівнюється (T-06).
     """
+    if now.utcoffset() != timedelta(0):
+        msg = f"can_commit: now має бути aware UTC datetime, отримано {now!r}"
+        raise ValueError(msg)
     return (
         claim.status is UploadClaimStatus.LEASED
         and claim.claim_generation == generation
