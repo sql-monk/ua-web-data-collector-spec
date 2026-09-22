@@ -115,3 +115,35 @@ def test_redaction_applies_to_stdlib_extra_fields() -> None:
     assert event["event"] == "auth"
     assert event["token"] == REDACTED_VALUE
     assert "t-123" not in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    "key", ["phone", "Phones", "email", "EMAILS", "contact", "contacts", "messenger", "seller_name"]
+)
+def test_contact_keys_are_redacted_in_logs(key: str) -> None:
+    """§13/R-11: контакти продавців не дублюються в технічних логах."""
+    stream = io.StringIO()
+    configure_logging("INFO", stream=stream)
+    get_logger("collector.test").info("seller", **{key: "+380501234567"}, source_id="olx_ua")
+
+    (event,) = _json_lines(stream)
+    assert event[key] == REDACTED_VALUE
+    assert event["source_id"] == "olx_ua"
+    assert "+380501234567" not in stream.getvalue()
+
+
+def test_nested_contact_block_is_redacted_recursively() -> None:
+    event = redact_secrets(
+        None,
+        "info",
+        {
+            "event": "listing",
+            "seller": {"seller_name": "Іван", "phones": ["+380501234567"], "city": "Київ"},
+            "observations": [{"email": "a@b.invalid", "price": 100}],
+        },
+    )
+    assert event == {
+        "event": "listing",
+        "seller": {"seller_name": REDACTED_VALUE, "phones": REDACTED_VALUE, "city": "Київ"},
+        "observations": [{"email": REDACTED_VALUE, "price": 100}],
+    }

@@ -5,10 +5,12 @@
 (httpx, pymongo, uvicorn, alembic, ...) проходять той самий ланцюг processors
 (`ProcessorFormatter` + `foreign_pre_chain`), тому теж виходять JSON-рядками.
 
-Секрети (§13): значення ключів з `REDACTED_KEYS` (Authorization, Cookie, API keys,
-tokens, passwords — case-insensitive, рекурсивно у вкладених dict/list) підміняються на
-`[redacted]` до рендерингу. URL із credentials/токенами у query у поля логів не
-потрапляють — за це відповідають викликачі.
+Секрети і контакти (§13): значення ключів з `REDACTED_KEYS` (Authorization, Cookie,
+API keys, tokens, passwords, а також phone/email/contact/messenger/seller_name —
+case-insensitive, рекурсивно у вкладених dict/list) підміняються на `[redacted]` до
+рендерингу. Публічні контакти продавців зберігаються лише в domain collections та
+immutable domain artifacts, не в технічних логах (§13, §18). URL із credentials/токенами
+у query у поля логів не потрапляють — за це відповідають викликачі.
 
 `configure_logging` замінює handlers root logger (зокрема handler pytest `caplog`):
 у тестах передавати `stream=` і перевіряти вивід, а не `caplog.records`.
@@ -39,6 +41,15 @@ REDACTED_KEYS: frozenset[str] = frozenset(
         "token",
         "password",
         "secret",
+        # Контакти (§13, R-11): лише в domain collections/artifacts, не в логах.
+        "phone",
+        "phones",
+        "email",
+        "emails",
+        "contact",
+        "contacts",
+        "messenger",
+        "seller_name",
     }
 )
 
