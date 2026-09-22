@@ -11,12 +11,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b --force && vite build",
-    "build:image": "tsc -b --force tsconfig.app.json && vite build",
+    "build:image": "tsc -b --force tsconfig.app.json && vite build --mode image",
     "preview": "vite preview",
     "lint": "eslint . --max-warnings 0 && prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:build": "vitest run tests/unit/build-contract.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

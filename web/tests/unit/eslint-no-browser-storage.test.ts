@@ -34,7 +34,9 @@ function lint(code: string): Linter.LintMessage[] {
   return new Linter().verify(code, { rules: ruleConfig });
 }
 
-describe('ESLint-заборона browser storage (§13)', () => {
+// Файл запускає ESLint програмно з type-aware конфігом: на холодному кеші TS це десятки
+// секунд. Таймаути підняті точково тут, а не глобально у vite.config.ts (код-рев'ю L-2).
+describe('ESLint-заборона browser storage (§13)', { timeout: 120_000 }, () => {
   it('правила ввімкнені як error для src/', () => {
     for (const rule of STORAGE_RULES) {
       const entry = ruleConfig[rule];
@@ -46,11 +48,18 @@ describe('ESLint-заборона browser storage (§13)', () => {
   it('повідомлення пояснює причину і посилається на §13', () => {
     const entry = ruleConfig['no-restricted-globals'] as Linter.RuleEntry<unknown[]>;
     const options = (entry as unknown[]).slice(1) as { name: string; message: string }[];
-    expect(options.map((o) => o.name).sort()).toEqual(['localStorage', 'sessionStorage']);
+    // `indexedDB`/`caches` додані за security-рев'ю L-2: runtime-guard їх не покриває.
+    expect(options.map((o) => o.name).sort()).toEqual([
+      'caches',
+      'indexedDB',
+      'localStorage',
+      'sessionStorage',
+    ]);
     for (const option of options) {
       expect(option.message).toContain('§13');
-      expect(option.message).toContain('HttpOnly');
     }
+    const sessionStorageBan = options.find((o) => o.name === 'sessionStorage');
+    expect(sessionStorageBan?.message).toContain('HttpOnly');
   });
 
   it.each([
@@ -94,22 +103,15 @@ describe('ESLint-заборона browser storage (§13)', () => {
    * Ці тести не дають прибрати runtime-страховку непомітно — ні модуль, ні його
    * встановлення, ні E2E-перевірку, що alias-обхід у реальному браузері падає.
    */
-  it('runtime-страховка проти alias-обходу існує у src і встановлюється у main', async () => {
-    const guard = await readFile(join(projectRoot, 'src', 'browserStorageGuard.ts'), 'utf8');
+  it('runtime-страховка існує і підключена у точці входу', async () => {
+    // Навмисно НЕ перевіряємо форму реалізації guard-а (код-рев'ю L-4) — його поведінку
+    // покриває browser-storage-guard.test.ts, а обхід у браузері — E2E. Тут лише факт, що
+    // модуль існує і його викликає `main.tsx`: без цього alias-форми знову проходять німо.
     const main = await readFile(join(projectRoot, 'src', 'main.tsx'), 'utf8');
 
-    expect(guard).toMatch(/Object\.defineProperty/);
-    expect(guard).toMatch(/localStorage/);
-    expect(guard).toMatch(/sessionStorage/);
-    expect(guard).toMatch(/throw new TypeError/);
-    expect(main).toMatch(/installBrowserStorageGuard\(\)/);
-  });
-
-  it('E2E доводить, що alias-обхід падає у реальному браузері', async () => {
-    const spec = await readFile(join(projectRoot, 'tests', 'e2e', 'smoke.spec.ts'), 'utf8');
-
-    expect(spec).toMatch(/alias/i);
-    expect(spec).toMatch(/NOT BLOCKED/);
-    expect(spec).toMatch(/storageState\(\)/);
+    await expect(
+      readFile(join(projectRoot, 'src', 'browserStorageGuard.ts'), 'utf8'),
+    ).resolves.toBeTruthy();
+    expect(main).toMatch(/installBrowserStorageGuard/);
   });
 });

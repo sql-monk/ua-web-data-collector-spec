@@ -5,7 +5,11 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 // Vite + Vitest в одному конфігу (§8). `base: '/'` — GUI подається з кореня nginx.
-export default defineConfig({
+// `mode: 'image'` (скрипт `build:image`, який виконує web/Dockerfile) вимикає sourcemap:
+// production-образ — єдиний публічний сервіс стека, а `.map` містить повний оригінальний
+// TS-код у `sourcesContent` і віддавався б анонімно з `expires 1y` (код-рев'ю M-2).
+// Локальний `npm run build` мапи лишає — вони потрібні розробнику і в CI-артефактах.
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
   base: '/',
   resolve: {
@@ -17,7 +21,7 @@ export default defineConfig({
     // Route-level code splitting (§7.7) робить React.lazy; окремі chunk-и мають бути видимі
     // у dist/assets — це перевіряє tests/unit/build-contract.test.ts через маніфест роутів.
     outDir: 'dist',
-    sourcemap: true,
+    sourcemap: mode !== 'image',
     target: 'es2023',
   },
   server: {
@@ -44,9 +48,8 @@ export default defineConfig({
     include: ['tests/unit/**/*.test.{ts,tsx}'],
     css: false,
     restoreMocks: true,
-    // `eslint-no-browser-storage.test.ts` запускає ESLint програмно з type-aware
-    // конфігом — це десятки секунд на холодному кеші TS. Дефолтні 5/10 с замалі.
-    testTimeout: 60_000,
-    hookTimeout: 120_000,
+    // Таймаути — не глобальні: підняті лише у файлі, який запускає ESLint програмно
+    // (`tests/unit/eslint-no-browser-storage.test.ts`), щоб зависання будь-якого іншого
+    // тесту коштувало 5 с, а не хвилину (код-рев'ю L-2).
   },
-});
+}));

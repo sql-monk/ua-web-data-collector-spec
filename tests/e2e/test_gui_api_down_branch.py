@@ -20,8 +20,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import socket
 import subprocess
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -44,10 +44,21 @@ def _image_exists() -> bool:
     return proc.returncode == 0
 
 
+# Код-рев'ю PR3, H-1: у CI пропуск цих тестів заборонений. Локально skip зручний (стек
+# піднімають не завжди), але в CI стек піднімає крок `up -d --wait`, і мовчазний skip
+# означав би, що §13-інваріанти nginx не перевіряються взагалі. Тому в CI умова skip
+# вимикається: тест впаде гучно, а не зникне з переліку.
+CI = os.environ.get("CI", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def skip_unless_available(available: bool, reason: str) -> pytest.MarkDecorator:
+    return pytest.mark.skipif(not available and not CI, reason=reason)
+
+
 pytestmark = [
     pytest.mark.e2e,
-    pytest.mark.skipif(
-        not _image_exists(),
+    skip_unless_available(
+        _image_exists(),
         reason=f"немає image {GUI_IMAGE} — зберіть `docker compose build gui`",
     ),
 ]
@@ -66,10 +77,20 @@ def _docker(*args: str, check: bool = True) -> str:
     return proc.stdout.strip()
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+def _published_port(container: str) -> int:
+    """Реальний порт, який Docker призначив контейнеру.
+
+    Раніше порт вибирався заздалегідь (`bind(0)` → `close()` → `docker run -p`) — класичний
+    TOCTOU: під паралельним прогоном між звільненням і публікацією порт міг зайняти хтось
+    інший (`port is already allocated`). Тепер порт призначає Docker (`-p 127.0.0.1::8080`),
+    а ми його лише зчитуємо (код-рев'ю M-4).
+    """
+    mapping = _docker("port", container, "8080")
+    for line in mapping.splitlines():
+        host, _, port = line.strip().rpartition(":")
+        if host.strip("[]") in {"127.0.0.1", "::1"} and port.isdigit():
+            return int(port)
+    raise AssertionError(f"не знайдено опублікований порт {container}: {mapping!r}")
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +99,6 @@ def gui_without_api() -> Iterator[str]:
     suffix = uuid.uuid4().hex[:8]
     network = f"collector-test-noapi-{suffix}"
     container = f"collector-test-gui-{suffix}"
-    port = _free_port()
 
     _docker("network", "create", network)
     try:
@@ -97,10 +117,10 @@ def gui_without_api() -> Iterator[str]:
             "--tmpfs",
             "/var/cache/nginx:mode=0700,uid=101,gid=101,size=32m",
             "-p",
-            f"127.0.0.1:{port}:8080",
+            "127.0.0.1::8080",
             GUI_IMAGE,
         )
-        base = f"http://127.0.0.1:{port}"
+        base = f"http://127.0.0.1:{_published_port(container)}"
         _wait_until_serving(base, container)
         yield base
     finally:
@@ -108,17 +128,28 @@ def gui_without_api() -> Iterator[str]:
         _docker("network", "rm", network, check=False)
 
 
-def _wait_until_serving(base: str, container: str, attempts: int = 60) -> None:
+def _wait_until_serving(base: str, container: str, timeout: float = 60.0) -> None:
+    """Чекати, доки nginx почне відповідати, але не довше `timeout` секунд.
+
+    Раніше цикл крутився `range(60)` без пауз: одразу після `docker run -d` порт ще не
+    слухається, тому `urlopen` падає `ConnectionRefusedError` МИТТЄВО, і всі 60 спроб
+    відпрацьовували за ~0.05 с — фактичного очікування не було, а на повільнішому хості
+    тест падав без зв'язку з предметом перевірки (код-рев'ю M-4). Тепер — явний дедлайн за
+    монотонним годинником і пауза між спробами.
+    """
+    deadline = time.monotonic() + timeout
     last: Exception | None = None
-    for _ in range(attempts):
+    while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(f"{base}/healthz", timeout=2) as resp:  # noqa: S310
                 if resp.status == 200:
                     return
         except (OSError, urllib.error.HTTPError) as exc:  # контейнер ще стартує
             last = exc
+        time.sleep(0.5)
     logs = _docker("logs", "--tail", "50", container, check=False)
-    raise AssertionError(f"gui не піднявся на {base}: {last}\n{logs}")
+    detail = f"gui не піднявся на {base} за {timeout:g} с: {last}"
+    raise AssertionError(detail + chr(10) + logs)
 
 
 def _fetch(url: str) -> tuple[int, dict[str, str], str]:

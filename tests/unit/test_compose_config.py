@@ -692,7 +692,8 @@ def test_gui_nginx_has_restrictive_csp_and_security_headers() -> None:
 def test_gui_nginx_proxies_api_same_origin_and_hides_health_detail() -> None:
     conf = GUI_NGINX_CONF_PATH.read_text(encoding="utf-8")
     assert "listen 8080;" in conf and "listen 80;" not in conf, "non-root не слухає <1024"
-    assert "set $api_upstream http://api:8000;" in conf
+    assert "set $api_host api:8000;" in conf
+    assert "set $api_upstream http://$api_host;" in conf
     assert "resolver 127.0.0.11" in conf, "docker DNS: перестворення api не ламає proxy"
     assert "proxy_pass $api_upstream$request_uri;" in conf
     # SPA fallback: маршрути React Router віддають index.html, а не 404.
@@ -718,3 +719,94 @@ def test_ci_runs_web_pipeline_from_spec_16_2() -> None:
     # GUI image збирається і перевіряється на non-root у job docker.
     docker_runs = " ".join(step.get("run", "") for step in ci["jobs"]["docker"]["steps"])
     assert "--profile gui" in docker_runs, "clean-host acceptance §16.2 включає gui"
+
+
+def _nginx_block(conf: str, header: str) -> str:
+    """Тіло location-блока nginx.conf (до рядка з закриваючою дужкою того ж рівня)."""
+    body = conf.split(header, 1)[1]
+    return body.split(chr(10) + "    }", 1)[0]
+
+
+def _nginx_directives(text: str) -> str:
+    """Лише директиви, без коментарів: коментарі пояснюють, чому чогось НЕ робимо, і
+    містять ті самі рядки, наявність яких перевіряють assert-и нижче."""
+    return chr(10).join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_gui_nginx_does_not_forward_client_host_to_api() -> None:
+    """SEC M-1: `server_name _` приймає будь-який Host; пересилати його в api не можна.
+
+    Підтверджений наслідок до фіксу: `curl -H 'Host: evil.example.com'` давав
+    `location: http://evil.example.com/...` від FastAPI `redirect_slashes`. У WP-11A це був би
+    OIDC `redirect_uri` на чужий домен, у WP-13 — cache poisoning.
+    """
+    conf = GUI_NGINX_CONF_PATH.read_text(encoding="utf-8")
+    api_block = _nginx_block(conf, "location /api/ {")
+    assert "proxy_set_header Host $api_host;" in api_block, "Host має бути фіксований"
+    directives = _nginx_directives(conf)
+    assert "proxy_set_header Host $host;" not in directives, "клієнтський Host не пересилається"
+    assert "X-Forwarded-Host" not in directives, "той самий підроблюваний Host під іншим іменем"
+    # absolute-Location від api (побудований з внутрішнього Host) стає відносним, інакше
+    # штатний редирект повів би браузер на `http://api:8000/…`.
+    assert "proxy_redirect http://$api_host/ /;" in api_block
+
+
+def test_gui_nginx_does_not_forward_spoofable_client_ip() -> None:
+    """Код-рев'ю M-3 / SEC L-4: gui — перший hop, тому XFF замінюється, а не доклеюється."""
+    conf = GUI_NGINX_CONF_PATH.read_text(encoding="utf-8")
+    assert "proxy_set_header X-Forwarded-For $remote_addr;" in conf
+    assert "$proxy_add_x_forwarded_for" not in _nginx_directives(conf), (
+        "доклеювання дозволяє клієнту підробити перший елемент ланцюга"
+    )
+
+
+def test_gui_nginx_access_log_drops_query_string() -> None:
+    """SEC M-2 (§13): `?access_token=…` / OIDC `?code=…` не мають осідати в логах хоста."""
+    conf = GUI_NGINX_CONF_PATH.read_text(encoding="utf-8")
+    assert "log_format gui_no_query" in conf
+    log_format = conf.split("log_format gui_no_query", 1)[1].split(";", 1)[0]
+    assert "$uri" in log_format, "шлях без query"
+    assert "$query_string" not in log_format and "$args" not in log_format
+    assert "$request " not in log_format
+    assert "access_log /var/log/nginx/access.log gui_no_query;" in conf
+
+
+def test_gui_nginx_does_not_serve_source_maps() -> None:
+    """Код-рев'ю M-2 / SEC L-1: `.map` несе повний оригінальний TS і віддавався б анонімно."""
+    conf = GUI_NGINX_CONF_PATH.read_text(encoding="utf-8")
+    assert re.search(r"location ~ \\.map\$ \{", conf), conf[:0] or "немає location для .map"
+    map_block = conf.split("location ~", 1)[1].split("}", 1)[0]
+    assert "return 404;" in map_block
+    # Друга лінія оборони — образ узагалі не містить мап (`vite build --mode image`).
+    vite_config = (REPO_ROOT / "web" / "vite.config.ts").read_text(encoding="utf-8")
+    assert "sourcemap: mode !== 'image'" in vite_config
+    package_json = (REPO_ROOT / "web" / "package.json").read_text(encoding="utf-8")
+    assert "vite build --mode image" in package_json
+
+
+def test_gui_nginx_resolver_has_timeout_and_api_without_slash_is_not_spa() -> None:
+    """Код-рев'ю L-3 і L-8."""
+    conf = GUI_NGINX_CONF_PATH.read_text(encoding="utf-8")
+    assert "resolver_timeout" in conf, "фаза DNS не покрита proxy_connect_timeout"
+    assert "location = /api {" in conf, "`/api` без слеша не має падати у SPA-fallback"
+    api_exact = conf.split("location = /api {", 1)[1].split("}", 1)[0]
+    assert "return 404" in api_exact
+    api_block = _nginx_block(conf, "location /api/ {")
+    assert "expires -1;" in api_block, "§7.7: відповіді API не кешуються браузером"
+
+
+def test_ci_runs_gui_runtime_tests_against_live_stack() -> None:
+    """Код-рев'ю H-1: без цього кроку 19 runtime-тестів gui у CI мовчки пропускались."""
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    docker_steps = ci["jobs"]["docker"]["steps"]
+    runs = [s.get("run", "") for s in docker_steps]
+    pytest_at = next((i for i, r in enumerate(runs) if "pytest -m e2e" in r), None)
+    assert pytest_at is not None, "job docker не запускає runtime-тести gui"
+    up_at = next(i for i, r in enumerate(runs) if "up -d --wait" in r)
+    down_at = next(i for i, r in enumerate(runs) if "down -v" in r)
+    assert up_at < pytest_at < down_at, "e2e мають іти між `up --wait` і `down -v`"
+    # Контракт збірки — окремим прогоном ПІСЛЯ build (у ланцюжку §16.2 test іде до build).
+    web_runs = [s.get("run", "") for s in ci["jobs"]["web"]["steps"]]
+    build_at = next(i for i, r in enumerate(web_runs) if "npm run build" in r)
+    test_build_at = next(i for i, r in enumerate(web_runs) if "npm run test:build" in r)
+    assert build_at < test_build_at

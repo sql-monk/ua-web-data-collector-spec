@@ -15,12 +15,18 @@ import { routes } from '~/routes/router';
  * `dist/` існує лише після `npm run build`, тому набір `describe.skipIf`: у ланцюжку §16.2
  * (`lint → test → build`) тести йдуть ДО збірки, а локально/після збірки вони виконуються.
  * Тому це доповнення до перевірки намірів, а не заміна їй.
+ *
+ * Код-рев'ю PR3 (H-1): у CI цей skip був тихою втратою покриття — `npm run test` іде до
+ * `npm run build`, і всі тести файлу зникали. Тепер CI виконує їх окремим кроком
+ * `npm run test:build` ПІСЛЯ збірки, а сам skip у CI заборонений: без `dist/` файл падає
+ * гучно, а не пропускається.
  */
+const CI = ['1', 'true', 'yes', 'on'].includes((process.env.CI ?? '').trim().toLowerCase());
 const DIST = join(process.cwd(), 'dist');
 const ASSETS = join(DIST, 'assets');
 const built = existsSync(ASSETS);
 
-describe.skipIf(!built)('зібраний артефакт: code splitting (§7.7)', () => {
+describe.skipIf(!built && !CI)('зібраний артефакт: code splitting (§7.7)', () => {
   const assets = built ? readdirSync(ASSETS) : [];
   const jsChunks = assets.filter((name) => name.endsWith('.js'));
 

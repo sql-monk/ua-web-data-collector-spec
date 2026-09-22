@@ -33,12 +33,17 @@ import tseslint from 'typescript-eslint';
  *     const w = window;                                   // ← lint чистий
  *     w.localStorage.setItem('access_token', token);      // ← lint чистий
  *
- * Тому статична заборона — не єдиний бар'єр. `src/browserStorageGuard.ts` підміняє обидва
+ * Тому статична заборона — не єдиний бар’єр. `src/browserStorageGuard.ts` підміняє обидва
  * сховища геттером, що кидає, і `src/main.tsx` ставить його до першого рендеру: alias-обхід
  * помирає у рантаймі. Перевірено `tests/unit/browser-storage-guard.test.ts` і E2E-тестом
  * «guard блокує обхід ESLint через alias». Прибирати guard разом із «зайвим» кодом не можна —
  * тоді alias-форми знову проходять непоміченими.
  */
+const PERSIST_BAN =
+  'Заборонено §13/§7.7: персистентні браузерні сховища (IndexedDB, Cache API) не ' +
+  'використовуються в operator GUI — контакти і токени не залишаються на диску користувача. ' +
+  'Runtime-guard їх НЕ покриває (security-рев’ю L-2), тому єдиний бар’єр — це правило.';
+
 const STORAGE_BAN =
   'Заборонено §13: токени і контакти не зберігаються у localStorage/sessionStorage ' +
   '(XSS-читання, немає HttpOnly/SameSite, не інвалідуються сервером). ' +
@@ -87,6 +92,8 @@ export default tseslint.config(
         'error',
         { name: 'localStorage', message: STORAGE_BAN },
         { name: 'sessionStorage', message: STORAGE_BAN },
+        { name: 'indexedDB', message: PERSIST_BAN },
+        { name: 'caches', message: PERSIST_BAN },
       ],
       'no-restricted-properties': [
         'error',
@@ -94,6 +101,10 @@ export default tseslint.config(
         { object: 'window', property: 'sessionStorage', message: STORAGE_BAN },
         { object: 'globalThis', property: 'localStorage', message: STORAGE_BAN },
         { object: 'globalThis', property: 'sessionStorage', message: STORAGE_BAN },
+        { object: 'window', property: 'indexedDB', message: PERSIST_BAN },
+        { object: 'window', property: 'caches', message: PERSIST_BAN },
+        { object: 'globalThis', property: 'indexedDB', message: PERSIST_BAN },
+        { object: 'globalThis', property: 'caches', message: PERSIST_BAN },
       ],
       // `window['localStorage']`/`self.localStorage` обходять правила вище — синтаксис явно.
       'no-restricted-syntax': [

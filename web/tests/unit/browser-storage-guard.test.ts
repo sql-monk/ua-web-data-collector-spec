@@ -38,7 +38,7 @@ function freshWindow(): Window {
       writable: true,
     });
   }
-  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   return fake;
 }
 
@@ -68,6 +68,18 @@ describe('installBrowserStorageGuard (§13)', () => {
     expect(() => {
       read(alias, 'localStorage').setItem('access_token', 'x');
     }).toThrow(/§13/);
+  });
+
+  it('попереджає в консоль один раз на сховище, а не на кожне звертання (M-1)', () => {
+    const target = freshWindow();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    installBrowserStorageGuard(target);
+
+    for (let i = 0; i < 5; i += 1) {
+      expect(() => read(target, 'localStorage')).toThrow(/§13/);
+    }
+    // Кидок — щоразу (заборона), warn — один (react-router читає sessionStorage на старті).
+    expect(warn.mock.calls.filter((call) => String(call[0]).includes('§13'))).toHaveLength(1);
   });
 
   it('ідемпотентна: повторний виклик не загортає guard у guard', () => {

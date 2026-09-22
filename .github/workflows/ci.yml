@@ -171,6 +171,11 @@ jobs:
       # для trivy HIGH нижче: без fix — датоване risk acceptance у звіті/ADR, не мовчазний
       # ignore). `npm ci` вище гарантує, що аудит іде по lockfile, а не по ре-резолвлених
       # версіях.
+      # §13 «Dependency scanning — щотижня і на кожен PR; critical CVE блокує». HIGH блокує
+      # в обох прогонах: перший виділяє runtime-залежності (те, що їде у браузер) окремим
+      # повідомленням, другий покриває весь toolchain — компрометований dev-пакет це теж
+      # ланцюжок постачання. Якщо колись з'явиться dev-only HIGH без фіксу — точковий
+      # `--exclude <pkg>` з CVE ID, owner і датою в ADR, а не зниження порогу.
       - name: npm audit (HIGH/CRITICAL блокують, §13)
         run: |
           npm audit --omit=dev --audit-level=high
@@ -184,6 +189,13 @@ jobs:
 
       - name: npm run build (tsc strict + vite)
         run: npm run build
+
+      # Код-рев'ю H-1: `npm run test` іде ДО збірки, тому tests/unit/build-contract.test.ts
+      # там гарантовано skip-иться (`dist/` у .gitignore). Другий прогін саме цього файлу
+      # після build — єдине місце, де контракт артефакту (route-chunk-и, content hash,
+      # index.html без inline-скрипта) реально перевіряється. `CI=true` забороняє skip.
+      - name: npm run test:build (контракт зібраного dist/)
+        run: npm run test:build
 
       # Версія browser binary береться з package-lock.json (@playwright/test pinned) — оновлення
       # Playwright автоматично оновлює й binary (§8).
@@ -257,9 +269,14 @@ jobs:
       # GUI image (WP-00 PR3): node builder → nginx-unprivileged. Збирається через compose,
       # бо використовує additional build context (deploy/compose/gui).
       - name: docker compose build gui
+        # COLLECTOR_GIT_SHA — з env workflow; решта — тут, інакше OCI-label `revision`
+        # GUI-образу лишався б `unknown` (код-рев'ю L-9).
+        env:
+          COLLECTOR_VERSION: 0.1.0
         run: |
-          docker compose build gui
+          COLLECTOR_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" docker compose build gui
           docker inspect "$COLLECTOR_GUI_IMAGE" --format 'User={{.Config.User}}' | grep -q 'User=101:101'
+          docker inspect "$COLLECTOR_GUI_IMAGE"             --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'             | grep -q "${{ github.sha }}"
 
       - name: SBOM (syft, SPDX JSON як artifact)
         uses: anchore/sbom-action@v0.24.2
@@ -335,6 +352,25 @@ jobs:
           printf '%s' "$headers" | grep -qi 'x-content-type-options: nosniff'
           printf '%s' "$headers" | grep -qi 'x-frame-options: DENY'
           curl -fsS http://localhost/api/v1/health/components | grep -q '"status":"ready"'
+
+      # Код-рев'ю H-1: 19 runtime-тестів gui виконуються ЛИШЕ тут — у job `python` немає ні
+      # стека, ні образу, тому там вони skip. Без цього кроку §13-інваріанти nginx
+      # (успадкування add_header, фази rewrite/access) не мають регресійного захисту в CI.
+      # `CI=true` (стандартна змінна GitHub Actions) забороняє skip усередині цих модулів.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python from .python-version
+        run: uv python install
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: pytest -m e2e (runtime-контракт gui проти піднятого стека)
+        run: uv run pytest -m e2e tests/e2e -rs
 
       - name: docker compose ps + health
         # Регресійний assert (gate 3, CR-2): кожен контейнер або running+healthy, або one-shot

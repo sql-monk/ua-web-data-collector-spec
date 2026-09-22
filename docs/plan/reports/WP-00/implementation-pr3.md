@@ -559,3 +559,125 @@ $ docker compose down -v                              exit=0
 - Vitest 4 — major-стрибок з 3.2.x, обраний свідомо: у лінійці 3.x виправлення
   GHSA-82fw-gwwq-j7x9 не випущено, а `--audit-level=high` пропустив би цю moderate. Прогнано
   локально повністю; конфіг змін не потребував, крім таймаутів.
+
+---
+
+## Відповіді на код-рев'ю
+
+Вхід: `docs/plan/reports/WP-00/code-review-pr3.md` (**changes_requested**: 1 high, 4 medium,
+9 low) і `docs/plan/reports/WP-00/security-pr3.md` (**approve**: 0 critical/high, 2 medium,
+4 low). База — `1901d6e`.
+
+### Код-рев'ю
+
+| # | Severity | Знахідка | Рішення | Що саме зроблено |
+|---|---|---|---|---|
+| H-1 | high | 19 pytest-тестів `tests/e2e/test_gui_*` і 4 тести `build-contract.test.ts` у CI гарантовано skip-аються → §13-інваріанти nginx без регресійного захисту | **fixed** | (а) job `docker` після `up -d --wait` отримав кроки `setup-uv` + `uv sync --frozen` + **`uv run pytest -m e2e tests/e2e -rs`** (між `up` і `down -v`); (б) job `web` — окремий крок **`npm run test:build`** після `npm run build` (новий npm-скрипт; у ланцюжку §16.2 `test` іде до `build`, тому контракт артефакту інакше не перевіряється); (в) **skip у CI заборонений**: у `test_gui_runtime_contract.py` і `test_gui_api_down_branch.py` умова стала `skipif(not available and not CI)`, у `build-contract.test.ts` — `skipIf(!built && !CI)`; (г) доданий тривожний тест `tests/e2e/test_runtime_suite_is_enforced.py`, який у CI падає з поясненням, якщо стек/образ відсутні. Перевірено обидва напрямки: `CI=true` зі стеком — **25 passed, 0 skipped**; `CI=true GUI_PORT=9` (імітація «стек не піднято») — тривожний тест **падає** з текстом про те, які модулі були б пропущені. Закріплено `test_ci_runs_gui_runtime_tests_against_live_stack` (порядок `up` → `pytest -m e2e` → `down -v` і `build` → `test:build`) |
+| M-1 | medium | `browserStorageGuard` пише `console.error` §13 на кожному завантаженні (штатний `restoreAppliedTransitions` React Router) | **fixed** | Розділено заборону і діагностику: кидок лишився **завжди** (це і є enforcement), а лог став `console.warn` **один раз на сховище** за життя сторінки, з поміткою, що виклик міг прийти з бібліотеки і застосунок від цього не ламається. Хибної тривоги на завантаженні більше немає, майбутній E2E-асерт «немає console errors» не впаде. Закріплено тестом «попереджає в консоль один раз на сховище, а не на кожне звертання (M-1)». Зафіксовано в `web/README.md` (підрозділ «Діагностика без шуму») і в шапці модуля |
+| M-2 | medium | production-образ публічно віддає source maps (1.5 МБ, `expires 1y`) | **fixed** | Два незалежні шари: (а) `vite build --mode image` (скрипт `build:image`, який виконує `web/Dockerfile`) вимикає `sourcemap` — `defineConfig(({ mode }) => …)`, `sourcemap: mode !== 'image'`; локальний `npm run build` мапи лишає, вони потрібні розробнику; (б) `location ~ \.map$ { return 404; }` у nginx — страхувальний шар на випадок, якщо мапи колись знову потраплять у образ. Перевірено на живому стеку: у `/usr/share/nginx/html/assets` **0** файлів `.map`, `GET /assets/index-*.js.map` → **404**. Закріплено `test_gui_nginx_does_not_serve_source_maps` (обидва шари) і runtime-тестом `test_source_maps_are_not_served` |
+| M-3 | medium | `X-Forwarded-For $proxy_add_x_forwarded_for` на єдиному edge дозволяє підробити перший елемент | **fixed** | `proxy_set_header X-Forwarded-For $remote_addr;` — edge є джерелом істини. Коментар для WP-11A/WP-13: повертати `$proxy_add_x_forwarded_for` лише коли перед `gui` з'явиться довірений TLS-termination. Закріплено `test_gui_nginx_does_not_forward_spoofable_client_ip` (перевіряє і відсутність `$proxy_add_x_forwarded_for` серед директив — коментарі при цьому не рахуються) |
+| M-3 (суміжне) | medium | `proxy_set_header Host $host` при `server_name _` пропускає будь-який Host усередину | **fixed** (разом із SEC M-1, див. нижче) | Клієнтський `Host` більше не пересилається зовсім |
+| M-4 | medium | `_wait_until_serving` — busy-loop без пауз (фактичне вікно ~0.05 с); `_free_port()` — TOCTOU | **fixed** | Явний дедлайн за `time.monotonic()` + `time.sleep(0.5)` між спробами (параметр став `timeout: float = 60.0`, а не `attempts`). Порт більше не вибирається заздалегідь: `docker run -p 127.0.0.1::8080`, а реальний порт зчитується через `docker port` (`_published_port`) — TOCTOU зник |
+| L-1 | low | `npm audit` продубльовано; dev-only HIGH блокує будь-який PR | **accepted** (owner WP-00, 2026-09-22) | Я був почав знижувати поріг повного аудиту до `critical`, але координатор справедливо зупинив: це послаблення прямо суперечить тому, за що закривалась H-1 gate 2 (HIGH у toolchain проходив би мовчки). Обидва прогони лишаються блокуючими на HIGH; перший (`--omit=dev`) дає окреме повідомлення саме про runtime-залежності. Якщо колись з'явиться dev-only HIGH без фіксу — точковий `--exclude <pkg>` з CVE ID, owner і датою в ADR, а не глобальне зниження порогу; це записано коментарем у `ci.yml`. `test_ci_web_job_audits_npm_dependencies` лишився без змін |
+| L-2 | low | глобальні таймаути Vitest підняті заради одного повільного файлу | **fixed** | Таймаути прибрані з `vite.config.ts` і перенесені точково: `describe('…', { timeout: 120_000 }, …)` у `eslint-no-browser-storage.test.ts`. Зависання будь-якого іншого тесту знову коштує 5 с |
+| L-3 | low | `resolver` без `resolver_timeout` | **fixed** | `resolver_timeout 3s;` — фаза DNS тепер обмежена (раніше зависання резолвера тримало б запит до дефолтних 30 с попри `proxy_connect_timeout 3s`) |
+| L-4 | low | tripwire-тести перевіряють текст файлів, а не поведінку | **fixed** | Асерти на форму реалізації прибрані (`Object.defineProperty`, `throw new TypeError`, `NOT BLOCKED`, `storageState()`). Лишився один тест — факт існування модуля і його виклику в `main.tsx`; поведінку покривають `browser-storage-guard.test.ts` і E2E |
+| L-5 | low | `auth_request` віддає 401/403 підзапиту повз `error_page` — зламається, коли WP-11A закриє health автентифікацією | **accepted** (owner WP-11A, 2026-09-22) | Виправити зараз нічим: поки в API немає публічно-безпечного `GET /api/v1/health`, розвести liveness/readiness інакше не можна. У конфіг доданий блок-попередження прямо над `auth_request`: що саме зламається (публічний endpoint почне віддавати 401, healthcheck `gui` стане постійно failing) і що робити (readiness спирати на публічно-безпечний endpoint API; `/healthz` для liveness уже є). Ширшу рекомендацію рев'ю — прибрати всю конструкцію `auth_request` → `try_files` → `error_page` на користь одного `proxy_pass`, коли API дасть такий endpoint — приймаю як план WP-11A |
+| L-6 | low | guard знімається одним `delete`, а документація подає його поряд з «XSS миттєво віддає токен» | **fixed** (разом із SEC L-2) | Шапка модуля і `web/README.md` отримали таблицю точних меж: що заблоковано, що ні (same-origin iframe, IndexedDB/Cache API, активний XSS), і пряме речення, що guard — anti-footgun проти власної необережності, а не security-контроль; проти зловмисника працюють CSP і відсутність токена в JS |
+| L-7 | low | image-збірка змушена копіювати `tsconfig.test.json` для файлів, яких у контексті немає | **accepted** (owner WP-00, 2026-09-22) | Зв'язок неочевидний, але задокументований коментарем у `Dockerfile`, і альтернативи гірші: прибрати solution-references з кореневого `tsconfig.json` зламало б `tsc -b` одним рядком для розробника, а `esbuild.tsconfigRaw` дублює конфіг у двох місцях. Ціна поточного рішення — один рядок `COPY`; перегляд доречний, якщо набір TS-проєктів зміниться (напр. WP-11C додасть свій) |
+| L-8 | low | `/api` без слеша падає у SPA-fallback; для `/api/` немає cache-директив | **fixed** | `location = /api { return 404 '{"detail":"Not Found"}'; }` — більше не index.html з кодом 200 (перевірено live: **404**). У `location /api/` доданий `expires -1;` (`no-cache` для клієнта) — саме `expires`, а не `add_header`, щоб не скинути успадковані security headers; канонічне місце для `no-store` лишається за API (WP-11A). Закріплено `test_gui_nginx_resolver_has_timeout_and_api_without_slash_is_not_spa` і runtime-тестом `test_api_without_trailing_slash_is_not_spa_fallback` |
+| L-9 (`Connection ""`) | low | директива без `upstream{} … keepalive` нічого не вмикає, коментар вводить в оману | **fixed** | Рядок прибраний разом із коментарем |
+| L-9 (build args GUI) | low | `docker compose build gui` не отримує build args → `image.revision` завжди `unknown` | **fixed** | Крок передає `COLLECTOR_VERSION` і `COLLECTOR_CREATED` (`COLLECTOR_GIT_SHA` уже в env workflow) і **перевіряє** через `docker inspect`, що label `org.opencontainers.image.revision` дорівнює `github.sha` — тепер регресія впаде, а не пройде тихо |
+| L-9 (`.dockerignore`) | low | виключено `tests/e2e`, але не `tests/unit` | **accepted** (owner WP-00, 2026-09-22) | У образ вони не потрапляють (`COPY` перелічений явно), а `tests/unit` тепер потрібен у контексті не більше, ніж раніше. Змінювати `.dockerignore` заради розміру контексту (десятки КБ) не варто ризику зламати збірку перед merge |
+| L-9 (кеш trivy) | low | 4 прогони trivy тягнуть БД вразливостей заново | **accepted** (owner WP-13, 2026-09-22) | Кешування trivy — оптимізація CI-часу, не безпеки; природно робити разом із рештою налаштування сканування у WP-13. `skip-setup-trivy: true` на трьох із чотирьох кроків уже стоїть |
+
+### Security-рев'ю
+
+| # | Severity | Знахідка | Рішення | Що саме зроблено |
+|---|---|---|---|---|
+| SEC M-1 | medium | Host header injection: `server_name _` + `proxy_set_header Host $host` → `curl -H "Host: evil.example.com"` давав `location: http://evil.example.com/...` | **fixed** | Три зміни разом: (а) `set $api_host api:8000;` і `proxy_set_header Host $api_host;` — api більше ніколи не бачить клієнтський Host; (б) `proxy_redirect http://$api_host/ /;` — absolute-Location від api стає відносним, тому штатні редиректи в браузері лишаються робочими; (в) **`absolute_redirect off;`** — без цього nginx перетворював відносний Location назад на абсолютний, підставляючи `$host`, і підроблений Host з'являвся знову (виявлено на стенді вже після (а)+(б): `location: http://evil.example.com:8080/…`). `X-Forwarded-Host` свідомо не передаємо — це був би той самий підроблюваний Host під іншим іменем. Перевірено live: з `Host: evil.example.com` і з нормальним Host відповідь однакова — `location: /api/v1/health/components`. Закріплено `test_gui_nginx_does_not_forward_client_host_to_api` (статика) і runtime-тестами `test_forged_host_does_not_reach_api` + `test_forged_host_does_not_break_static` |
+| SEC M-1 (catch-all 444) | medium | немає `default_server`-блока `return 444` | **accepted** (owner WP-13, 2026-09-22) | `server_name` allowlist + `default_server { return 444; }` вимагає знати публічне ім'я хоста, а воно з'являється лише з TLS-termination WP-13; зараз стек документовано доступний і як `localhost`, і як `127.0.0.1`, і за `GUI_PORT`, тому будь-який жорсткий allowlist зламав би runbook. Головне — підтверджений імпакт (attacker-controlled absolute URL у backend) закритий повністю пунктом вище: api Host не бачить, Location від Host не залежить. Вимогу записано коментарем у `nginx.conf` поруч із `proxy_set_header Host` |
+| SEC M-2 | medium | дефолтний `combined` логує query string → `?access_token=…` осідає в json-file лозі хоста | **fixed** | Власний `log_format gui_no_query` (http-контекст) з `$request_method $uri $server_protocol` замість `$request` — query відкидається на рівні формату, а не маскується. `access_log /var/log/nginx/access.log gui_no_query;` у server-блоці. Перевірено live: запит `?access_token=SECRETQUERY789&code=AUTHCODE42` дає в лозі `"GET /api/v1/status HTTP/1.1"`, `grep` по всіх логах `gui` секрету не знаходить. Це закриває і майбутній OIDC callback WP-11A (`?code=…&state=…`). Закріплено `test_gui_nginx_access_log_drops_query_string` |
+| SEC L-1 | low | source maps публічно | **fixed** | Той самий фікс, що код-рев'ю M-2 (див. вище) |
+| SEC L-2 | low | guard обходиться через same-origin iframe і не бачить IndexedDB → docstring перебільшує охоплення | **fixed** | (а) Формулювання «обхід помирає … у будь-якій залежності, що потрапила в bundle» прибране; шапка модуля і `web/README.md` тепер містять таблицю з явним «не заблоковано» для same-origin iframe, IndexedDB/Cache API і активного XSS. (б) ESLint розширено: `indexedDB` і `caches` додані до `no-restricted-globals` і `no-restricted-properties` з окремим повідомленням `PERSIST_BAN`, яке прямо каже, що runtime-guard їх не покриває і правило — єдиний бар'єр |
+| SEC L-3 | low | `ingress` не `internal` → gui має egress в Інтернет | **accepted** (owner WP-13, 2026-09-22) | Публікація порту технічно вимагає не-`internal` мережі; у Compose без host firewall це не вирішується. Внутрішня сегментація виконана (gui не бачить `backend`). Питання належить egress-allowlist разом із TLS termination — як і рекомендує звіт |
+| SEC L-4 | low | spoofable `X-Forwarded-For` | **fixed** | Той самий фікс, що код-рев'ю M-3 (див. вище) |
+
+### Побічні виправлення
+
+| Що | Чому |
+|---|---|
+| `tests/unit/test_compose_config.py` — хелпери `_nginx_block` / `_nginx_directives` | нові assert-и перевіряють відсутність рядків (`$host`, `$proxy_add_x_forwarded_for`, `X-Forwarded-Host`), які згадуються у коментарях-поясненнях «чому ми так НЕ робимо». Без відсікання коментарів тести падали на власній документації |
+| `tests/e2e/test_gui_runtime_contract.py` — `_get(..., headers=, follow_redirects=)` + `_NoRedirect` | тест Host injection має прочитати сам заголовок `Location`; за замовчуванням urllib пішов би за редиректом, тобто спробував би реальну мережу на `evil.example.com` (і був би заблокований pytest-socket, замаскувавши предмет перевірки) |
+| `web/tests/unit/eslint-no-browser-storage.test.ts` — очікуваний перелік заборонених ідентифікаторів | після SEC L-2 у `no-restricted-globals` їх чотири (`localStorage`, `sessionStorage`, `indexedDB`, `caches`); перевірка на «§13» лишилась для всіх, перевірка на «HttpOnly» — для storage-повідомлення |
+
+### Команди перевірки після виправлень
+
+```text
+$ cd web && npm ci && npm audit --omit=dev --audit-level=high && npm audit --audit-level=high \
+    && npm run lint && npm run test && npm run build && npm run test:build && npm run test:e2e
+found 0 vulnerabilities      <- runtime
+found 0 vulnerabilities      <- увесь toolchain (поріг HIGH збережено)
+lint: All matched files use Prettier code style!
+test: Test Files 3 passed | 1 skipped (4) | Tests 24 passed | 4 skipped (28)
+build: dist/assets/{NotFoundPage,OverviewPage,index}-*.js  (+ .map лише для локальної збірки)
+test:build: Test Files 1 passed (1) | Tests 4 passed (4)      <- H-1: контракт dist/ тепер виконується
+test:e2e: 4 passed (5.7m)
+EXIT=0
+```
+
+```text
+$ uv run ruff check .            -> All checks passed!
+$ uv run ruff format --check .   -> 139 files already formatted
+$ uv run mypy src                -> Success: no issues found in 40 source files
+
+$ CI=true uv run pytest -m "not live" -q          (стек піднято)
+  627 passed, 1 skipped
+$ uv run pytest -m e2e tests/e2e -q -rs           (локально)
+  23 passed, 2 skipped   (skip — лише тривожний модуль, він діє тільки в CI)
+$ CI=true uv run pytest -m e2e tests/e2e -q -rs   (режим CI)
+  25 passed            <- жодного skip: H-1 закрито
+$ CI=true GUI_PORT=9 uv run pytest tests/e2e/test_runtime_suite_is_enforced.py -q
+  1 failed, 1 passed   <- імітація «стек не піднято» у CI: тривога спрацьовує
+
+$ uv run pre-commit run --all-files   -> усі hooks Passed
+```
+
+```text
+$ docker compose build gui                     Image collector-gui:dev Built
+$ docker compose --profile core --profile workers --profile gui up -d --wait   exit=0
+$ docker compose ps -a --format json | python deploy/compose/check-healthy.py
+all 17 containers healthy or exited 0
+
+# SEC M-1 (Host injection)
+$ curl -sI -H "Host: evil.example.com" http://localhost/api/v1/health/components/
+HTTP/1.1 307 Temporary Redirect
+location: /api/v1/health/components          <- підробленого Host немає
+$ curl -sI http://localhost/api/v1/health/components/
+location: /api/v1/health/components          <- нормальний Host дає те саме
+
+# SEC M-2 (query string у логах)
+$ curl -s "http://localhost/api/v1/status?access_token=SECRETQUERY789&code=AUTHCODE42"
+$ docker compose logs gui | tail -1
+gui-1 | 172.19.0.1 - - [...] "GET /api/v1/status HTTP/1.1" 404 22 "-" "UA-PROBE"
+$ docker compose logs gui | grep -c "SECRETQUERY789\|AUTHCODE42"   -> 0
+
+# CR M-2 / SEC L-1 (source maps)
+$ docker compose exec gui sh -c 'ls /usr/share/nginx/html/assets | grep -c "\.map$"'   -> 0
+$ curl -s -o /dev/null -w '%{http_code}' http://localhost/assets/index-*.js.map        -> 404
+
+# CR L-8 (`/api` без слеша)
+$ curl -s -o /dev/null -w '%{http_code}' http://localhost/api                          -> 404
+
+$ docker compose down -v                      exit=0
+```
+
+### Що лишилось неперевіреним
+
+- фактичний прогін CI (нові кроки `pytest -m e2e`, `npm run test:build`, перевірка label
+  `revision`) — локально відтворено їхній зміст, але сам workflow побачить перший PR;
+- `default_server { return 444; }` і egress-allowlist — свідомо не робились (owner WP-13):
+  без відомого публічного імені хоста allowlist зламав би задокументований доступ
+  `http://localhost/`;
+- поведінка `auth_request` після того, як WP-11A закриє health автентифікацією — за
+  визначенням не перевіряється до появи OIDC; попередження лишене в конфігу (L-5).

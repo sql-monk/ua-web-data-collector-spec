@@ -61,13 +61,32 @@ class Response:
         return self.headers.get(name.lower(), default)
 
 
-def _get(path: str, timeout: float = 10.0) -> Response:
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Не переходити за Location: саме його значення перевіряє тест на Host injection
+    (а перехід на підроблений домен був би ще й спробою реальної мережі)."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _get(
+    path: str,
+    timeout: float = 10.0,
+    headers: dict[str, str] | None = None,
+    follow_redirects: bool = True,
+) -> Response:
     # HTTP request-line має бути ASCII: кирилицю у шляху (SPA-маршрути) percent-кодуємо,
     # `/`, `?`, `&`, `=` і `.` лишаємо як є, щоб не зламати нормалізацію, яку перевіряємо.
     encoded = urllib.parse.quote(path, safe="/?&=.%")
-    request = urllib.request.Request(f"{BASE_URL}{encoded}", method="GET")  # noqa: S310 — loopback
+    request = urllib.request.Request(  # noqa: S310 — loopback
+        f"{BASE_URL}{encoded}", method="GET", headers=headers or {}
+    )
+    opener = urllib.request.urlopen if follow_redirects else _NO_REDIRECT_OPENER.open
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310 — loopback
+        with opener(request, timeout=timeout) as resp:  # noqa: S310 — loopback
             raw = resp.read()
             return Response(
                 status=int(resp.status),
@@ -90,10 +109,21 @@ def _gui_is_up() -> bool:
         return False
 
 
+# Код-рев'ю PR3, H-1: у CI пропуск цих тестів заборонений. Локально skip зручний (стек
+# піднімають не завжди), але в CI стек піднімає крок `up -d --wait`, і мовчазний skip
+# означав би, що §13-інваріанти nginx не перевіряються взагалі. Тому в CI умова skip
+# вимикається: тест впаде гучно, а не зникне з переліку.
+CI = os.environ.get("CI", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def skip_unless_available(available: bool, reason: str) -> pytest.MarkDecorator:
+    return pytest.mark.skipif(not available and not CI, reason=reason)
+
+
 pytestmark = [
     pytest.mark.e2e,
-    pytest.mark.skipif(
-        not _gui_is_up(),
+    skip_unless_available(
+        _gui_is_up(),
         reason=(
             f"gui не відповідає на {BASE_URL} — підніміть "
             "`COMPOSE_PROFILES=core,workers,gui docker compose up -d --wait`"
@@ -232,3 +262,45 @@ def test_api_proxy_reaches_upstream_and_is_same_origin() -> None:
         assert json.loads(response.body) == {"detail": "Not Found"}, response.body
     else:
         assert response.status in {502, 503, 504}, response.status
+
+
+# --- security-рев'ю PR3 -----------------------------------------------------------------
+
+
+def test_forged_host_does_not_reach_api() -> None:
+    """SEC M-1: підроблений Host не має з'являтись у відповіді api (open redirect).
+
+    До фіксу `curl -H 'Host: evil.example.com' …/health/components/` повертав
+    `location: http://evil.example.com/...` — FastAPI будував absolute-URL з клієнтського
+    Host. Тепер api бачить фіксований внутрішній Host, а absolute-Location стає відносним.
+    """
+    forged = "evil.example.com"
+    response = _get(f"{HEALTH_PATH}/", headers={"Host": forged}, follow_redirects=False)
+
+    location = response.header("location")
+    assert forged not in location, f"Host просочився у Location: {location!r}"
+    assert forged not in response.body, "Host просочився у тіло відповіді"
+    if location:
+        # Редирект лишається робочим для браузера: або відносний, або на власний origin.
+        assert location.startswith("/") or location.startswith(BASE_URL), location
+
+
+def test_forged_host_does_not_break_static() -> None:
+    """Статику з чужим Host віддаємо як є — 444 на невідомий Host прийде з WP-13."""
+    response = _get("/", headers={"Host": "attacker.test"}, follow_redirects=False)
+    assert response.status == 200
+
+
+def test_source_maps_are_not_served() -> None:
+    """Код-рев'ю M-2 / SEC L-1: `.map` не постачається і не віддається."""
+    index = _get("/")
+    match = re.search(r'src="(/assets/[^"]+\.js)"', index.body)
+    assert match, index.body[:400]
+    assert _get(f"{match.group(1)}.map").status == 404
+
+
+def test_api_without_trailing_slash_is_not_spa_fallback() -> None:
+    """Код-рев'ю L-8: `/api` не має віддавати index.html з кодом 200."""
+    response = _get("/api")
+    assert response.status == 404
+    assert '<div id="root">' not in response.body

@@ -8,8 +8,7 @@
  * синтаксичного правила, а не недогляд конфігу — зафіксовано тестуванням WP-00 PR3 (M-1).
  *
  * Тому доступ блокується ще й у рантаймі: обидва сховища підмінюються геттером, який
- * логує і кидає. Обхід через alias помирає на першому ж зверненні — і в dev, і в prod,
- * у власному коді й у будь-якій залежності, що потрапила в bundle.
+ * логує і кидає. Обхід через alias помирає на першому ж зверненні — і в dev, і в prod.
  *
  * Чому не «просто не писати туди»: `localStorage`/`sessionStorage` читаються будь-яким JS на
  * origin (XSS миттєво віддає токен або персональні контакти), не мають `HttpOnly`/`SameSite`,
@@ -18,6 +17,29 @@
  *
  * Якщо WP-11C колись знадобиться браузерне сховище для НЕ-чутливого стану (напр. згорнута
  * панель), це робиться свідомою зміною тут + ADR, а не локальним `eslint-disable`.
+ *
+ * **Точні межі (код-рев'ю L-6 + security-рев'ю L-2, обидві перевірені у Chromium).** Guard —
+ * anti-footgun проти *випадкового* використання, а не security-контроль. Він НЕ покриває:
+ *
+ * | вектор | стан |
+ * |---|---|
+ * | `localStorage`/`sessionStorage` у top-level realm, включно з alias-формами | заблоковано |
+ * | `delete window.localStorage` | заблоковано (дескриптор лишається нашим) |
+ * | **same-origin iframe** (`iframe.contentWindow.localStorage`) | **НЕ заблоковано** — guard ставиться лише на top-level realm, свіжий realm має незаймані акцесори |
+ * | **IndexedDB, Cache API** | **не покрито взагалі** (саме туди пише `query-persist-client-idb`) |
+ * | активний XSS | не покрито — він і так має повний доступ до origin |
+ *
+ * Тобто єдиний реальний захист від зловмисника — CSP і те, що токена в JS немає взагалі
+ * (сесія у `HttpOnly`-cookie). Guard ловить власну необережність і залежності, що
+ * звертаються до storage напряму з top-level realm. ESLint додатково забороняє `indexedDB`
+ * і `caches` синтаксично.
+ *
+ * **Діагностика без шуму (код-рев'ю PR3, M-1).** `react-router` під час `initialize()`
+ * безумовно читає `sessionStorage` (`restoreAppliedTransitions`, обгорнуте в `try/catch`),
+ * тому кидок — штатна, очікувана подія на кожному завантаженні. Якби кожне звертання писало
+ * `console.error`, повідомлення про порушення §13 з'являлось би там, де порушення немає, і
+ * швидко б знецінилось. Тому: заборона (кидок) — завжди, а лог — `console.warn` і лише
+ * ОДИН раз на сховище, з поясненням, що виклик міг прийти з бібліотеки.
  */
 
 const STORAGE_KEYS = ['localStorage', 'sessionStorage'] as const;
@@ -29,6 +51,11 @@ const MESSAGE =
   'Заборонено §13: browser storage не використовується в operator GUI ' +
   '(XSS-читання, немає HttpOnly/SameSite, не інвалідується сервером). ' +
   'Сесія — HttpOnly cookie від BFF; тимчасовий стан — у пам’яті (TanStack Query).';
+
+/** Підказка до одноразового попередження: кидок сам по собі не означає баг у нашому коді. */
+const WARN_HINT =
+  'Звертання заблоковано. Якщо це не ваш код — виклик прийшов із залежності в бандлі ' +
+  '(напр. react-router читає sessionStorage у try/catch); застосунок від цього не ламається.';
 
 /**
  * Підміняє `window.localStorage` і `window.sessionStorage` геттерами, що кидають.
@@ -45,9 +72,14 @@ export function installBrowserStorageGuard(target: Window = window): void {
       continue;
     }
 
+    // Один warn на сховище за життя сторінки: заборона гучна там, де вона щось означає,
+    // і не перетворюється на фоновий шум на кожному завантаженні (M-1).
+    let warned = false;
     const guard = (): never => {
-      // Помилку видно і в консолі, і в E2E: мовчазне падіння сховища гірше за гучне.
-      console.error(MESSAGE);
+      if (!warned) {
+        warned = true;
+        console.warn(`${MESSAGE} ${WARN_HINT}`);
+      }
       throw new TypeError(MESSAGE);
     };
     Object.defineProperty(guard, GUARD_MARK, { value: true });
