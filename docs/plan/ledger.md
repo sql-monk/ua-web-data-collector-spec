@@ -17,7 +17,7 @@
 
 | WP | Стан | Примітка |
 |---|---|---|
-| WP-01A | code_review (PR1) | gate 2 pass + 4 low fixed; 587 + 75 integration tests; partial claim index (331 ms → 0.18 ms) |
+| WP-01A | spec_review (PR1) | код-рев'ю changes_requested → усе закрито (1 high, 5 medium, 7 low); 621 + 103 integration ×3 конфігурації |
 | WP-01B | pending | після WP-01A |
 | WP-01D | pending | після WP-00, WP-01A |
 | WP-02 | pending | після WP-01A |
