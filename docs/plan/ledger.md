@@ -11,7 +11,7 @@
 | WP-00 | PR1 python+CI | `wp/00-1-python-ci` | merged 7223bec | docs done: `reports/WP-00/docs-pr1.md`; ADR-0001 | CLI = Typer; 127 tests; Linux-паритет підтверджено в Docker |
 | WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | testing | реалізація: `reports/WP-00/implementation-pr2.md` (16 containers healthy, 170 tests) | worktree `.worktrees/wp-00-2` |
 | WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | pending | — | після merge PR2 |
-| WP-01C | — | `wp/01c-contracts` | code_review | тестування pass (+117 adversarial, 1 medium fixed): `reports/WP-01C/testing.md`; 454 tests | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
+| WP-01C | — | `wp/01c-contracts` | spec_review | код-рев'ю approve (2 medium + 8 low закрито/accepted): `reports/WP-01C/code-review.md`; 474 tests | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
 
 ## Хвиля 1
 
