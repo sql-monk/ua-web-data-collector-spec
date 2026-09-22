@@ -45,10 +45,12 @@ def test_fixture_validates_against_current_model(path: Path) -> None:
     assert int(match["minor"]) <= minor, "fixture новішого minor за модель"
     text = path.read_text(encoding="utf-8")
     document = contract.model.model_validate_json(text)
+    declared = getattr(document, "schema_version", None)
     if issubclass(contract.model, VersionedDocument):
-        assert document.schema_version == f"{match['major']}.{match['minor']}"
-    else:  # CurrentDocumentBase: int major за §9.2
-        assert document.schema_version == int(match["major"])
+        assert declared == f"{match['major']}.{match['minor']}"
+    elif declared is not None:  # CurrentDocumentBase: int major за §9.2
+        assert declared == int(match["major"])
+    # value objects без schema_version (SourceTime v1.0 → 1.1): лише валідація + round-trip
     # round-trip: модель → JSON → модель без втрат
     assert contract.model.model_validate_json(document.model_dump_json(by_alias=True)) == document
 

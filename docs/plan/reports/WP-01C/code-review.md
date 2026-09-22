@@ -84,7 +84,7 @@
 - **(з) типізація.** `mypy --strict` чистий без ignore; `Any` лише в `JsonObject/JsonValue` (див. CR-01).
 - **Тести.** Перевіряють поведінку (bytes, hash, snapshot, переходи), не реалізацію; mutation-перевірки тестувальника (M1–M6) підтверджують чутливість. `xfail` T-01/T-02 знято після фіксу.
 - **Дані/безпека.** Гроші — `int + currency`; timestamps — aware UTC з відхиленням (не нормалізацією); source time nullable і не підміняється `fetched_at` (validator R-43). Мережевого/файлового I/O у контрактах немає, крім read-only YAML loader (тест). Secrets/контакти в логах — не застосовно (логування відсутнє).
-- У worktree є незакомічена зміна `docs/plan/reports/WP-01C/implementation.md` (status ` M`) — не входить у diff і не оцінювалась.
+- У worktree є незакомічена зміна `docs/plan/reports/WP-01C/implementation.md` (status `M` у `git status`) — не входить у diff і не оцінювалась.
 
 ## 4. Вердикт
 

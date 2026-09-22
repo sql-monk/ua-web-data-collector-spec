@@ -414,3 +414,26 @@ $ uv run pre-commit run --all-files
 `schemas/common/money.v1.json` (description), `schemas/events/domain_changed_event.v1.json`,
 `schemas/mongo/current_document_base.v1.json`, `schemas/releases/release_manifest.v1.json`
 (`$defs/JsonValue`, `quality_report_artifact`/`reconciliation_result_artifact`).
+
+## Виправлення після пострев'ю (spec review)
+
+Звіт `docs/plan/reports/WP-01C/spec-review.md` — accept, дві low-знахідки, закриті у коміті
+`fix(wp-01c): source_locale_raw per §9.6; stale placeholder mentions`:
+
+1. **§9.6 declared locale** — `SourceTime.source_locale_raw: str | None = None` (`contract_version`
+   `1.0 → 1.1`, minor-сумісно). Snapshot `schemas/common/source_time.v1.json` регенеровано
+   (`x-contract-version: "1.1"`); compatibility fixture попередньої версії
+   `tests/fixtures/contracts/documents/source_time.v1.0.json` проходить (тест
+   `test_compatibility.py::test_fixture_validates_against_current_model[source_time.v1.0.json]`
+   розширено для value objects без поля `schema_version`); тест
+   `test_temporal.py::test_source_time_keeps_declared_locale_and_is_minor_compatible`.
+   `docs/contracts.md` §8 оновлено.
+2. **Застарілі згадки `0.0.0-placeholder`** у `README.md` (рядок 69) і
+   `docs/decisions/0001-foundation-stack.md` (рядок 56) → актуальний вивід `collector version`
+   (`schema_version=1.0` = `collector.contracts.CONTRACTS_VERSION`) — approved dependency до WP-00.
+3. Супутнє: `docs/plan/reports/WP-01C/code-review.md:87` — MD038 (пробіл у code span), правка
+   одного span, щоб `pre-commit run --all-files` був зелений.
+
+Прогін: ruff check / format --check / mypy src — чисто; `pytest -m "not live"` — **476 passed,
+1 skipped (Windows), 0 failed**; `collector contracts export --check` — без drift;
+pre-commit — усі hooks Passed.

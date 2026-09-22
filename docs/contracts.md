@@ -204,7 +204,9 @@ JSON/BSON round-trip, і документ, який пройшов validation п
 
 - `UtcDatetime` відхиляє naive datetime і будь-який offset, крім нуля (не нормалізує —
   помилка джерела має бути видимою).
-- `SourceTime.source_event_at/source_updated_at` лишаються `None`, якщо джерело не дало часу;
+- `SourceTime` (contract `1.1`: minor-додавання `source_locale_raw` — declared locale джерела за §9.6)
+  зберігає вихідний текст часу, timezone/offset, locale і precision;
+  `source_event_at/source_updated_at` лишаються `None`, якщо джерело не дало часу;
   `EntityTime` (блок `time` current document) додатково відхиляє значення, що дорівнюють
   `fetched_at` (регресія R-43). `derive_effective_time` дає `effective_at` з basis
   `source_event → source_updated → observed` і `source_time_inferred=True` для будь-якого

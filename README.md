@@ -66,7 +66,7 @@ uv run collector --help
 
 | Команда | Owner-WP |
 |---|---|
-| `collector version` | WP-00 (реальна — package version, Git SHA, schema version placeholder) |
+| `collector version` | WP-00 (реальна — package version, Git SHA, `schema_version` = `collector.contracts.CONTRACTS_VERSION`) |
 | `collector db migrate` | WP-01A |
 | `collector db ensure-mongo --validators --indexes` | WP-01B |
 | `collector worker <role>` (`discovery\|fetch\|browser\|parse\|projector\|translation\|export\|maintenance`) | WP-01D |

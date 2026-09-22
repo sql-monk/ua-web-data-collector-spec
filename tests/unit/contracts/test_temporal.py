@@ -193,3 +193,17 @@ def test_bitemporal_interval_validation() -> None:
         BitemporalInterval(valid_from=at(10), valid_to=at(5), known_from=at(0))
     with pytest.raises(ValidationError, match="known_to"):
         BitemporalInterval(valid_from=at(0), known_from=at(10), known_to=at(10))
+
+
+def test_source_time_keeps_declared_locale_and_is_minor_compatible() -> None:
+    """§9.6: declared locale зберігається; поле optional — документ v1.0 без нього валідний."""
+    from collector.contracts.temporal import SourceTime as _SourceTime
+
+    assert _SourceTime.contract_version == "1.1"
+    with_locale = _SourceTime(source_event_at=at(-30), source_locale_raw="uk-UA")
+    assert with_locale.source_locale_raw == "uk-UA"
+    legacy = _SourceTime.model_validate_json(
+        '{"source_event_at": "2026-09-01T11:30:00Z", "source_time_precision": "minute"}'
+    )
+    assert legacy.source_locale_raw is None
+    assert _SourceTime.model_validate_json(with_locale.model_dump_json()) == with_locale

@@ -40,7 +40,12 @@ UtcDatetime = Annotated[datetime, AfterValidator(require_utc)]
 
 
 class SourceTime(ContractModel):
-    """Час, заявлений джерелом (§5.1, §9.6); `None` ніколи не заповнюється crawler time."""
+    """Час, заявлений джерелом (§5.1, §9.6); `None` ніколи не заповнюється crawler time.
+
+    Зберігаються вихідний текст часу, timezone/offset, declared locale і precision (§9.6).
+    """
+
+    contract_version = "1.1"
 
     source_event_at: UtcDatetime | None = None
     source_updated_at: UtcDatetime | None = None
@@ -48,6 +53,10 @@ class SourceTime(ContractModel):
     source_time_precision: TimePrecision = TimePrecision.UNKNOWN
     source_time_inferred: bool = False
     source_time_raw_text: str | None = None
+    source_locale_raw: str | None = Field(
+        default=None,
+        description="Declared locale джерела як отримано (`uk-UA`, `de`, `lang` атрибут); §9.6.",
+    )
 
 
 class SystemTime(ContractModel):
