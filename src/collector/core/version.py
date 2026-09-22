@@ -8,10 +8,10 @@ from importlib import metadata
 
 from pydantic import BaseModel, ConfigDict
 
+from collector.contracts import CONTRACTS_VERSION
+
 GIT_SHA_ENV = "COLLECTOR_GIT_SHA"
 UNKNOWN_GIT_SHA = "unknown"
-# Placeholder: реальну версію shared-контрактів визначає WP-01C (§9.4).
-SCHEMA_VERSION_PLACEHOLDER = "0.0.0-placeholder"
 
 
 class VersionInfo(BaseModel):
@@ -54,5 +54,5 @@ def version_info() -> VersionInfo:
     return VersionInfo(
         package_version=package_version(),
         git_sha=git_sha(),
-        schema_version=SCHEMA_VERSION_PLACEHOLDER,
+        schema_version=CONTRACTS_VERSION,
     )

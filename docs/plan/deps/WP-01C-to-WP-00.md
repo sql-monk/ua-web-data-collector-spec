@@ -5,7 +5,7 @@
 | Від | WP-01C (`wp/01c-contracts`) |
 | До | WP-00 (owner `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `src/collector/core/version.py`, `Dockerfile` PR2) |
 | Файли | `tests/unit/test_cli_adversarial.py`, `tests/unit/test_cli.py`, `src/collector/core/version.py`, `Dockerfile` |
-| Стан | open |
+| Стан | resolved (п.1–3 у `wp/01c-contracts` за рішенням оркестратора; п. Dockerfile → WP-00 PR2) |
 
 ## 1. Зробити групу `collector contracts` видимою у `--help`
 

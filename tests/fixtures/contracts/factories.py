@@ -57,7 +57,7 @@ def current_document_payload(**overrides: Any) -> dict[str, Any]:
     latest_state = {"price": {"amount_minor": 259900, "currency": "UAH"}, "status": "active"}
     payload: dict[str, Any] = {
         "_id": str(ENTITY_A),
-        "schema_version": "1.0",
+        "schema_version": 1,
         "entity_kind": EntityKind.CATALOG_ITEM.value,
         "source": {
             "source_id": "catalog_ua_rozetka",

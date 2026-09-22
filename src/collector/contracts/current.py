@@ -14,7 +14,7 @@ from uuid import UUID
 
 from pydantic import Field, StringConstraints, model_validator
 
-from collector.contracts._base import ContractModel, JsonObject, SchemaVersion, VersionedDocument
+from collector.contracts._base import ContractModel, JsonObject, parse_schema_version
 from collector.contracts.canonical import canonical_json_bytes, sha256_hex
 from collector.contracts.enums import EntityKind
 from collector.contracts.identity import EntityId, IdentityHash, Sha256Hex, SourceIdentity
@@ -57,12 +57,21 @@ class Lineage(ContractModel):
     projection_task_id: UUID
 
 
-class CurrentDocumentBase(VersionedDocument):
-    """Будь-який `*_current` document (§9.2); `_id` = `entity_uuid` (UUIDv7)."""
+class CurrentDocumentBase(ContractModel):
+    """Будь-який `*_current` document (§9.2); `_id` = `entity_uuid` (UUIDv7).
+
+    `schema_version` — int major за YAML §9.2 (`schema_version: 1`), а не `major.minor`
+    інших контрактів: minor-версію документа несе `contract_version` класу і JSON Schema snapshot.
+    """
 
     contract_version = "1.0"
-    schema_version: SchemaVersion = "1.0"
 
+    schema_version: int = Field(
+        default=1,
+        ge=1,
+        strict=True,
+        description="Major версія схеми документа (§9.2 `schema_version: 1`); лише int.",
+    )
     id: EntityId = Field(alias="_id", description="entity_uuid; збігається з entity_index.")
     entity_kind: EntityKind
     source: SourceRef
@@ -86,6 +95,10 @@ class CurrentDocumentBase(VersionedDocument):
 
     @model_validator(mode="after")
     def _consistent(self) -> CurrentDocumentBase:
+        major, _ = parse_schema_version(type(self).contract_version)
+        if self.schema_version != major:
+            msg = f"schema_version {self.schema_version} несумісна з major {major} контракту"
+            raise ValueError(msg)
         expected = compute_state_hash_v1(self.core, self.attributes, self.latest_state)
         if self.state_hash != expected:
             msg = "state_hash не збігається з compute_state_hash_v1(core, attributes, latest_state)"

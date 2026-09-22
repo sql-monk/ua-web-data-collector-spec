@@ -33,10 +33,9 @@ contracts_app = typer.Typer(
 )
 app.add_typer(db_app, name="db")
 app.add_typer(release_app, name="release")
-# hidden: §16.2 фіксує точний набір top-level команд, і tests/unit/test_cli_adversarial.py (WP-00)
-# перевіряє його дослівно. `collector contracts ...` — dev/CI-команда WP-01C; зробити видимою —
-# dependency-запит docs/plan/deps/WP-01C-to-WP-00.md.
-app.add_typer(contracts_app, name="contracts", hidden=True)
+# `contracts` — foundation-розширення поза §16.2 (approved dependency change,
+# docs/plan/deps/WP-01C-to-WP-00.md).
+app.add_typer(contracts_app, name="contracts")
 
 
 def _help_when_no_subcommand(ctx: typer.Context) -> None:

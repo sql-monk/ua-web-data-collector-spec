@@ -170,7 +170,7 @@
   "$id": "https://ua-collector.local/schemas/mongo/current_document_base.v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Будь-який `*_current` document (§9.2); `_id` = `entity_uuid` (UUIDv7).",
+  "description": "Будь-який `*_current` document (§9.2); `_id` = `entity_uuid` (UUIDv7).\n\n`schema_version` — int major за YAML §9.2 (`schema_version: 1`), а не `major.minor`\nінших контрактів: minor-версію документа несе `contract_version` класу і JSON Schema snapshot.",
   "properties": {
     "_id": {
       "description": "entity_uuid; збігається з entity_index.",
@@ -224,10 +224,11 @@
       "type": "integer"
     },
     "schema_version": {
-      "default": "1.0",
-      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "default": 1,
+      "description": "Major версія схеми документа (§9.2 `schema_version: 1`); лише int.",
+      "minimum": 1,
       "title": "Schema Version",
-      "type": "string"
+      "type": "integer"
     },
     "source": {
       "$ref": "#/$defs/SourceRef"

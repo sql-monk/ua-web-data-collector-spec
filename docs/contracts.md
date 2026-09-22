@@ -39,7 +39,7 @@
 | `artifacts` | `ArtifactRef`, `RawArtifactRef`, `NormalizedArtifactRef`, `UploadClaim` + `can_commit` | §7.3, §9.1, §10 п.5/7 |
 | `projection` | `ProjectionCommand`, `AppliedProjectionReceipt`, `ProjectionAcknowledgement`, `should_emit_domain_changed` | §7.3 кроки 2–4, §9.1, §9.2 |
 | `events` | `DomainChangedEvent`, `EncodedEvent`, `encode_event`/`decode_event`, `EVENT_INLINE_LIMIT_BYTES` | §7.3 п.4, R-30/R-37/R-42 |
-| `current` | `CurrentDocumentBase`, `SourceRef`, `Lineage`, `compute_state_hash_v1` | §9.2, §9.4 |
+| `current` | `CurrentDocumentBase` (`schema_version: int` major за §9.2), `SourceRef`, `Lineage`, `compute_state_hash_v1` | §9.2, §9.4 |
 | `resolution` | `ResolutionDecision`, `ResolutionSnapshot`, `project_groups` | §9.8, R-45 |
 | `release` | `ReleaseManifest`, `ReleasePart`, `ReleaseWatermark`, `EntityVersionRef`, `SourceInclusion`, `ComponentVersions`, `RELEASE_TRANSITIONS`, `can_transition`, `transition_release`, `validate_manifest_update` | §9.9, R-46 |
 | `schema_export` | `EXPORTED_CONTRACTS`, `export_schemas`, `check_schemas`, `check_compatibility` | §9.4 |
@@ -51,7 +51,9 @@
 
 Кожна модель має `contract_version` класу (`major.minor`); документи й повідомлення
 (`VersionedDocument`) додатково несуть поле `schema_version` з тим самим значенням за
-замовчуванням. Модель приймає документ, якщо його `major` збігається, а `minor` не більший за
+замовчуванням. Виняток — `CurrentDocumentBase`: за YAML §9.2 його `schema_version` — **int major**
+(`schema_version: 1`), minor несуть `contract_version` класу і snapshot `x-contract-version`;
+validator вимагає рівності major. Модель приймає документ, якщо його `major` збігається, а `minor` не більший за
 minor моделі. Зміна валідаторів без зміни shape (жорсткіша перевірка наявних полів) — теж
 breaking для писачів; трактуйте її як major, якщо існуючі дані можуть її не пройти.
 

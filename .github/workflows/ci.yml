@@ -53,6 +53,9 @@ jobs:
       - name: pytest (без live)
         run: uv run pytest -m "not live"
 
+      - name: contracts JSON Schema snapshots без drift (WP-01C)
+        run: uv run collector contracts export --check
+
       - name: collector --help (контракт §16.2)
         run: uv run collector --help
 

@@ -49,7 +49,11 @@ def test_current_document_matches_spec_9_2_shape(current_document: CurrentDocume
     }
     assert current_document.entity_uuid == ENTITY_A
     assert current_document.entity_kind is EntityKind.CATALOG_ITEM
-    assert dumped["schema_version"] == "1.0"
+    assert dumped["schema_version"] == 1  # §9.2 YAML: int major
+    with pytest.raises(ValidationError, match="major"):
+        CurrentDocumentBase.model_validate(current_document_payload(schema_version=2))
+    with pytest.raises(ValidationError):
+        CurrentDocumentBase.model_validate(current_document_payload(schema_version="1.0"))
 
 
 def test_current_document_accepts_populate_by_name_id() -> None:
