@@ -452,3 +452,110 @@ Owned files картки — `web/**`, `deploy/compose/gui/**`, `docker-compose.
 
 Forbidden-файли (`docs/research/**`, `TECHNICAL_SPECIFICATION.md`, `REVIEW.md`) не
 змінювались.
+
+---
+
+## Виправлення після gate 2
+
+Вхід: `docs/plan/reports/WP-00/testing-pr3.md` (вердикт **pass** із знахідками), 24 тести
+тестувальника в `a9beb94`. База виправлень — `0778439` + `a9beb94`.
+
+### Відповідь на кожну знахідку
+
+| # | Severity | Знахідка | Рішення | Що саме зроблено |
+|---|---|---|---|---|
+| H-1 (а) | high | 6 CVE у npm (1 critical, 4 high, 1 moderate); `react-router` 7.9.1 — **runtime**-залежність, яка їде у bundle | **fixed** | `react-router` 7.9.1 → **7.18.4**, `vite` 7.1.6 → **7.3.6**, `@playwright/test` 1.55.0 → **1.63.0**, `vitest` 3.2.4 → **4.1.11**. Після оновлення `npm audit --omit=dev` і повний `npm audit` — **`found 0 vulnerabilities`** обидва. Датоване risk acceptance не потрібне: не лишилось вразливостей жодного рівня |
+| H-1 (б) | high | у CI немає сканування npm; образ `collector-gui` не сканується взагалі (§13 «на кожен PR») | **fixed** | Job `web`: крок `npm audit --omit=dev --audit-level=high` + `npm audit --audit-level=high` **після `npm ci`, до lint** (падає швидко; аудит іде по lockfile). Job `docker`: SBOM (`anchore/sbom-action`) для `collector-gui:ci` і **два trivy-скани** з тією самою політикою, що для `collector`: CRITICAL **без** `ignore-unfixed`, `exit-code: 1`; HIGH з `ignore-unfixed`. Закріплено тестами `test_ci_trivy_critical_without_ignore_unfixed_and_high_with` (тепер перевіряє **обидва** образи), `test_ci_generates_sbom_for_both_images`, `test_ci_web_job_audits_npm_dependencies` |
+| M-1 | medium | заборона storage обходиться alias-ом (`const w = window; w.localStorage…`) | **fixed** | Обрано **runtime-guard** (сильніший з двох запропонованих варіантів: E2E «сховище порожнє» ловить лише факт запису на момент перевірки, guard блокує сам доступ). Додано `web/src/browserStorageGuard.ts` — `Object.defineProperty` на `localStorage`/`sessionStorage` з геттером і сеттером, що логують і кидають `TypeError` з текстом §13; ідемпотентний; `src/main.tsx` ставить його **до першого рендеру**. Межу синтаксичних правил зафіксовано в коментарі `eslint.config.js` (блок «Межа цих правил») і в `web/README.md` (розділ «Межа статичних правил і runtime-guard»). Покриття: `web/tests/unit/browser-storage-guard.test.ts` (5 тестів: throw на обох сховищах, setter, alias-форма, ідемпотентність) + E2E «guard блокує обхід ESLint через alias (§13, M-1)», який виконує саме ті форми, що проходили lint. E2E-перевірку «сховище порожнє» збережено, але вона тепер читає сховище **повз сторінку** (`context.storageState()`), бо всередині сторінки геттер заблоковано |
+| L-2 | low | не задокументовано, що `gui` свідомо стає `unhealthy` при недоступному `api` | **fixed** | `deploy/compose/README.md` — новий розділ «Два різні health-и `gui`» з таблицею liveness (`/healthz`, не залежить від `api`) vs readiness (`/api/v1/health/components`, healthcheck Docker), поясненням вибору (§7.5), таймінгами (`unhealthy` за ~45 с = `interval 15s × retries 3`; автовідновлення ~20 с) і прямою вказівкою, що `up -d --wait` на деградованому стеку впаде. `docs/runbooks/clean-host-start.md` — розширено рядок про `gui unhealthy` і додано рядок про падіння `up -d --wait` |
+| I-1 | info | `location =` регістрозалежний: `/API/v1/health/components` іде у SPA-fallback | **accepted** (owner WP-11A, 2026-09-22) | Витоку немає — підтверджено самим тестувальником (FastAPI теж регістрозалежний, api-стаб має рівно один маршрут; усі форми нормалізації шляху покрито `test_health_detail_not_reachable_through_path_normalization`). Робити `location ~*` зараз означало б додати регулярку в гарячий шлях заради неіснуючої загрози. Перегляд — разом з реальними endpoint-ами і OIDC у WP-11A |
+| L-1 | low | dangling reference на `tests/unit/build-contract.test.ts` | **not applicable** | Закрито тестувальником у `a9beb94` — файл створено, коментар у `vite.config.ts` став правдивим. Дій реалізатора не потребує |
+
+### Побічні виправлення, без яких «зелено» не виходило
+
+Це не знахідки gate 2, а наслідки самих виправлень — фіксую, щоб рев'ю не шукало причину:
+
+| Що | Чому |
+|---|---|
+| `web/tsconfig.test.json` (новий проєкт), `include` у `tsconfig.app.json` звужено до `src`, посилання у `tsconfig.json` | тести з `a9beb94` (`build-contract.test.ts` і доповнений `eslint-no-browser-storage.test.ts`) використовують `node:fs`/`node:path`/`process`, а `tsconfig.app.json` не має типів `node` — **`npm run build` був червоний** (9 помилок `TS2307`/`TS2591`/`TS7006`). Додати `node` у проєкт застосунку не можна: `src` має лишатись браузерним. Тому unit-тести винесено в окремий проєкт із типами `node` |
+| `web/package.json` → скрипт `build:image`; `web/Dockerfile` → `npm run build:image` і `COPY tsconfig.test.json` | збірка образу впала: `tsc -b` солюшену вимагав файли тестових проєктів, а `vite build` — сам файл `tsconfig.test.json` (він резолвить `references` кореневого конфігу). У build-контексті образу тестів свідомо немає. `build:image` = `tsc -b tsconfig.app.json && vite build`; повний `npm run build` (§16.2) лишився в CI job `web` і в розробника |
+| `vite.config.ts` → `testTimeout: 60_000`, `hookTimeout: 120_000` | Vitest 4 з дефолтними 5/10 с валив `beforeAll` тесту, який запускає ESLint програмно з type-aware конфігом (на холодному кеші TS це десятки секунд). Логіку тестів не змінено |
+| `playwright.config.ts` → `timeout: 60_000`, `expect.timeout: 15_000` | дефолтні 30 с не витримували першого воркера на навантаженому хості одразу після `npm ci` (спостерігалось двічі: 33.6 с і 35.1 с при секундній логіці тесту). Прибирає реальний флакі-ризик і в CI |
+| `web/tests/unit/eslint-no-browser-storage.test.ts` — тест тестувальника про runtime-страховку переписано | він grep-ом вимагав у E2E рівно `{ local: 0, session: 0 }`. Після появи guard-а ця перевірка змінилась (`context.storageState()`), тож тест оновлено **зі збереженням наміру**: тепер він не дає прибрати ні `src/browserStorageGuard.ts`, ні його встановлення в `main.tsx`, ні E2E-перевірку alias-обходу |
+
+### Команди перевірки після виправлень
+
+```text
+$ cd web && npm ci && npm audit --omit=dev --audit-level=high && npm audit --audit-level=high \
+    && npm run lint && npm run test && npm run build && npm run test:e2e      (чиста тека)
+added 295 packages in 11s
+found 0 vulnerabilities          <- npm audit --omit=dev (runtime, те що їде в браузер)
+found 0 vulnerabilities          <- npm audit (усе, включно з dev)
+
+> lint: eslint . --max-warnings 0 && prettier --check .
+All matched files use Prettier code style!
+
+> test: vitest run  (v4.1.11)
+ Test Files  3 passed | 1 skipped (4)
+      Tests  24 passed | 4 skipped (28)
+  (skip: build-contract.test.ts — у ланцюжку §16.2 тести йдуть до build, dist/ ще немає)
+
+> build: tsc -b --force && vite build
+dist/assets/NotFoundPage-DnNC4SfP.js    0.52 kB
+dist/assets/OverviewPage-0PRu27X3.js    2.44 kB
+dist/assets/index-CgGEjsJW.js         305.64 kB | gzip: 98.21 kB
+
+> test:e2e: playwright test
+  ok 2 > невідомий маршрут віддає SPA-сторінку 404, а не помилку сервера (423ms)
+  ok 3 > guard блокує обхід ESLint через alias (§13, M-1) (469ms)
+  ok 1 > головна сторінка рендериться українською (579ms)
+  ok 4 > застосунок нічого не пише у browser storage (§13) (518ms)
+  4 passed (1.9m)
+EXIT=0
+```
+
+```text
+$ uv run ruff check .            -> All checks passed!
+$ uv run ruff format --check .   -> 136 files already formatted
+$ uv run mypy src                -> Success: no issues found in 40 source files
+
+$ uv run pytest -m "not live" -q   (стек не піднято)
+  599 passed, 17 skipped    (skip — runtime-тести gui, що потребують живого контейнера)
+$ uv run pytest -m "not live" -q   (стек піднято)
+  615 passed, 1 skipped     (усі 19 тестів тестувальника проти живого gui — зелені)
+
+$ uv run pre-commit run --all-files
+fix end of files / trim trailing whitespace / check yaml / check toml /
+check for added large files / check for merge conflicts / detect private key /
+ruff check / ruff format / Detect hardcoded secrets / markdownlint-cli2 ....... Passed
+```
+
+```text
+$ docker compose config --quiet                          exit=0
+$ docker compose build gui                               Image collector-gui:dev Built
+$ docker compose --profile core --profile workers --profile gui up -d --wait
+ Container collector-gui-1 Healthy        (і решта 16)
+exit=0
+$ docker compose ps -a --format json | python deploy/compose/check-healthy.py
+all 17 containers healthy or exited 0
+exit=0
+$ curl -sI http://localhost/
+HTTP/1.1 200 OK
+Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; ...
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+$ curl -s http://localhost/api/v1/health/components   {"status":"ready"}
+$ curl -s http://localhost/healthz                    ok
+$ docker compose down -v                              exit=0
+```
+
+### Що лишилось неперевіреним після виправлень
+
+- прогін CI (`npm audit`, SBOM/trivy для `collector-gui`) — локально `syft`/`trivy` відсутні,
+  як і в PR2; структура кроків закріплена тестами, фактичний прогін побачить перший PR
+  (`operationally unverified`);
+- `npm audit` чистий **на дату 2026-09-22**; нові адвізорі з'являються щодня — саме тому крок
+  доданий у CI, а не лише прогнаний разово;
+- Vitest 4 — major-стрибок з 3.2.x, обраний свідомо: у лінійці 3.x виправлення
+  GHSA-82fw-gwwq-j7x9 не випущено, а `--audit-level=high` пропустив би цю moderate. Прогнано
+  локально повністю; конфіг змін не потребував, крім таймаутів.

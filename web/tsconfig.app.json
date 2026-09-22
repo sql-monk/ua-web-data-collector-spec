@@ -1,5 +1,6 @@
 {
-  // Код застосунку + unit-тести (§8: TypeScript strict).
+  // Код застосунку (§8: TypeScript strict). Unit-тести — окремий проєкт
+  // `tsconfig.test.json`: їм потрібні типи `node`, а `src` має лишатись браузерним.
   "compilerOptions": {
     "target": "ES2023",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
@@ -30,5 +31,5 @@
     "noEmit": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo"
   },
-  "include": ["src", "tests/unit"]
+  "include": ["src"]
 }

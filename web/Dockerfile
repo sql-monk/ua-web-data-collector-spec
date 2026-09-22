@@ -25,12 +25,19 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund
 
 # 2) вихідники і конфіги збірки
-COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts index.html ./
+# Усі tsconfig-и солюшену, включно з `tsconfig.test.json`: `vite build` читає кореневий
+# `tsconfig.json` і резолвить його `references`, тому відсутній файл ламає збірку (самі
+# тестові вихідники при цьому не потрібні — читається лише конфіг).
+COPY tsconfig.json tsconfig.app.json tsconfig.node.json tsconfig.test.json ./
+COPY vite.config.ts index.html ./
 COPY src ./src
 
-# `npm run build` = `tsc -b` (strict type check) + `vite build`: типова помилка ламає image,
-# а не проявляється у рантаймі.
-RUN npm run build
+# `build:image` = `tsc -b tsconfig.app.json` (strict type check коду застосунку) + `vite build`:
+# типова помилка ламає image, а не проявляється у рантаймі. Саме `build:image`, а не `build`:
+# останній перевіряє ще й проєкти `tsconfig.test.json`/`tsconfig.node.json` (unit-тести,
+# конфіги, Playwright), яких у build-контексті образу свідомо немає — вони не постачаються.
+# Повний `npm run build` виконують розробник і CI job `web` (§16.2).
+RUN npm run build:image
 
 # ---------------------------------------------------------------------------------------------
 FROM ${NGINX_IMAGE} AS runtime

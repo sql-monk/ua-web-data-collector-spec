@@ -44,5 +44,9 @@ export default defineConfig({
     include: ['tests/unit/**/*.test.{ts,tsx}'],
     css: false,
     restoreMocks: true,
+    // `eslint-no-browser-storage.test.ts` запускає ESLint програмно з type-aware
+    // конфігом — це десятки секунд на холодному кеші TS. Дефолтні 5/10 с замалі.
+    testTimeout: 60_000,
+    hookTimeout: 120_000,
   },
 });

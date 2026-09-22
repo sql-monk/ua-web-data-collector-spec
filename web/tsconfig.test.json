@@ -1,0 +1,11 @@
+{
+  // Unit-тести (Vitest) виконуються у Node, тому окремий проєкт: `src` лишається строго
+  // браузерним (без типів `node`), а тести можуть читати `dist/` через `node:fs`
+  // (`tests/unit/build-contract.test.ts`) і запускати ESLint програмно.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["vitest/globals", "@testing-library/jest-dom", "node"],
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo"
+  },
+  "include": ["tests/unit"]
+}

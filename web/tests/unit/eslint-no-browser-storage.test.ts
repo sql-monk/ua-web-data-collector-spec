@@ -82,22 +82,34 @@ describe('ESLint-заборона browser storage (§13)', () => {
   });
 
   /**
-   * Відома межа (зафіксована тестувальником WP-00 PR3): правила `no-restricted-globals`/
-   * `no-restricted-properties`/`no-restricted-syntax` синтаксичні — вони бачать лише
-   * `localStorage`, `window.localStorage`, `window['localStorage']`. Присвоєння в проміжну
-   * змінну (`const w = window; w.localStorage…`, `window.top!.localStorage`,
+   * Відома межа (зафіксована тестувальником WP-00 PR3, знахідка M-1): правила
+   * `no-restricted-globals`/`no-restricted-properties`/`no-restricted-syntax` синтаксичні —
+   * вони бачать лише `localStorage`, `window.localStorage`, `window['localStorage']`.
+   * Присвоєння в проміжну змінну (`const w = window; w.localStorage…`,
    * `globalThis as unknown as {localStorage}`) ESLint не ловить і зловити не може без
    * type-aware правила на тип `Storage`.
    *
-   * Тому статична заборона не є єдиним бар'єром: `tests/e2e/smoke.spec.ts` перевіряє у
-   * реальному браузері, що після рендеру застосунок нічого не поклав у storage. Цей тест
-   * не дає прибрати runtime-страховку, доки статичне правило обходиться alias-ом.
+   * Тому статична заборона не є єдиним бар'єром: `src/browserStorageGuard.ts` підміняє
+   * обидва сховища геттером, що кидає, а `src/main.tsx` ставить його до першого рендеру.
+   * Ці тести не дають прибрати runtime-страховку непомітно — ні модуль, ні його
+   * встановлення, ні E2E-перевірку, що alias-обхід у реальному браузері падає.
    */
-  it('runtime-страховка проти alias-обходу правила існує в e2e', async () => {
+  it('runtime-страховка проти alias-обходу існує у src і встановлюється у main', async () => {
+    const guard = await readFile(join(projectRoot, 'src', 'browserStorageGuard.ts'), 'utf8');
+    const main = await readFile(join(projectRoot, 'src', 'main.tsx'), 'utf8');
+
+    expect(guard).toMatch(/Object\.defineProperty/);
+    expect(guard).toMatch(/localStorage/);
+    expect(guard).toMatch(/sessionStorage/);
+    expect(guard).toMatch(/throw new TypeError/);
+    expect(main).toMatch(/installBrowserStorageGuard\(\)/);
+  });
+
+  it('E2E доводить, що alias-обхід падає у реальному браузері', async () => {
     const spec = await readFile(join(projectRoot, 'tests', 'e2e', 'smoke.spec.ts'), 'utf8');
 
-    expect(spec).toMatch(/localStorage\.length/);
-    expect(spec).toMatch(/sessionStorage\.length/);
-    expect(spec).toMatch(/\{ local: 0, session: 0 \}/);
+    expect(spec).toMatch(/alias/i);
+    expect(spec).toMatch(/NOT BLOCKED/);
+    expect(spec).toMatch(/storageState\(\)/);
   });
 });

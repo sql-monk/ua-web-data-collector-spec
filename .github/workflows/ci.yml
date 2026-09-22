@@ -166,6 +166,16 @@ jobs:
       - name: npm ci
         run: npm ci
 
+      # §13 «Dependency scanning — щотижня і на кожен PR; critical CVE блокує». HIGH/CRITICAL
+      # блокують; moderate/low — видно у виводі, але не зупиняють PR (політика така сама, як
+      # для trivy HIGH нижче: без fix — датоване risk acceptance у звіті/ADR, не мовчазний
+      # ignore). `npm ci` вище гарантує, що аудит іде по lockfile, а не по ре-резолвлених
+      # версіях.
+      - name: npm audit (HIGH/CRITICAL блокують, §13)
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm audit --audit-level=high
+
       - name: npm run lint (ESLint + Prettier)
         run: npm run lint
 
@@ -260,6 +270,15 @@ jobs:
           artifact-name: sbom-collector.spdx.json
           upload-artifact: true
 
+      - name: SBOM GUI (syft, SPDX JSON як artifact)
+        uses: anchore/sbom-action@v0.24.2
+        with:
+          image: collector-gui:ci
+          format: spdx-json
+          output-file: sbom-gui.spdx.json
+          artifact-name: sbom-collector-gui.spdx.json
+          upload-artifact: true
+
       # §13: будь-який CRITICAL (і без fix) блокує — unfixed CRITICAL потребує датованого
       # risk acceptance в ADR (не мовчазного ignore-unfixed).
       - name: Vulnerability scan (trivy; CRITICAL блокує, включно з unfixed)
@@ -276,6 +295,27 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: collector:ci
+          format: table
+          severity: HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      # Той самий набір сканів для GUI-образу (gate 2, H-1): він так само публікується на
+      # хост, до того ж це ЄДИНИЙ сервіс з публічним портом, тому політика не м'якша.
+      - name: Vulnerability scan GUI (trivy; CRITICAL блокує, включно з unfixed)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: collector-gui:ci
+          format: table
+          severity: CRITICAL
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: Vulnerability scan GUI (trivy; HIGH з fix блокує)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: collector-gui:ci
           format: table
           severity: HIGH
           ignore-unfixed: true

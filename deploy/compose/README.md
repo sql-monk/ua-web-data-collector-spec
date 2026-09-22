@@ -103,6 +103,27 @@ Base-файл портів не публікує; на shared/production host ov
 
 `nginx` слухає 8080 (non-root не може <1024); наверх публікується `${GUI_PORT:-80}:8080`.
 
+### Два різні health-и `gui` — і чому `gui` падає разом з `api`
+
+| Endpoint | Хто питає | Що означає |
+|---|---|---|
+| `GET /healthz` | людина, зовнішній балансувальник | **liveness**: nginx живий і віддає відповідь; про `api` нічого не каже |
+| `GET /api/v1/health/components` | Docker healthcheck сервісу `gui` | **readiness**: nginx живий **і** `api` відповів 2xx на внутрішній `auth_request` |
+
+Healthcheck у `docker-compose.yml` свідомо питає **другий** — це вимога §7.5 «healthcheck
+кожного сервісу перевіряє process + критичну dependency». Наслідки, які треба знати
+експлуатації:
+
+- при недоступному `api` контейнер `gui` **стає `unhealthy`** приблизно за 45 с
+  (`interval 15s × retries 3`), хоча статику далі роздає нормально (перевірено: `curl /`
+  → 200, `curl /api/v1/health/components` → 503 `{"status":"not_ready"}`);
+- тому `docker compose up -d --wait` на деградованому стеку **впаде** з
+  `container collector-gui-1 is unhealthy` — це не проблема GUI, а сигнал про `api`;
+- відновлення автоматичне: після повернення `api` в `healthy` `gui` стає `healthy` сам
+  приблизно за 20 с, перезапуск не потрібен;
+- якщо потрібен саме liveness (напр. зовнішній LB, який не має знімати трафік зі статики
+  через збій API), використовуйте `GET /healthz` — він навмисно не залежить від `api`.
+
 ## `postgres/init` — SQL першого старту (WP-01A)
 
 `deploy/compose/postgres/init/` монтується у `postgres` як

@@ -24,10 +24,50 @@ test.describe('operator GUI — smoke каркаса', () => {
     await page.goto('/');
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
-    const stored = await page.evaluate(() => ({
-      local: window.localStorage.length,
-      session: window.sessionStorage.length,
-    }));
-    expect(stored).toEqual({ local: 0, session: 0 });
+    // Читаємо сховище повз сторінку (`storageState` бере його з контексту браузера), бо
+    // всередині сторінки геттер заблоковано guard-ом — див. наступний тест.
+    const state = await page.context().storageState();
+    const origin = state.origins.find((o) => o.origin.includes('127.0.0.1'));
+    expect(origin?.localStorage ?? []).toEqual([]);
+  });
+
+  test('guard блокує обхід ESLint через alias (§13, M-1)', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+
+    // Саме ті форми, які синтаксичні ESLint-правила зловити не можуть: доступ через
+    // проміжну змінну і через змінну-ключ.
+    const attempts = await page.evaluate(() => {
+      type StorageKey = 'localStorage' | 'sessionStorage';
+      const read = (host: object, key: StorageKey): Storage =>
+        (host as Record<StorageKey, Storage>)[key];
+      const probe = (run: () => void): string => {
+        try {
+          run();
+          return 'NOT BLOCKED';
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      };
+
+      return {
+        aliasLocal: probe(() => {
+          const alias = window;
+          read(alias, 'localStorage').setItem('access_token', 'x');
+        }),
+        aliasSession: probe(() => {
+          const alias = window;
+          read(alias, 'sessionStorage').setItem('refresh_token', 'x');
+        }),
+        globalRef: probe(() => {
+          read(globalThis, 'localStorage').setItem('access_token', 'x');
+        }),
+      };
+    });
+
+    for (const [form, message] of Object.entries(attempts)) {
+      expect(message, form).not.toBe('NOT BLOCKED');
+      expect(message, form).toContain('§13');
+    }
   });
 });

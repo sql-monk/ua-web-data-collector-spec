@@ -23,6 +23,21 @@ import tseslint from 'typescript-eslint';
  *
  * Знімати заборону не можна локально (`eslint-disable`) — лише зміною цього файлу в PR з
  * поясненням, бо це вимога §13, а не стильова преференція.
+ *
+ * **Межа цих правил (знахідка M-1, gate 2 WP-00 PR3).** Усі три правила синтаксичні: вони
+ * бачать `localStorage`, `window.localStorage`, `globalThis.sessionStorage`,
+ * `window['localStorage']` і `self.localStorage` — тобто форми, де ім'я сховища присутнє в
+ * коді буквально. Присвоєння в проміжну змінну ESLint не ловить і зловити не може без
+ * type-aware правила на тип `Storage`:
+ *
+ *     const w = window;                                   // ← lint чистий
+ *     w.localStorage.setItem('access_token', token);      // ← lint чистий
+ *
+ * Тому статична заборона — не єдиний бар'єр. `src/browserStorageGuard.ts` підміняє обидва
+ * сховища геттером, що кидає, і `src/main.tsx` ставить його до першого рендеру: alias-обхід
+ * помирає у рантаймі. Перевірено `tests/unit/browser-storage-guard.test.ts` і E2E-тестом
+ * «guard блокує обхід ESLint через alias». Прибирати guard разом із «зайвим» кодом не можна —
+ * тоді alias-форми знову проходять непоміченими.
  */
 const STORAGE_BAN =
   'Заборонено §13: токени і контакти не зберігаються у localStorage/sessionStorage ' +

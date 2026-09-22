@@ -484,13 +484,46 @@ def test_dockerfile_copies_registry_with_explicit_mode() -> None:
 
 
 def test_ci_trivy_critical_without_ignore_unfixed_and_high_with() -> None:
+    """Обидва образи (`collector` і `collector-gui`) скануються за однаковою політикою §13."""
     ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
     scans = [s["with"] for s in ci["jobs"]["docker"]["steps"] if "trivy" in (s.get("uses") or "")]
-    by_severity = {s["severity"]: s for s in scans}
-    assert set(by_severity) == {"CRITICAL", "HIGH"}
-    assert "ignore-unfixed" not in by_severity["CRITICAL"], "§13: unfixed CRITICAL не пропускати"
-    assert str(by_severity["CRITICAL"]["exit-code"]) == "1"
-    assert by_severity["HIGH"]["ignore-unfixed"] is True
+    by_image: dict[str, dict[str, Any]] = {}
+    for scan in scans:
+        by_image.setdefault(scan["image-ref"], {})[scan["severity"]] = scan
+    assert set(by_image) == {"collector:ci", "collector-gui:ci"}, by_image.keys()
+    for image, by_severity in by_image.items():
+        assert set(by_severity) == {"CRITICAL", "HIGH"}, image
+        assert "ignore-unfixed" not in by_severity["CRITICAL"], (
+            f"{image}: §13 — unfixed CRITICAL не пропускати"
+        )
+        assert str(by_severity["CRITICAL"]["exit-code"]) == "1", image
+        assert by_severity["HIGH"]["ignore-unfixed"] is True, image
+        assert str(by_severity["HIGH"]["exit-code"]) == "1", image
+
+
+def test_ci_generates_sbom_for_both_images() -> None:
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    sboms = [s["with"] for s in ci["jobs"]["docker"]["steps"] if "sbom" in (s.get("uses") or "")]
+    assert {s["image"] for s in sboms} == {"collector:ci", "collector-gui:ci"}
+    assert all(s["upload-artifact"] for s in sboms)
+
+
+def test_ci_web_job_audits_npm_dependencies() -> None:
+    """Gate 2, H-1 / §13: залежності GUI скануються на кожен PR, HIGH+ блокує."""
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    steps = ci["jobs"]["web"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    runs = [s.get("run", "") for s in steps]
+    audit = [r for r in runs if "npm audit" in r]
+    assert audit, "немає кроку npm audit"
+    joined = " ".join(audit)
+    assert "--audit-level=high" in joined, "HIGH/CRITICAL мають блокувати"
+    assert "--omit=dev" in joined, "runtime-залежності (bundle у браузері) — окремо"
+    # Аудит іде після `npm ci` (по lockfile), але до lint/test/build — щоб PR падав швидко.
+    audit_at = next(i for i, r in enumerate(runs) if "npm audit" in r)
+    ci_at = next(i for i, r in enumerate(runs) if r.strip() == "npm ci")
+    lint_at = next(i for i, r in enumerate(runs) if "npm run lint" in r)
+    assert ci_at < audit_at < lint_at, names
 
 
 # --- gate 3 (код-рев'ю / security-рев'ю) -----------------------------------------------------
