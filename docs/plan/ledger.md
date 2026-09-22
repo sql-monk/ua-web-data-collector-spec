@@ -17,7 +17,7 @@
 
 | WP | Стан | Примітка |
 |---|---|---|
-| WP-01A | spec_review (PR1) | код-рев'ю changes_requested → усе закрито (1 high, 5 medium, 7 low); 621 + 103 integration ×3 конфігурації |
+| WP-01A | docs (PR1) | пострев'ю accept (0 missing, 9 partial); S-1..S-4 закрито; 622 + 104 integration |
 | WP-01B | pending | після WP-01A |
 | WP-01D | pending | після WP-00, WP-01A |
 | WP-02 | pending | після WP-01A |
