@@ -107,3 +107,35 @@ No hyperlinks found! 0 links checked.
 
 Без змін по суті (перевірено, розбіжностей з кодом не знайдено, окрім F-1):
 `docs/runbooks/clean-host-start.md`, `deploy/compose/README.md`.
+
+## Доповнення: конкурентний коміт 37a7b94 і ADR для approved dependency WP-01A
+
+Під час роботи над цим етапом у тому самому worktree паралельно комітив реалізатор:
+`docs/plan/deps/WP-01A-to-WP-00.md` (approved dependency, ухвалено оркестратором) додав
+після зрізу пострев'ю (HEAD `eb280a6`) mount `postgres/init`, Docker secret `postgres_dsn`
+для `migrate-postgres` і опційний `COPY alembic.ini`/`migrations/` у `Dockerfile`. Реалізатор
+закомітив ці зміни як `37a7b94 feat(wp-00): postgres init mount and DSN secret for WP-01A` —
+і оскільки процеси ділять один git index/working tree, у цей самий коміт потрапили вже
+застейджені на той момент файли цього етапу docs (`README.md`,
+`docs/decisions/0002-docker-compose-single-host.md`, `docs/plan/cards/WP-00.md`,
+`docs/runbooks/rollback-image.md`, цей звіт, а також попередньо застейджені артефакти
+пострев'ю `docs/acceptance/traceability.md` і `spec-review-pr2.md`) — замість окремого
+коміту `docs(wp-00): …`. Вміст файлів не постраждав (перевірено `git show --stat 37a7b94`);
+атрибуція коміту — процесна відмінність, не помилка змісту.
+
+Реалізатор залишив у `implementation-pr2.md` («Approved dependency WP-01A», готовий
+markdown-абзац) прохання додати цей абзац в ADR-0002 окремо, оскільки в момент його правки
+файл редагував цей етап docs. Виконано новим комітом: додано розділ ADR-0002 «Approved
+dependency WP-01A (після gate 3, дата 2026-09-22)» між «One-shots і readiness» і «Health» —
+mount `postgres/init` (порожній до merge WP-01A PR1), pinned digest `postgres:18@sha256:
+86c951e0…`, secret `postgres_dsn`/`COLLECTOR_POSTGRES_DSN_FILE` лише для `migrate-postgres`,
+опційний `COPY alembic.ini`/`migrations/` через glob-no-op у `Dockerfile`; посилання на
+`docs/plan/deps/WP-01A-to-WP-00.md` додано в «Related» (файл лежить поза цим worktree —
+у гілці/worktree WP-01A, лише referenced, без hyperlink).
+
+```text
+$ npx --yes markdownlint-cli2 docs/decisions/0002-docker-compose-single-host.md \
+  docs/plan/reports/WP-00/docs-pr2.md
+Summary: 0 issues in 0 files
+[exit 0]
+```

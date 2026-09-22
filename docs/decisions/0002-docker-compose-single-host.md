@@ -118,6 +118,22 @@ mongod з --replSet приймає команди»; primary перевіряю�
 викликає команду без прапорців до WP-01B. `api` і workers стартують лише після
 `service_completed_successfully` one-shots і `service_healthy` stateful — це readiness §7.5.
 
+### Approved dependency WP-01A (після gate 3, дата 2026-09-22)
+
+`docs/plan/deps/WP-01A-to-WP-00.md`, п.2–3 (ухвалено оркестратором, внесено **після** HEAD
+`eb280a6`, на якому працював пострев'юер — змін цього розділу немає у `spec-review-pr2.md`):
+`postgres` монтує `./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro` (SQL ролей
+§13 — власність WP-01A, з'явиться після merge його PR1; тека у WP-00 порожня, лише
+`.gitkeep`/`README.md`); digest `postgres:18@sha256:86c951e0…` збігається з CI/testcontainers
+WP-01A; `migrate-postgres` отримує Docker secret `postgres_dsn` через
+`COLLECTOR_POSTGRES_DSN_FILE` — **лише цей one-shot** (§13: migration role не
+використовується runtime-процесами; per-role DSN для api/workers додають WP-01A/WP-01D);
+`init-secrets.sh` будує DSN із того самого згенерованого `postgres_password`. `Dockerfile`
+копіює `alembic.ini` і `migrations/` опційним glob (`alembic.in[i]`, `migration[s]/`) і задає
+`COLLECTOR_ALEMBIC_INI=/app/alembic.ini`: доки файлів немає, BuildKit робить крок no-op;
+після merge WP-01A вони потрапляють в image без зміни Dockerfile. Команду `collector db
+roles` не додано (її ще немає в main) — лише коментар біля `command` у compose.
+
 ### Health
 
 `collector.api.health` — стаб FastAPI лише з `GET /api/v1/health/components`
@@ -245,4 +261,5 @@ WP-13 разом із security-тестами; до того unfixed CRITICAL б
   `tests/integration/test_health_loopback.py`.
 - Документи: `docs/runbooks/clean-host-start.md`, `docs/runbooks/rollback-image.md`,
   `deploy/compose/README.md`, `docs/plan/reports/WP-00/implementation-pr2.md`,
-  `docs/plan/reports/WP-00/spec-review-pr2.md`; ADR-0001 (стаби, логування).
+  `docs/plan/reports/WP-00/spec-review-pr2.md`, `docs/plan/deps/WP-01A-to-WP-00.md` (approved
+  dependency, розділ «Approved dependency WP-01A»); ADR-0001 (стаби, логування).
