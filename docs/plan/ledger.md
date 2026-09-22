@@ -8,7 +8,7 @@
 
 | WP | Під-PR | Branch | Стан | Останній gate | Примітка |
 |---|---|---|---|---|---|
-| WP-00 | PR1 python+CI | `wp/00-1-python-ci` | in_progress | — | картка `docs/plan/cards/WP-00.md` |
+| WP-00 | PR1 python+CI | `wp/00-1-python-ci` | testing | реалізація: `reports/WP-00/implementation-pr1.md` | картка `docs/plan/cards/WP-00.md`; CLI = Typer |
 | WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | pending | — | після merge PR1 |
 | WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | pending | — | після merge PR2 |
 | WP-01C | — | `wp/01c-contracts` | pending | — | стартує з `wp/00-1` після появи layout |
@@ -55,4 +55,4 @@
 
 | Файл | Від | До | Стан |
 |---|---|---|---|
-| — | — | — | — |
+| `WP-00-to-repo-config.md` | WP-00 PR1 | orchestrator | resolved — MD024 siblings_only у `.markdownlint-cli2.jsonc` (main) |
