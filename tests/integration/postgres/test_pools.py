@@ -26,6 +26,8 @@ from collector.workers.roles import WorkerRole
 pytestmark = pytest.mark.integration
 
 T0 = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
+# `upsert_pool` теж пише audit (PR2, S-2) — лічильники нижче рахують лише scale-записи.
+SCALE_AUDIT = AuditLog.action == "worker_pool.scale"
 FETCH_STATE = pools.PoolDesiredState(desired_replicas=2, desired_concurrency=8, max_replicas=6)
 
 
@@ -140,7 +142,10 @@ async def test_request_scale_is_one_transaction_and_idempotent(pg_session: Async
         }
         assert audit.after_state == {"desired_replicas": 4, "desired_concurrency": 8, "revision": 2}
         assert audit.request_id == "req-1"
-        assert await pg_session.scalar(select(func.count()).select_from(AuditLog)) == 1
+        assert (
+            await pg_session.scalar(select(func.count()).select_from(AuditLog).where(SCALE_AUDIT))
+            == 1
+        )
         assert await pg_session.scalar(select(func.count()).select_from(ScaleCommand)) == 1
 
     # Нова команда supersede-ить активну попередню.
@@ -306,7 +311,10 @@ async def test_invalid_scale_values_raise_domain_error_without_writes(
         assert pool is not None
         assert (pool.revision, pool.desired_replicas, pool.desired_concurrency) == (1, 2, 8)
         assert await pg_session.scalar(select(func.count()).select_from(ScaleCommand)) == 0
-        assert await pg_session.scalar(select(func.count()).select_from(AuditLog)) == 0
+        assert (
+            await pg_session.scalar(select(func.count()).select_from(AuditLog).where(SCALE_AUDIT))
+            == 0
+        )
 
         # Валідне значення після відхилених — проходить у тій самій транзакції.
         ok = await pools.request_scale(
@@ -450,7 +458,9 @@ async def test_request_scale_stays_idempotent_when_pool_revision_moved(
     assert results[0].command_id == results[1].command_id
     async with pg_sessions() as session:
         assert await session.scalar(select(func.count()).select_from(ScaleCommand)) == 1
-        assert await session.scalar(select(func.count()).select_from(AuditLog)) == 1
+        assert (
+            await session.scalar(select(func.count()).select_from(AuditLog).where(SCALE_AUDIT)) == 1
+        )
         pool = await pools.get_pool(session, WorkerRole.FETCH)
         assert pool is not None and pool.revision == 2
 

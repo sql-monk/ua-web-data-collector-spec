@@ -85,8 +85,9 @@ async def mark_published(
             OutboxEvent.outbox_id.in_(list(outbox_ids)),
             OutboxEvent.published_at.is_(None),
         )
-        .values(published_at=current, last_error_code=None, last_error_message=None,
-                updated_at=current)
+        .values(
+            published_at=current, last_error_code=None, last_error_message=None, updated_at=current
+        )
         .returning(OutboxEvent.outbox_id)
     )
     return len(result.scalars().all())
@@ -127,7 +128,8 @@ async def mark_failed(
 
 async def get_event(session: AsyncSession, event_id: UUID) -> OutboxEvent | None:
     """Рядок за глобально unique `event_id` (не за PK) — саме ним дедуплікує consumer."""
-    return await session.scalar(select(OutboxEvent).where(OutboxEvent.event_id == event_id))
+    stmt = select(OutboxEvent).where(OutboxEvent.event_id == event_id)
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def count_backlog(

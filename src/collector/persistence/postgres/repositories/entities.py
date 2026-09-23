@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import literal, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,9 +81,7 @@ async def upsert_entity(
             created_at=current,
             updated_at=current,
         )
-        .on_conflict_do_nothing(
-            index_elements=[EntityIndex.source_id, EntityIndex.source_item_id]
-        )
+        .on_conflict_do_nothing(index_elements=[EntityIndex.source_id, EntityIndex.source_item_id])
         .returning(EntityIndex)
     )
     inserted = (await session.execute(stmt)).scalar_one_or_none()
@@ -115,11 +113,10 @@ async def find_entity(
     session: AsyncSession, source_id: str, source_item_id: str
 ) -> EntityIndex | None:
     """Рядок index за unique source identity (§9.3 п.1)."""
-    return await session.scalar(
-        select(EntityIndex).where(
-            EntityIndex.source_id == source_id, EntityIndex.source_item_id == source_item_id
-        )
+    stmt = select(EntityIndex).where(
+        EntityIndex.source_id == source_id, EntityIndex.source_item_id == source_item_id
     )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_confirmed_version(session: AsyncSession, entity_uuid: UUID) -> int:
@@ -187,12 +184,10 @@ async def list_entities(
     )
     if after is not None:
         version, entity_uuid = after
+        # Row comparison — PostgreSQL використовує його як index condition, а не фільтр.
         stmt = stmt.where(
-            (EntityIndex.confirmed_projection_version > version)
-            | (
-                (EntityIndex.confirmed_projection_version == version)
-                & (EntityIndex.entity_uuid > entity_uuid)
-            )
+            tuple_(EntityIndex.confirmed_projection_version, EntityIndex.entity_uuid)
+            > tuple_(literal(version), literal(entity_uuid))
         )
     return list((await session.execute(stmt)).scalars().all())
 

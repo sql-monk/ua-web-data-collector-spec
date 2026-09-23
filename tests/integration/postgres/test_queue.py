@@ -202,11 +202,21 @@ async def test_operator_quarantine_and_complete_are_terminal(pg_session: AsyncSe
         job = await queue.enqueue(
             pg_session, queue.NewJob(job_type="fetch", idempotency_key="q"), now=T0
         )
-        job = await queue.quarantine(pg_session, job.job_id, None, error_code="manual", now=T0)
+        job = await queue.quarantine(
+            pg_session, job.job_id, None, error_code="manual", actor="op", reason="manual", now=T0
+        )
     assert job.status == "quarantined"
     async with pg_session.begin():
         with pytest.raises(LeaseNotOwnedError):
-            await queue.quarantine(pg_session, job.job_id, None, error_code="manual", now=T0)
+            await queue.quarantine(
+                pg_session,
+                job.job_id,
+                None,
+                error_code="manual",
+                actor="op",
+                reason="manual",
+                now=T0,
+            )
         letters = await pg_session.scalars(
             select(DeadLetter).where(DeadLetter.job_id == job.job_id)
         )

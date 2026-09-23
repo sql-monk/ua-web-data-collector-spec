@@ -14,7 +14,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.contracts import JsonObject, new_entity_id
 from collector.persistence.postgres.clock import resolve_now
+from collector.persistence.postgres.errors import InvalidValueError
 from collector.persistence.postgres.models import AuditLog
+
+
+def require_audit_context(actor: str | None, reason: str | None) -> tuple[str, str]:
+    """`actor`/`reason` операції з audit усередині репозиторію (§13; S-2 пострев'ю PR1).
+
+    Порожні або пробільні значення → `InvalidValueError` **до першого запису**: транзакція
+    викликача лишається чистою, а слід без «хто» і «навіщо» не з'являється.
+    """
+    if actor is None or not actor.strip():
+        msg = "audit: actor обов'язковий для mutating-операції control plane (§13)"
+        raise InvalidValueError(msg)
+    if reason is None or not reason.strip():
+        msg = "audit: reason обов'язковий для mutating-операції control plane (§13)"
+        raise InvalidValueError(msg)
+    return actor, reason
 
 
 async def append_audit(

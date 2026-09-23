@@ -126,8 +126,9 @@ class OutboxEvent(Base):
         ),
         CheckConstraint("payload_sha256 ~ '^[0-9a-f]{64}$'", name="payload_sha256_hex"),
         # Обов'язковий index §9.1: publisher-lookup `fetch_unpublished`.
-        Index("ix_outbox_events_published_at_available_at", "published_at", "available_at",
-              "event_id"),
+        Index(
+            "ix_outbox_events_published_at_available_at", "published_at", "available_at", "event_id"
+        ),
         # Hot path publisher: лише неопубліковані рядки, у точному порядку ORDER BY.
         Index(
             "ix_outbox_events_unpublished",

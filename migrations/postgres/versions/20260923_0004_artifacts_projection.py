@@ -20,7 +20,7 @@ hot paths (claim projection tasks, публікація outbox, orphan candidate
   (R-42). Саме через них ці дві таблиці **не** партиціоновані — див. docstring
   `collector/persistence/postgres/models/outbox.py`.
 
-`raw_objects` теж не партиціонована: PK — `sha256(body)` (§9.3 п.4), і місячні партиції
+`raw_objects` теж не партиціонована: unique `sha256(body)` (§9.3 п.4), і місячні партиції
 зробили б дедуплікацію помісячною.
 
 Downgrade реалізовано (PR2 додає лише нові таблиці; для production forward-only, див. картку
@@ -331,6 +331,7 @@ def upgrade() -> None:
     op.create_index("ix_parse_attempts_raw_sha256", "parse_attempts", ["raw_sha256"], unique=False)
     op.create_table(
         "raw_objects",
+        sa.Column("raw_object_id", sa.Uuid(), nullable=False),
         sa.Column("sha256", sa.String(length=64), nullable=False),
         sa.Column("object_key", sa.Text(), nullable=False),
         sa.Column("uri", sa.Text(), nullable=False),
@@ -347,8 +348,9 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name=op.f("ck_raw_objects_sha256_hex")),
         sa.CheckConstraint("size_bytes >= 0", name=op.f("ck_raw_objects_size_non_negative")),
-        sa.PrimaryKeyConstraint("sha256", name=op.f("pk_raw_objects")),
+        sa.PrimaryKeyConstraint("raw_object_id", name=op.f("pk_raw_objects")),
         sa.UniqueConstraint("object_key", name=op.f("uq_raw_objects_object_key")),
+        sa.UniqueConstraint("sha256", name=op.f("uq_raw_objects_sha256")),
     )
     op.create_index("ix_raw_objects_first_seen_at", "raw_objects", ["first_seen_at"], unique=False)
     op.create_table(

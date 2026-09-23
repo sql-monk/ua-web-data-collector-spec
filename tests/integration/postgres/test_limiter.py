@@ -132,11 +132,11 @@ async def test_block_origin_denies_until_deadline(pg_session: AsyncSession) -> N
     until = T0 + timedelta(seconds=90)
     async with pg_session.begin():
         bucket = await limiter.block_origin(
-            pg_session, ORIGIN, until, reason="429 Retry-After", now=T0
+            pg_session, ORIGIN, until, actor="fetcher", reason="429 Retry-After", now=T0
         )
         assert bucket.blocked_until == until
         shorter = await limiter.block_origin(
-            pg_session, ORIGIN, T0 + timedelta(seconds=10), reason="dup", now=T0
+            pg_session, ORIGIN, T0 + timedelta(seconds=10), actor="fetcher", reason="dup", now=T0
         )
         assert shorter.blocked_until == until  # не скорочує
     async with pg_session.begin():
@@ -208,7 +208,9 @@ async def test_block_origin_resets_refill_so_there_is_no_burst_after_unblock(
             assert decision.granted
             assert decision.permit is not None
             await limiter.release_permit(pg_session, decision.permit.permit_id, now=T0)
-        bucket = await limiter.block_origin(pg_session, ORIGIN, until, reason="429", now=T0)
+        bucket = await limiter.block_origin(
+            pg_session, ORIGIN, until, actor="fetcher", reason="429", now=T0
+        )
     assert bucket.available_tokens == Decimal(0)
     assert bucket.last_refill_at == until
 

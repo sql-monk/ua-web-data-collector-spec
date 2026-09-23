@@ -31,7 +31,7 @@ from collector.contracts import new_entity_id
 from collector.persistence.postgres.clock import resolve_now
 from collector.persistence.postgres.errors import NotFoundError
 from collector.persistence.postgres.models import OriginRateBucket, OriginRatePermit
-from collector.persistence.postgres.repositories.audit import append_audit
+from collector.persistence.postgres.repositories.audit import append_audit, require_audit_context
 
 TOKEN_QUANTUM = Decimal("0.0001")
 DenyReason = Literal["blocked", "rate", "concurrency"]
@@ -251,7 +251,9 @@ async def block_origin(
     origin: str,
     until: datetime,
     *,
+    actor: str,
     reason: str,
+    request_id: str | None = None,
     now: datetime | None = None,
 ) -> OriginRateBucket:
     """429/`Retry-After`/challenge: жоден permit до `until` (не скорочує вже довший block).
@@ -268,6 +270,7 @@ async def block_origin(
 
     Transaction boundary: викликач.
     """
+    require_audit_context(actor, reason)
     current = resolve_now(now)
     bucket = await session.scalar(
         select(OriginRateBucket).where(OriginRateBucket.origin == origin).with_for_update()
@@ -291,9 +294,7 @@ async def block_origin(
             resource_type="origin_rate_bucket",
             resource_id=origin,
             before={
-                "blocked_until": previous_until.isoformat()
-                if previous_until is not None
-                else None
+                "blocked_until": previous_until.isoformat() if previous_until is not None else None
             },
             after={"blocked_until": until.isoformat(), "reason": reason[:256]},
             request_id=request_id,

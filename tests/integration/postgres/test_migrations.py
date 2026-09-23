@@ -42,6 +42,17 @@ EXPECTED_TABLES = {
     "scale_commands",
     "dead_letters",
     "audit_log",
+    # PR2
+    "fetches",
+    "raw_objects",
+    "parse_attempts",
+    "artifact_upload_claims",
+    "normalized_artifacts",
+    "projection_tasks",
+    "projection_acknowledgements",
+    "entity_index",
+    "change_events",
+    "outbox_events",
 }
 ALLOWED_JSONB = {
     ("crawl_jobs", "args"),
@@ -108,6 +119,9 @@ async def test_models_match_card_contracts(pg_engine: AsyncEngine) -> None:
         "ix_worker_instances_role_status_last_heartbeat_at",
         "ix_audit_log_created_at",
         "uq_crawl_runs_running_full",
+        "ix_projection_tasks_status_not_before_priority",
+        "ix_outbox_events_published_at_available_at",
+        "ix_entity_index_domain_confirmed_version",
     } <= indexes
 
 
@@ -115,7 +129,11 @@ async def test_month_partitions_are_created_and_idempotent(pg_engine: AsyncEngin
     async with pg_engine.begin() as conn:
         created = await ensure_month_partitions(conn, months_ahead=2, start=date(2027, 11, 1))
         again = await ensure_month_partitions(conn, months_ahead=2, start=date(2027, 11, 1))
-    assert created == ["audit_log_y2027m11", "audit_log_y2027m12", "audit_log_y2028m01"]
+    assert created == [
+        f"{table}_y{period}"
+        for table in ("audit_log", "fetches")
+        for period in ("2027m11", "2027m12", "2028m01")
+    ]
     assert again == []
 
 

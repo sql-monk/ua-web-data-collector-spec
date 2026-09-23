@@ -20,6 +20,7 @@ from collector.persistence.postgres.repositories import crawl_runs, sources
 pytestmark = pytest.mark.integration
 
 T0 = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
+AUDIT = {"actor": "op", "reason": "test"}
 POLICY = sources.PolicySnapshot(
     requests_per_second=Decimal("0.5"),
     max_concurrency=2,
@@ -45,7 +46,7 @@ async def test_source_state_uses_optimistic_revision(pg_session: AsyncSession) -
             source.id,
             SourceState.ENABLED,
             expected_revision=1,
-            reason=None,
+            reason="launch",
             actor="op",
             now=T0,
         )
@@ -70,10 +71,10 @@ async def test_policy_versions_are_immutable_and_sequential(pg_session: AsyncSes
     source = await _source(pg_session)
     async with pg_session.begin():
         v1 = await sources.add_policy_version(
-            pg_session, source.id, POLICY, expected_revision=1, now=T0
+            pg_session, source.id, POLICY, expected_revision=1, now=T0, **AUDIT
         )
         v2 = await sources.add_policy_version(
-            pg_session, source.id, POLICY, expected_revision=2, now=T0
+            pg_session, source.id, POLICY, expected_revision=2, now=T0, **AUDIT
         )
     assert (v1.version, v2.version) == (1, 2)
     async with pg_session.begin():
@@ -84,7 +85,7 @@ async def test_policy_versions_are_immutable_and_sequential(pg_session: AsyncSes
     async with pg_session.begin():
         with pytest.raises(StaleRevisionError):
             await sources.add_policy_version(
-                pg_session, source.id, POLICY, expected_revision=1, now=T0
+                pg_session, source.id, POLICY, expected_revision=1, now=T0, **AUDIT
             )
 
 
@@ -92,10 +93,10 @@ async def test_routes_and_cursors_upsert(pg_session: AsyncSession) -> None:
     source = await _source(pg_session)
     async with pg_session.begin():
         route = await sources.upsert_route(
-            pg_session, source.id, "rss", "https://x.test/rss", now=T0
+            pg_session, source.id, "rss", "https://x.test/rss", now=T0, **AUDIT
         )
         same = await sources.upsert_route(
-            pg_session, source.id, "rss", "https://x.test/rss", now=T0
+            pg_session, source.id, "rss", "https://x.test/rss", now=T0, **AUDIT
         )
         assert same.id == route.id
         opened = await sources.set_route_state(
@@ -103,6 +104,7 @@ async def test_routes_and_cursors_upsert(pg_session: AsyncSession) -> None:
             route.id,
             RouteState.CIRCUIT_OPEN,
             expected_revision=1,
+            actor="fetcher",
             reason="5xx",
             circuit_open_until=T0,
             now=T0,
@@ -110,15 +112,29 @@ async def test_routes_and_cursors_upsert(pg_session: AsyncSession) -> None:
         assert (opened.state, opened.revision) == ("circuit_open", 2)
         with pytest.raises(StaleRevisionError):
             await sources.set_route_state(
-                pg_session, route.id, RouteState.HEALTHY, expected_revision=1, now=T0
+                pg_session, route.id, RouteState.HEALTHY, expected_revision=1, now=T0, **AUDIT
             )
         with pytest.raises(ValueError, match="route_kind"):
-            await sources.upsert_route(pg_session, source.id, "ftp", "x", now=T0)
+            await sources.upsert_route(pg_session, source.id, "ftp", "x", now=T0, **AUDIT)
         c1 = await sources.upsert_cursor(
-            pg_session, source.id, "rss", "https://x.test/rss", "etag-1", route_id=route.id, now=T0
+            pg_session,
+            source.id,
+            "rss",
+            "https://x.test/rss",
+            "etag-1",
+            route_id=route.id,
+            now=T0,
+            **AUDIT,
         )
         c2 = await sources.upsert_cursor(
-            pg_session, source.id, "rss", "https://x.test/rss", "etag-2", route_id=route.id, now=T0
+            pg_session,
+            source.id,
+            "rss",
+            "https://x.test/rss",
+            "etag-2",
+            route_id=route.id,
+            now=T0,
+            **AUDIT,
         )
     assert c1.id == c2.id
     assert (c2.cursor_value, c2.revision) == ("etag-2", 2)

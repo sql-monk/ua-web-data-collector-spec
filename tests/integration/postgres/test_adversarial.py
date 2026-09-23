@@ -139,7 +139,15 @@ async def test_retry_after_max_attempts_writes_exactly_one_dead_letter(
                 await queue.retry(pg_session, job.job_id, "w", error_code="http_500", now=T0)
         async with pg_session.begin():
             with pytest.raises(LeaseNotOwnedError):
-                await queue.quarantine(pg_session, job.job_id, None, error_code="manual", now=T0)
+                await queue.quarantine(
+                    pg_session,
+                    job.job_id,
+                    None,
+                    error_code="manual",
+                    actor="op",
+                    reason="manual",
+                    now=T0,
+                )
     async with pg_session.begin():
         letters = await pg_session.scalars(
             select(DeadLetter).where(DeadLetter.job_id == job.job_id)
@@ -257,7 +265,9 @@ async def test_block_origin_with_live_permits_denies_new_but_keeps_existing(
     assert held.granted and held.permit is not None
     until = T0 + timedelta(seconds=60)
     async with pg_session.begin():
-        await limiter.block_origin(pg_session, ORIGIN_A, until, reason="429", now=T0)
+        await limiter.block_origin(
+            pg_session, ORIGIN_A, until, actor="fetcher", reason="429", now=T0
+        )
     async with pg_session.begin():
         denied = await limiter.acquire_permit(pg_session, ORIGIN_A, "b", 30, now=T0)
         assert denied.reason == "blocked" and denied.retry_after == until
@@ -316,7 +326,7 @@ async def test_two_origins_do_not_block_each_other(pg_session: AsyncSession) -> 
         ).granted is False
     async with pg_session.begin():
         await limiter.block_origin(
-            pg_session, ORIGIN_A, T0 + timedelta(hours=1), reason="429", now=T0
+            pg_session, ORIGIN_A, T0 + timedelta(hours=1), actor="fetcher", reason="429", now=T0
         )
     async with pg_session.begin():
         assert (
@@ -446,7 +456,9 @@ async def test_scale_command_with_stale_revision_leaves_no_partial_writes(
     async with pg_session.begin():
         pool = await pools.get_pool(pg_session, WorkerRole.FETCH)
         commands = list(await pg_session.scalars(select(ScaleCommand)))
-        audits = list(await pg_session.scalars(select(AuditLog)))
+        audits = list(
+            await pg_session.scalars(select(AuditLog).where(AuditLog.action == "worker_pool.scale"))
+        )
     assert pool is not None
     assert (pool.revision, pool.desired_replicas) == (2, 4)
     assert [c.idempotency_key for c in commands] == ["scale-1"]

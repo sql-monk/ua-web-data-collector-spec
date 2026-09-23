@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import Select, and_, delete, exists, select, update
+from sqlalchemy import Select, and_, exists, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -119,6 +119,7 @@ async def record_raw_object(
     stmt = (
         pg_insert(RawObject)
         .values(
+            raw_object_id=new_entity_id(),
             sha256=sha256,
             object_key=object_key,
             uri=uri,
@@ -135,7 +136,13 @@ async def record_raw_object(
     inserted = (await session.execute(stmt)).scalar_one_or_none()
     if inserted is not None:
         return inserted
-    existing = await session.get(RawObject, sha256, populate_existing=True)
+    existing = (
+        await session.execute(
+            select(RawObject)
+            .where(RawObject.sha256 == sha256)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
     if existing is None:  # pragma: no cover — можливо лише поза READ COMMITTED
         msg = f"raw object {sha256} зник між INSERT і SELECT (потрібен READ COMMITTED)"
         raise NotFoundError(msg)
@@ -201,7 +208,10 @@ async def acquire_upload_claim(
         msg = f"upload claim {object_key!r} зник між INSERT і SELECT"
         raise NotFoundError(msg)
     if claim.status == UploadClaimStatus.COMMITTED.value:
-        msg = f"upload claim {object_key!r}: об'єкт уже committed (generation {claim.claim_generation})"
+        msg = (
+            f"upload claim {object_key!r}: об'єкт уже committed "
+            f"(generation {claim.claim_generation})"
+        )
         raise StaleClaimError(msg)
     alive = claim.status == UploadClaimStatus.LEASED.value and claim.lease_expires_at > current
     if alive and claim.owner != owner:
@@ -321,9 +331,7 @@ async def release_claim(
             ArtifactUploadClaim.claim_generation == generation,
             ArtifactUploadClaim.status == UploadClaimStatus.LEASED.value,
         )
-        .values(
-            status=UploadClaimStatus.RELEASED.value, released_at=current, updated_at=current
-        )
+        .values(status=UploadClaimStatus.RELEASED.value, released_at=current, updated_at=current)
         .returning(ArtifactUploadClaim)
         .execution_options(populate_existing=True)
     )
@@ -369,7 +377,9 @@ async def expire_claims(
 
 
 def _orphan_candidates_query(deadline: datetime, limit: int) -> Select[tuple[str]]:
-    referenced_normalized = exists().where(NormalizedArtifact.object_key == ArtifactUploadClaim.object_key)
+    referenced_normalized = exists().where(
+        NormalizedArtifact.object_key == ArtifactUploadClaim.object_key
+    )
     referenced_raw = exists().where(RawObject.object_key == ArtifactUploadClaim.object_key)
     return (
         select(ArtifactUploadClaim.object_key)
@@ -417,9 +427,8 @@ async def list_orphan_candidates(
 
 async def get_claim(session: AsyncSession, object_key: str) -> ArtifactUploadClaim | None:
     """Claim за object key (unique). Transaction boundary: викликач; один SELECT."""
-    return await session.scalar(
-        select(ArtifactUploadClaim).where(ArtifactUploadClaim.object_key == object_key)
-    )
+    stmt = select(ArtifactUploadClaim).where(ArtifactUploadClaim.object_key == object_key)
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_normalized_artifact(
@@ -456,33 +465,10 @@ def normalized_artifact_values(
     }
 
 
-async def delete_expired_claims(
-    session: AsyncSession, *, older_than: datetime, limit: int = 1000
-) -> int:
-    """Прибирання рядків claim-ів, які вже не є ні reference, ні lease (retention WP-12)."""
-    victims = (
-        select(ArtifactUploadClaim.claim_id)
-        .where(
-            ArtifactUploadClaim.status.in_(
-                [UploadClaimStatus.EXPIRED.value, UploadClaimStatus.RELEASED.value]
-            ),
-            ArtifactUploadClaim.updated_at < older_than,
-        )
-        .limit(limit)
-    )
-    result = await session.execute(
-        delete(ArtifactUploadClaim)
-        .where(ArtifactUploadClaim.claim_id.in_(victims))
-        .returning(ArtifactUploadClaim.claim_id)
-    )
-    return len(result.scalars().all())
-
-
 __all__ = [
     "FetchRecord",
     "acquire_upload_claim",
     "commit_reference",
-    "delete_expired_claims",
     "expire_claims",
     "get_claim",
     "get_normalized_artifact",

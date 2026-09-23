@@ -38,7 +38,7 @@ from collector.persistence.postgres.models import (
     SourcePolicyVersion,
     SourceRoute,
 )
-from collector.persistence.postgres.repositories.audit import append_audit
+from collector.persistence.postgres.repositories.audit import append_audit, require_audit_context
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +110,7 @@ async def set_source_state(
     Пише `audit_log` (before/after `state`+`revision`) у тій самій транзакції; `actor`/`reason`
     обов'язкові — вимкнення джерела без причини у журналі неможливе (§13).
     """
+    require_audit_context(actor, reason)
     current = resolve_now(now)
     before_state = await session.scalar(select(Source.state).where(Source.id == source_pk))
     source = await session.scalar(
@@ -158,6 +159,7 @@ async def add_policy_version(
     Audit (§13) — у тій самій транзакції: policy керує лімітером і розкладом, тож зміна без
     сліду «хто і навіщо» недопустима.
     """
+    require_audit_context(actor, reason)
     current = resolve_now(now)
     source = await session.scalar(
         select(Source)
@@ -238,6 +240,7 @@ async def upsert_route(
     змінює, а журнал, у якому кожен discovery-тік лишає «зміну», нечитабельний (§13 — слід
     mutating actions, не кожного звернення).
     """
+    require_audit_context(actor, reason)
     if route_kind not in ROUTE_KINDS:
         msg = f"невідомий route_kind {route_kind!r}; дозволені {ROUTE_KINDS}"
         raise ValueError(msg)
@@ -308,10 +311,9 @@ async def set_route_state(
     `circuit_open` вимикає частину джерела — це рішення, яке оператор має бачити в журналі
     разом із причиною (§13), тому `actor`/`reason` обов'язкові.
     """
+    require_audit_context(actor, reason)
     current = resolve_now(now)
-    before_state = await session.scalar(
-        select(SourceRoute.state).where(SourceRoute.id == route_id)
-    )
+    before_state = await session.scalar(select(SourceRoute.state).where(SourceRoute.id == route_id))
     route = await session.scalar(
         update(SourceRoute)
         .where(SourceRoute.id == route_id, SourceRoute.revision == expected_revision)
@@ -368,13 +370,15 @@ async def upsert_cursor(
     request_id: str | None = None,
     now: datetime | None = None,
 ) -> SourceCursor:
-    """Вставляє або оновлює cursor (`revision + 1` при кожному оновленні) + audit.
+    """Вставляє або оновлює cursor (`revision + 1` при кожному оновленні) + audit на **кожен**
+    виклик (кожен змінює `revision`/`updated_at`, тобто є мутацією).
 
     Cursor визначає, з якого місця система продовжить обхід, тож його ручний або помилковий
     зсув — класична причина «мовчазної» втрати даних; before/after у журналі роблять таке
     видимим (§13). Discovery пише сюди щотіку, тому `reason` має бути машинним і коротким
     (`"discovery tick"`), а не вільним текстом.
     """
+    require_audit_context(actor, reason)
     current = resolve_now(now)
     before_value = await session.scalar(
         select(SourceCursor.cursor_value).where(
@@ -415,24 +419,23 @@ async def upsert_cursor(
         .execution_options(populate_existing=True)
     )
     cursor = (await session.execute(stmt)).scalar_one()
-    if before_value != cursor_value:
-        await append_audit(
-            session,
-            actor=actor,
-            action="source_cursor.upsert",
-            resource_type="source_cursor",
-            resource_id=str(cursor.id),
-            before={"cursor_value": before_value},
-            after={
-                "cursor_kind": cursor_kind,
-                "cursor_key": cursor_key,
-                "cursor_value": cursor_value,
-                "revision": cursor.revision,
-                "reason": reason,
-            },
-            request_id=request_id,
-            now=current,
-        )
+    await append_audit(
+        session,
+        actor=actor,
+        action="source_cursor.upsert",
+        resource_type="source_cursor",
+        resource_id=str(cursor.id),
+        before={"cursor_value": before_value},
+        after={
+            "cursor_kind": cursor_kind,
+            "cursor_key": cursor_key,
+            "cursor_value": cursor_value,
+            "revision": cursor.revision,
+            "reason": reason,
+        },
+        request_id=request_id,
+        now=current,
+    )
     return cursor
 
 

@@ -16,7 +16,7 @@
   `generation + owner + lease_expires_at > now`.
 
 Партиціонування: `fetches` — RANGE по `fetched_at` (місяць). `raw_objects` **не**
-партиціонується свідомо: її ключ — `sha256` вмісту (§9.3 п.4 «однакові bytes фізично не
+партиціонується свідомо: її unique-ключ — `sha256` вмісту (§9.3 п.4 «однакові bytes фізично не
 дублюються»), а declarative partitioning у PostgreSQL не вміє unique без partition key у
 ключі — місячні партиції зробили б дедуплікацію помісячною, тобто не дедуплікацією. Кількість
 рядків тут обмежена кількістю *різних* тіл, а не спроб (спроби — у `fetches`).
@@ -111,7 +111,8 @@ class Fetch(Base):
 
 
 class RawObject(Base):
-    """Immutable raw artifact, ключ — `sha256(body)` (§9.3 п.4).
+    """Immutable raw artifact; UUID PK (картка: усі PK — UUID) і unique `sha256(body)` —
+    однакові bytes фізично не дублюються (§9.3 п.4).
 
     `object_key` — шлях у artifact store (content-addressed), за яким sweeper §10 п.5 шукає
     orphan-об'єкти; `first_fetch_id` — перший fetch, що приніс ці bytes (lineage).
@@ -120,12 +121,14 @@ class RawObject(Base):
     __tablename__ = "raw_objects"
     __table_args__ = (
         UniqueConstraint("object_key"),
+        UniqueConstraint("sha256"),
         CheckConstraint(f"sha256 ~ '^[0-9a-f]{{{SHA256_LENGTH}}}$'", name="sha256_hex"),
         CheckConstraint("size_bytes >= 0", name="size_non_negative"),
         Index("ix_raw_objects_first_seen_at", "first_seen_at"),
     )
 
-    sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH), primary_key=True)
+    raw_object_id: Mapped[UuidPk]
+    sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH), nullable=False)
     object_key: Mapped[str] = mapped_column(Text, nullable=False)
     uri: Mapped[str] = mapped_column(Text, nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -240,9 +243,7 @@ class NormalizedArtifact(Base):
         UniqueConstraint("sha256", "entity_uuid"),
         enum_check("domain", DataDomain, "domain"),
         CheckConstraint(f"sha256 ~ '^[0-9a-f]{{{SHA256_LENGTH}}}$'", name="sha256_hex"),
-        CheckConstraint(
-            f"raw_sha256 ~ '^[0-9a-f]{{{SHA256_LENGTH}}}$'", name="raw_sha256_hex"
-        ),
+        CheckConstraint(f"raw_sha256 ~ '^[0-9a-f]{{{SHA256_LENGTH}}}$'", name="raw_sha256_hex"),
         CheckConstraint("size_bytes >= 0", name="size_non_negative"),
         Index("ix_normalized_artifacts_entity_uuid_produced_at", "entity_uuid", "produced_at"),
         Index("ix_normalized_artifacts_raw_sha256", "raw_sha256"),

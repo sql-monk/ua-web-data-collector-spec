@@ -141,6 +141,8 @@ async def record_parse_result(
         select(EntityIndex)
         .where(EntityIndex.entity_uuid == artifact_ref.entity_uuid)
         .with_for_update()
+        # Після очікування lock потрібне свіже значення лічильника, а не копія з identity map.
+        .execution_options(populate_existing=True)
     )
     if entity is None:
         msg = (
@@ -321,8 +323,9 @@ async def retry_projection_task(
     current = resolve_now(now)
     task = await _lock_owned(session, task_id, owner)
     if task.attempt >= task.max_attempts:
-        return _quarantine_locked(task, error_code=error_code, error_message=error_message,
-                                  now=current)
+        return _quarantine_locked(
+            task, error_code=error_code, error_message=error_message, now=current
+        )
     delay = (policy or BackoffPolicy()).delay_for(task.attempt, random.SystemRandom())
     task.status = "retry"
     task.lease_owner = None
@@ -377,8 +380,9 @@ async def quarantine_projection_task(
     if task.status in TERMINAL_TASK_STATUSES:
         msg = f"projection task {task_id} уже термінальна ({task.status})"
         raise LeaseNotOwnedError(msg)
-    result = _quarantine_locked(task, error_code=error_code, error_message=error_message,
-                                now=current)
+    result = _quarantine_locked(
+        task, error_code=error_code, error_message=error_message, now=current
+    )
     await session.flush()
     return result
 
@@ -446,15 +450,16 @@ async def acknowledge_projection(
     """
     current = resolve_now(now)
     if receipt.projection_task_id != task_id:
-        msg = (
-            f"receipt належить task {receipt.projection_task_id}, а ack робиться для {task_id}"
-        )
+        msg = f"receipt належить task {receipt.projection_task_id}, а ack робиться для {task_id}"
         raise ConflictError(msg)
     task = await session.get(ProjectionTask, task_id, with_for_update=True)
     if task is None:
         msg = f"projection task {task_id} не знайдено"
         raise NotFoundError(msg)
-    if task.entity_uuid != receipt.entity_uuid or task.projection_version != receipt.projection_version:
+    if (
+        task.entity_uuid != receipt.entity_uuid
+        or task.projection_version != receipt.projection_version
+    ):
         msg = (
             f"receipt не відповідає task {task_id}: entity/version "
             f"({receipt.entity_uuid}, {receipt.projection_version}) vs "
@@ -487,9 +492,7 @@ async def acknowledge_projection(
         )
     ).scalar_one_or_none()
     if inserted is None:
-        existing = await session.get(
-            ProjectionAcknowledgement, task_id, populate_existing=True
-        )
+        existing = await session.get(ProjectionAcknowledgement, task_id, populate_existing=True)
         if existing is None:  # pragma: no cover — можливо лише поза READ COMMITTED
             msg = f"ack {task_id} зник між INSERT і SELECT (потрібен READ COMMITTED)"
             raise NotFoundError(msg)
@@ -502,7 +505,7 @@ async def acknowledge_projection(
             created=False,
         )
 
-    confirmed = await session.scalar(
+    new_confirmed = await session.scalar(
         update(EntityIndex)
         .where(EntityIndex.entity_uuid == receipt.entity_uuid)
         .values(
@@ -516,7 +519,7 @@ async def acknowledge_projection(
         )
         .returning(EntityIndex.confirmed_projection_version)
     )
-    if confirmed is None:
+    if new_confirmed is None:
         msg = f"entity {receipt.entity_uuid} не знайдено в entity_index"
         raise NotFoundError(msg)
 
@@ -535,7 +538,7 @@ async def acknowledge_projection(
     await session.flush()
     return AcknowledgeResult(
         acknowledgement=inserted,
-        confirmed_projection_version=int(confirmed),
+        confirmed_projection_version=int(new_confirmed),
         change_event=change_event,
         outbox_event=outbox_event,
         created=True,
