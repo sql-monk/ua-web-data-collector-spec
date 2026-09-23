@@ -15,6 +15,7 @@ Env-змінні worker-а:
 | `COLLECTOR_WORKER_STOP_GRACE_SECONDS` | `90` | бюджет drain по SIGTERM (< Compose grace) |
 | `COLLECTOR_WORKER_CLAIM_BATCH` | `8` | максимум jobs за один claim (не більше вільних слотів) |
 | `COLLECTOR_WORKER_FENCE_AFTER_SECONDS` | ½ lease TTL | вікно до self-fencing |
+| `COLLECTOR_WORKER_MAX_CONCURRENCY` | default ролі §7.6 | стеля слотів = розмір pool з'єднань |
 | `COLLECTOR_WORKER_DEPLOYMENT` | `compose` | metadata `worker_instances.deployment` |
 | `COLLECTOR_CONTAINER_ID` | `HOSTNAME` | metadata `worker_instances.container_id` |
 
@@ -31,7 +32,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from collector.core.version import version_info
-from collector.workers.roles import WorkerRole
+from collector.workers.roles import WorkerRole, default_pool_spec
 
 WORKER_ENV_PREFIX = "COLLECTOR_WORKER_"
 SCHEDULER_ENV_PREFIX = "COLLECTOR_SCHEDULER_"
@@ -40,6 +41,16 @@ PLACEHOLDER_ENV = "COLLECTOR_WORKER_PLACEHOLDER"
 INSTANCE_VERSION_MAX_LENGTH = 128
 FENCE_RATIO = 0.5
 """Частка lease TTL, після якої непідтверджений heartbeat означає втрачений lease."""
+WATCHDOG_STEPS = 4
+"""Скільки разів за вікно fencing прокидається сторож lease."""
+HEARTBEAT_BUDGET_RATIO = 2.0
+"""У скільки разів бюджет одного heartbeat-тіку більший за вікно fencing (сторож — першим)."""
+MISSED_BEATS_BUDGET = 3
+"""Скільки періодів heartbeat має вміщатись у lease TTL."""
+MAX_SLOTS_UNBOUNDED = 1_000_000
+"""`max_concurrency=None` — вбудований запуск без власного engine: стелі немає."""
+CONNECTION_RESERVE = 3
+"""Скільки з'єднань понад слоти потрібно процесу: heartbeat + claim + зміна статусу."""
 
 
 class WorkerConfigError(ValueError):
@@ -109,6 +120,10 @@ class WorkerRuntimeConfig:
     # (self-fencing, `runtime._fence_if_lease_unconfirmed`). `None` → половина lease TTL:
     # один пропущений heartbeat пробачається, два — вже ризик подвійного виконання.
     fence_after_seconds: float | None = None
+    # Стеля concurrency цього процесу: розмір pool з'єднань фіксується на старті, тому гарячий
+    # `desired_concurrency` понад цю межу обрізається із попередженням (M-3 код-рев'ю).
+    # `None` — вбудований запуск (тести), де engine створює викликач.
+    max_concurrency: int | None = None
     deployment: str = "compose"
     hostname: str | None = field(default=None)
     container_id: str | None = None
@@ -118,13 +133,18 @@ class WorkerRuntimeConfig:
         if self.lease_seconds < 1:
             msg = f"lease_seconds має бути >= 1, отримано {self.lease_seconds}"
             raise WorkerConfigError(msg)
-        if self.heartbeat_seconds * 2 > self.lease_seconds:
-            # Один пропущений heartbeat (рестарт з'єднання, пауза GC) не повинен коштувати
-            # lease: інакше job відбирає `recover_expired_leases` у живого worker-а (§7.6).
+        if self.heartbeat_seconds * MISSED_BEATS_BUDGET > self.lease_seconds:
+            # Пропущений heartbeat (рестарт з'єднання, пауза GC) не повинен коштувати lease:
+            # інакше job відбирає `recover_expired_leases` у живого worker-а (§7.6). Запас у
+            # три періоди, а не два: другий тік інакше припадав би рівно на момент експірації,
+            # і будь-який RTT робив би пропуск фатальним (L-1 код-рев'ю).
             msg = (
-                f"heartbeat_seconds ({self.heartbeat_seconds}) має бути <= половини "
+                f"heartbeat_seconds ({self.heartbeat_seconds}) має бути <= третини "
                 f"lease_seconds ({self.lease_seconds})"
             )
+            raise WorkerConfigError(msg)
+        if self.max_concurrency is not None and self.max_concurrency < 1:
+            msg = f"max_concurrency має бути >= 1, отримано {self.max_concurrency}"
             raise WorkerConfigError(msg)
         if self.claim_batch < 1:
             msg = f"claim_batch має бути >= 1, отримано {self.claim_batch}"
@@ -146,6 +166,35 @@ class WorkerRuntimeConfig:
             return self.fence_after_seconds
         return self.lease_seconds * FENCE_RATIO
 
+    @property
+    def watchdog_interval(self) -> float:
+        """Крок сторожа lease: помітно частіше за вікно fencing, але не частіше за 10 мс."""
+        return max(min(self.fence_after / WATCHDOG_STEPS, self.heartbeat_seconds), 0.01)
+
+    @property
+    def heartbeat_tick_budget(self) -> float:
+        """Стеля тривалості одного heartbeat-тіку.
+
+        Свідомо більша за `fence_after`: першим спрацьовує сторож (він і є гарантією), а цей
+        бюджет лише не дає завислій корутині жити вічно і тримати з'єднання.
+        """
+        return self.fence_after * HEARTBEAT_BUDGET_RATIO
+
+    @property
+    def statement_timeout_ms(self) -> int:
+        """`SET LOCAL statement_timeout` для транзакції heartbeat, мс (мінімум 100)."""
+        return max(int(self.fence_after * 1000), 100)
+
+    @property
+    def command_timeout(self) -> float:
+        """`command_timeout` asyncpg: жоден запит не має жити довше за вікно fencing."""
+        return max(self.fence_after, 1.0)
+
+    @property
+    def max_slots(self) -> int:
+        """Стеля слотів цього процесу: більше не дозволяє розмір pool з'єднань (M-3)."""
+        return self.max_concurrency if self.max_concurrency is not None else MAX_SLOTS_UNBOUNDED
+
     @classmethod
     def from_env(
         cls, role: WorkerRole, environ: Mapping[str, str] | None = None
@@ -161,6 +210,11 @@ class WorkerRuntimeConfig:
             claim_batch=_positive_int(env, f"{WORKER_ENV_PREFIX}CLAIM_BATCH", 8),
             fence_after_seconds=(
                 _positive_float(env, f"{WORKER_ENV_PREFIX}FENCE_AFTER_SECONDS", 0.0) or None
+            ),
+            max_concurrency=_positive_int(
+                env,
+                f"{WORKER_ENV_PREFIX}MAX_CONCURRENCY",
+                default_pool_spec(role).desired_concurrency,
             ),
             deployment=env.get(f"{WORKER_ENV_PREFIX}DEPLOYMENT", "compose").strip() or "compose",
             # Docker hostname — лише metadata (§7.5): за нею не приймається жодне рішення.

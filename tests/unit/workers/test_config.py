@@ -49,16 +49,23 @@ def test_env_overrides_every_documented_knob() -> None:
     assert config.container_id == "abc123"
 
 
-def test_heartbeat_must_leave_room_for_one_missed_beat() -> None:
-    """heartbeat > lease/2 означає, що один пропущений тік коштує lease (§7.6)."""
-    with pytest.raises(WorkerConfigError, match="половини"):
-        WorkerRuntimeConfig(role=WorkerRole.FETCH, lease_seconds=10, heartbeat_seconds=6)
-    # Рівно половина — дозволено.
+def test_heartbeat_must_leave_room_for_a_missed_beat() -> None:
+    """У lease TTL має вміщатись три періоди heartbeat (L-1 код-рев'ю).
+
+    Двох мало: другий тік припадав би рівно на момент експірації, і будь-який RTT робив би
+    пропущений beat фатальним для живого worker-а.
+    """
+    for heartbeat in (6, 5):
+        with pytest.raises(WorkerConfigError, match="третини"):
+            WorkerRuntimeConfig(
+                role=WorkerRole.FETCH, lease_seconds=10, heartbeat_seconds=heartbeat
+            )
+    # Рівно третина — дозволено; default Compose (20/60) теж проходить.
     assert (
         WorkerRuntimeConfig(
-            role=WorkerRole.FETCH, lease_seconds=10, heartbeat_seconds=5
-        ).lease_seconds
-        == 10
+            role=WorkerRole.FETCH, lease_seconds=60, heartbeat_seconds=20
+        ).fence_after
+        == 30.0
     )
 
 
@@ -145,3 +152,28 @@ def test_container_id_falls_back_to_docker_hostname() -> None:
     )
     assert explicit.container_id == "explicit-id"
     assert WorkerRuntimeConfig.from_env(WorkerRole.FETCH, {}).container_id is None
+
+
+def test_connection_ceiling_defaults_to_the_role_concurrency() -> None:
+    """M-3: стеля слотів — те, під що процес створює pool з'єднань."""
+    fetch = WorkerRuntimeConfig.from_env(WorkerRole.FETCH, {})
+    assert fetch.max_concurrency == 8  # §7.6: fetch 2 × 8
+    assert fetch.max_slots == 8
+    raised = WorkerRuntimeConfig.from_env(
+        WorkerRole.FETCH, {"COLLECTOR_WORKER_MAX_CONCURRENCY": "24"}
+    )
+    assert raised.max_slots == 24
+    # Вбудований запуск без власного engine: стелі немає.
+    assert WorkerRuntimeConfig(role=WorkerRole.FETCH).max_slots > 1000
+    with pytest.raises(WorkerConfigError, match="max_concurrency"):
+        WorkerRuntimeConfig(role=WorkerRole.FETCH, max_concurrency=0)
+
+
+def test_driver_and_watchdog_budgets_are_derived_from_the_fencing_window() -> None:
+    """H-1: жоден запит не живе довше за вікно fencing, а сторож прокидається раніше за бюджет."""
+    config = WorkerRuntimeConfig(role=WorkerRole.FETCH, lease_seconds=60, heartbeat_seconds=20)
+    assert config.fence_after == 30.0
+    assert config.command_timeout == 30.0
+    assert config.statement_timeout_ms == 30_000
+    assert config.watchdog_interval <= config.fence_after
+    assert config.heartbeat_tick_budget > config.fence_after, "сторож має спрацювати першим"

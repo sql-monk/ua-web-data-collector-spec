@@ -217,6 +217,7 @@ def worker_config() -> Callable[..., WorkerRuntimeConfig]:
         stop_grace_seconds: float = 10.0,
         claim_batch: int = 8,
         fence_after_seconds: float | None = None,
+        max_concurrency: int | None = None,
     ) -> WorkerRuntimeConfig:
         return WorkerRuntimeConfig(
             role=role,
@@ -226,6 +227,7 @@ def worker_config() -> Callable[..., WorkerRuntimeConfig]:
             stop_grace_seconds=stop_grace_seconds,
             claim_batch=claim_batch,
             fence_after_seconds=fence_after_seconds,
+            max_concurrency=max_concurrency,
             deployment="pytest",
             hostname="pytest-host",
             container_id="pytest-container",

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
+from time import monotonic
 from typing import cast
 from uuid import UUID
 
@@ -464,3 +465,156 @@ async def test_self_fencing_cancels_active_tasks_when_the_database_stops_confirm
     stop.set()
     await asyncio.wait_for(task, timeout=15)
     assert (await read_instance(pg_sessions, runtime.instance_id)).status == "stopped"
+
+
+class HangingSessions:
+    """Сесії, які **зависають без винятку** — типова форма відмови PostgreSQL.
+
+    Мережевий поділ або failover не дають ні `ConnectionRefusedError`, ні RST: запит просто не
+    повертається. Саме цей сценарій був сліпою зоною подієвого fencing (H-1 код-рев'ю), і саме
+    його відтворює ця фабрика: `__aenter__` спить «вічно».
+    """
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+        self.hanging = False
+        self.hangs = 0
+
+    def __call__(self) -> AsyncSession:
+        if not self.hanging:
+            return self._sessions()
+        self.hangs += 1
+        return cast("AsyncSession", _HangingSession())
+
+
+class _HangingSession:
+    async def __aenter__(self) -> AsyncSession:
+        await asyncio.sleep(3600)
+        raise AssertionError("недосяжно")  # pragma: no cover
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+async def test_self_fencing_fires_when_the_database_hangs_without_raising(
+    pg_sessions: async_sessionmaker[AsyncSession],
+    worker_config: MakeConfig,
+    blocking_handler: ControlledHandler,
+    make_pool: MakePool,
+    enqueue_jobs: EnqueueJobs,
+    wait_for: WaitFor,
+    running: list[asyncio.Task[None]],
+) -> None:
+    """H-1: fencing керується ЧАСОМ від останнього підтвердженого heartbeat, а не винятком.
+
+    Сторож lease — окрема задача, тому спрацьовує навіть тоді, коли heartbeat-корутина висить
+    у драйвері й ніколи не повертається. Перевіряємо: fence у межах вікна, активні tasks
+    скасовані, `complete` не звітується, claim зупинено.
+    """
+    await make_pool(concurrency=1)
+    (job_id,) = await enqueue_jobs(1)
+    sessions = HangingSessions(pg_sessions)
+    config = worker_config(lease_seconds=6, heartbeat_seconds=0.05, fence_after_seconds=0.3)
+    runtime = WorkerRuntime(
+        config, cast("async_sessionmaker[AsyncSession]", sessions), blocking_handler
+    )
+    stop = asyncio.Event()
+    task = start(runtime, running, stop)
+    await wait_for(lambda: runtime.active_tasks == 1, what="task у роботі")
+    beats = runtime.heartbeats
+
+    started = monotonic()
+    sessions.hanging = True
+    await wait_for(lambda: runtime.fenced, what="сторож lease спрацював на зависанні бази")
+    elapsed = monotonic() - started
+    assert elapsed < config.lease_seconds, (
+        f"fence має спрацювати в межах lease TTL, минуло {elapsed:.2f} с"
+    )
+    assert sessions.hangs >= 1, "heartbeat справді зависав, а не падав із винятком"
+    assert runtime.heartbeats == beats, "жодного підтвердженого heartbeat не було"
+
+    await wait_for(lambda: blocking_handler.cancelled == [job_id], what="активний task скасовано")
+    assert runtime.active_tasks == 0
+    assert not runtime.claiming
+    job = await read_job(pg_sessions, job_id)
+    assert job.status == "leased", "жодного тихого complete від скасованої task"
+
+    sessions.hanging = False
+    await wait_for(lambda: not runtime.fenced, what="після підтвердженого heartbeat fence знято")
+    stop.set()
+    await asyncio.wait_for(task, timeout=20)
+
+
+async def test_hot_change_above_the_connection_ceiling_is_clamped(
+    pg_sessions: async_sessionmaker[AsyncSession],
+    worker_config: MakeConfig,
+    blocking_handler: ControlledHandler,
+    make_pool: MakePool,
+    enqueue_jobs: EnqueueJobs,
+    wait_for: WaitFor,
+    running: list[asyncio.Task[None]],
+) -> None:
+    """M-3: `desired_concurrency` понад стелю процесу обрізається, а не топить pool з'єднань."""
+    revision = await make_pool(concurrency=1, max_replicas=4)
+    await enqueue_jobs(6)
+    runtime = WorkerRuntime(worker_config(max_concurrency=2), pg_sessions, blocking_handler)
+    stop = asyncio.Event()
+    task = start(runtime, running, stop)
+    await wait_for(lambda: runtime.active_tasks == 1, what="один слот")
+
+    async with pg_sessions() as session, session.begin():
+        await pools_repo.upsert_pool(
+            session,
+            WorkerRole.FETCH,
+            pools_repo.PoolDesiredState(desired_replicas=1, desired_concurrency=8, max_replicas=4),
+            actor="operator",
+            reason="hot change above the ceiling",
+            expected_revision=revision,
+            now=T0,
+        )
+    await wait_for(lambda: runtime.desired_concurrency == 8, what="нове desired прочитано")
+    await wait_for(lambda: runtime.active_tasks == 2, what="відкрито рівно стелю слотів")
+
+    beats = runtime.heartbeats
+    await wait_for(lambda: runtime.heartbeats >= beats + 3, what="кілька heartbeat-ів поспіль")
+    assert runtime.active_tasks == 2, "понад стелю процес слотів не відкриває"
+    assert runtime.effective_concurrency == 2
+    instance = await read_instance(pg_sessions, runtime.instance_id)
+    assert instance.slots_total == 2, "heartbeat-derived capacity не обіцяє більше, ніж є"
+
+    blocking_handler.release.set()
+    stop.set()
+    await asyncio.wait_for(task, timeout=20)
+
+
+async def test_boot_fails_loudly_when_the_ready_transition_cannot_be_written(
+    pg_sessions: async_sessionmaker[AsyncSession],
+    worker_config: MakeConfig,
+    handler: ControlledHandler,
+    make_pool: MakePool,
+) -> None:
+    """M-1: worker не лишається «живим, але німим» — boot падає, і оркестратор перезапускає."""
+    from collector.persistence.postgres.errors import NotFoundError
+    from collector.workers import runtime as runtime_module
+
+    await make_pool(concurrency=1)
+    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    attempts = 0
+
+    async def failing_status(*_args: object, **_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise NotFoundError("instance зник між реєстрацією і переходом у ready")
+
+    original = runtime_module.pools_repo.set_instance_status
+    runtime_module.pools_repo.set_instance_status = failing_status  # type: ignore[assignment]
+    try:
+        with pytest.raises(runtime_module.WorkerRuntimeError, match="ready"):
+            await runtime.run(stop=asyncio.Event(), install_signals=False)
+    finally:
+        runtime_module.pools_repo.set_instance_status = original  # type: ignore[assignment]
+
+    assert attempts == runtime_module.READY_RETRY_ATTEMPTS, "перехід повторювався з backoff"
+    assert runtime.status == "starting"
+    instance = await read_instance(pg_sessions, runtime.instance_id)
+    assert instance.status == "starting", "рядок лишається starting і застаріє за heartbeat TTL"

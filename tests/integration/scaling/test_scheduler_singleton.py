@@ -220,3 +220,42 @@ async def test_maintenance_tick_recovers_expired_leases_and_marks_stale_instance
     async with pg_sessions() as session, session.begin():
         again = await run_maintenance(session, T0 + timedelta(hours=1), config=config)
     assert again == MaintenanceResult(recovered_leases=0, stale_instances=0)
+
+
+async def test_maintenance_tick_is_safe_when_two_schedulers_overlap(
+    pg_sessions: async_sessionmaker[AsyncSession],
+    make_pool: MakePool,
+    enqueue_jobs: EnqueueJobs,
+) -> None:
+    """M-4: lease звужує вікно перекриття, але не усуває його — тік мусить бути ідемпотентним.
+
+    Перевірка контракту з докстрінга `collector.workers.scheduler`: два одночасні проходи
+    дефолтного тіку (сценарій «lease помер між перевіркою і commit-ом, standby уже планує»)
+    повертають прострочений lease **рівно один раз** і не дублюють жодного ефекту.
+    """
+    await make_pool(concurrency=1)
+    (job_id,) = await enqueue_jobs(1)
+    instance_id = new_entity_id()
+    async with pg_sessions() as session, session.begin():
+        await queue_repo.claim(session, ["fetch"], "dead-instance", 60, now=T0)
+        await pools_repo.register_instance(
+            session, instance_id, WorkerRole.FETCH, version="0.1.0+test", slots_total=1, now=T0
+        )
+
+    config = SchedulerRuntimeConfig(stale_after_seconds=60)
+    moment = T0 + timedelta(hours=1)
+
+    async def overlapping_tick() -> MaintenanceResult:
+        async with pg_sessions() as session, session.begin():
+            return await run_maintenance(session, moment, config=config)
+
+    first, second = await asyncio.gather(overlapping_tick(), overlapping_tick())
+    assert first.recovered_leases + second.recovered_leases == 1, "job повернуто рівно один раз"
+    assert first.stale_instances + second.stale_instances == 1, "instance позначено один раз"
+
+    async with pg_sessions() as session:
+        job = await session.get(CrawlJob, job_id)
+        instance = await session.get(WorkerInstance, instance_id)
+    assert job is not None and instance is not None
+    assert (job.status, job.attempt, job.lease_owner) == ("pending", 1, None)
+    assert instance.status == "stale"

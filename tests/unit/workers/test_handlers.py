@@ -15,6 +15,8 @@ from collector.workers.handlers import (
     Task,
     TaskHandler,
     TaskResult,
+    check_handler_contract,
+    redact,
     resolve_handler,
     result_for_exception,
 )
@@ -101,3 +103,61 @@ def test_unexpected_exception_is_retryable() -> None:
 def test_permanent_error_quarantines_with_its_own_code() -> None:
     result = result_for_exception(PermanentTaskError("robots disallow", error_code="robots_denied"))
     assert (result.disposition, result.error_code) == ("quarantine", "robots_denied")
+
+
+def test_sync_handler_is_rejected_because_it_would_block_the_event_loop() -> None:
+    """M-2: синхронний `handle` знімає heartbeat, self-fencing і drain одночасно."""
+
+    class BlockingHandler(TaskHandler):
+        @property
+        def job_types(self) -> tuple[str, ...]:
+            return ("fetch",)
+
+        def handle(self, task: Task) -> TaskResult:  # type: ignore[override]  # навмисно sync
+            return TaskResult.success()
+
+    with pytest.raises(TypeError, match="async def"):
+        check_handler_contract(BlockingHandler())
+
+
+def test_handler_without_job_types_is_rejected() -> None:
+    """Порожній `job_types` = worker мовчки простоює вічно (`claim` завжди повертає [])."""
+
+    class SilentHandler(TaskHandler):
+        @property
+        def job_types(self) -> tuple[str, ...]:
+            return ()
+
+        async def handle(self, task: Task) -> TaskResult:
+            return TaskResult.success()
+
+    with pytest.raises(ValueError, match="job_types"):
+        check_handler_contract(SilentHandler())
+
+
+def test_noop_handler_satisfies_the_contract() -> None:
+    check_handler_contract(NoopHandler(WorkerRole.FETCH))
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "InvalidURL: https://user:s3cret@example.test/a",
+            "InvalidURL: https://[redacted]@example.test/a",
+        ),
+        ("HTTPError: /a?token=abc123&x=1", "HTTPError: /a?token=[redacted]&x=1"),
+        ("HTTPError: /a?api_key=zzz", "HTTPError: /a?api_key=[redacted]"),
+        ("ValueError: нічого секретного", "ValueError: нічого секретного"),
+    ],
+)
+def test_error_text_is_redacted_before_it_reaches_the_queue(message: str, expected: str) -> None:
+    """§13: тексти винятків ідуть у `crawl_jobs`/`dead_letters`/логи — секрети вирізаються."""
+    assert redact(message) == expected
+    assert redact(message) == redact(redact(message)), "редакція ідемпотентна"
+
+
+def test_result_for_exception_redacts_too() -> None:
+    result = result_for_exception(ValueError("https://u:p@example.test/x?password=qq"))
+    assert "p@example.test" not in (result.error_message or "")
+    assert "[redacted]" in (result.error_message or "")

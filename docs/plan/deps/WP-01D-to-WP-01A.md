@@ -74,3 +74,21 @@ claimable одразу. Семантика майже точна, але з од
 плановому scale-down. `release()` прибирає саме цю затримку; пріоритет лишається низьким, бо
 коректність уже забезпечена (тест
 `test_drain_timeout_on_the_last_attempt_never_quarantines_a_job_nobody_failed`).
+
+## 4. Зроблено в цьому PR у файлі WP-01A: `create_engine(..., command_timeout=...)` — потрібне підтвердження
+
+`src/collector/persistence/postgres/engine.py` отримав **необов'язковий** keyword-параметр
+`command_timeout: float | None = None` (кладеться в `connect_args` asyncpg). Причина — знахідка
+H-1 gate 3: без таймауту на рівні драйвера запит у «чорну діру» TCP (мережевий поділ, failover)
+чекає до RTO ядра, тобто десятки хвилин, і жоден таймаут у застосунку не має нижньої межі;
+worker і scheduler задають його від свого вікна self-fencing.
+
+Зміна адитивна і зворотно сумісна: default `None` лишає поведінку міграцій і всіх наявних
+викликів незмінною (`alembic upgrade` легально буває довгим, тому one-shot його не задає).
+Прошу власника WP-01A підтвердити її при merge або запропонувати інше місце для налаштування.
+
+## 5. Уточнення до §3 після code review (L-5)
+
+`release(job_id, owner)` має не лише не інкрементувати `attempt`, а й **не писати**
+`last_error_code`/`last_error_message`: плановий drain — не помилка job-и, і слово
+«`drain_timeout`» у полі помилки вводить в оману оператора та псує статистику dead letters.

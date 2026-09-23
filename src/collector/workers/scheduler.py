@@ -17,6 +17,20 @@
 
 Доменне планування (розклади джерел, enqueue discovery-jobs) підключається через параметр
 `tick` і належить іншим WP.
+
+**Контракт тіку: він має бути ідемпотентним і безпечним при перекритті з тіком іншого
+instance.** Lease перевіряється на lease-зʼєднанні, а сам тік виконується в окремій session із
+pool-у, тому між перевіркою і commit-ом тіку lease теоретично може зникнути
+(`pg_terminate_backend`, failover, мережевий поділ) — і другий scheduler, який його підхопить,
+почне свій тік паралельно (M-4 код-рев'ю). Прив'язати тік до самого lease-зʼєднання не можна
+без того, щоб тримати його `idle in transaction`, тому гарантія формулюється як контракт:
+
+- дефолтний тік йому відповідає за побудовою — `recover_expired_leases` і
+  `mark_stale_instances` працюють через `FOR UPDATE SKIP LOCKED` і повторний прохід нічого не
+  змінює (тест-вартовий `test_maintenance_tick_is_safe_when_two_schedulers_overlap`);
+- доменний тік **не має права** робити не-ідемпотентні дії без власного ключа ідемпотентності:
+  `enqueue` з `idempotency_key`, що містить дискримінатор циклу (§9.3 п.3), — так, «вставити
+  рядок і сподіватись на lease» — ні.
 """
 
 from __future__ import annotations
@@ -43,6 +57,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 SchedulerTick = Callable[["AsyncSession", datetime], Awaitable[None]]
+"""Один прохід планування. **Мусить бути ідемпотентним** — див. докстрінг модуля (M-4)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +132,9 @@ class SchedulerRuntime:
 
     async def run(self, *, stop: asyncio.Event | None = None, install_signals: bool = True) -> None:
         """Цикл «взяти lease → планувати → перевірити lease», поки не надійде зупинка.
+
+        Lease звужує вікно перекриття до тривалості одного тіку, але не усуває його повністю:
+        тік мусить лишатись ідемпотентним (контракт у докстрінгу модуля, M-4 код-рев'ю).
 
         `install_signals=False` — вбудований запуск (тести, кілька runtime в одному процесі):
         глобальні handlers сигналів не чіпаються.

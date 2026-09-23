@@ -139,8 +139,9 @@ async def test_hanging_task_does_not_extend_its_lease_and_never_reports_a_silent
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
     # heartbeat навмисно не встигне спрацювати за час тесту: lease тримається лише claim-ом.
+    # (heartbeat ≤ ⅓ lease — межа після L-1 код-рев'ю; 40 с так само не спрацює за час тесту.)
     runtime = WorkerRuntime(
-        worker_config(lease_seconds=120, heartbeat_seconds=60.0), pg_sessions, blocking_handler
+        worker_config(lease_seconds=120, heartbeat_seconds=40.0), pg_sessions, blocking_handler
     )
     stop = asyncio.Event()
     task = start(runtime, running, stop)

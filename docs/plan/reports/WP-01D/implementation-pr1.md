@@ -275,6 +275,87 @@ $ docker compose ... down -v --remove-orphans
 exit=0
 ```
 
+## Відповіді на код-рев'ю
+
+Вердикт gate 3 — `changes_requested`; звіт: `docs/plan/reports/WP-01D/code-review-pr1.md`
+(1 high, 4 medium, 6 low).
+
+| # | Знахідка | Рішення | Що саме зроблено |
+|---|---|---|---|
+| H-1 | `high` — self-fencing сліпий до **зависання** PostgreSQL: перевірка викликалась лише з `except` heartbeat-у, а heartbeat-цикл послідовний і без таймаутів | **fixed** | Три зміни, кожна самодостатня: (1) **сторож lease окремою задачею** — `_watchdog_loop` кожні `fence_after/4` порівнює `monotonic() − last_confirmed_heartbeat` із вікном і фенсить незалежно від того, чи heartbeat-корутина повернулась; (2) **бюджет на тік** — `asyncio.wait_for(self._heartbeat(), heartbeat_tick_budget)`, `TimeoutError` теж веде до перевірки вікна; (3) **таймаути драйвера** — `command_timeout` для asyncpg (engine) і `set_config('statement_timeout', …, local)` у транзакції heartbeat, обидва похідні від `fence_after`. Тест відтворює саме зависання (`HangingSessions.__aenter__` спить, винятку немає): `test_self_fencing_fires_when_the_database_hangs_without_raising` — fence у межах lease TTL, task скасовано, `complete` не звітовано, claim зупинено. |
+| M-1 | `medium` — одна невдала `_set_status("ready")` робила worker «живим, але німим» | **fixed** | `_set_status` повертає успіх; `_become_ready` повторює перехід 5 разів із експоненційним backoff і, якщо база так і не підтвердила, піднімає `WorkerRuntimeError` — процес завершується кодом 1 і Docker перезапускає репліку (видимо) замість тихого простою. Додатково heartbeat самолікується: поки `status == "starting"`, кожен підтверджений тік ще раз пробує `ready`. Тест: `test_boot_fails_loudly_when_the_ready_transition_cannot_be_written`. |
+| M-2 | `medium` — контракт `TaskHandler` не забороняв блокуючий `handle()` | **fixed** | Контракт зафіксовано в докстрінгу `handlers.py` («будь-яка робота, що не віддає керування довше за десятки мілісекунд, — у `asyncio.to_thread`») і **перевіряється на boot**: `check_handler_contract` вимагає `async def handle` і непорожній `job_types`. Сторож додатково логує `worker.event_loop_stalled`, коли власний `sleep` прокидається пізно — інакше заблокований loop виглядав би як проблема бази. Тести: `test_sync_handler_is_rejected_because_it_would_block_the_event_loop`, `test_handler_without_job_types_is_rejected`. У `docs/workers.md` (етап 5) це має бути повторено до того, як WP-02/03/04 почнуть писати handler-и. |
+| M-3 | `medium` — pool з'єднань від статичного default, а `desired_concurrency` гарячий і без стелі → `QueuePool` timeout маскується під втрату lease | **fixed** | З'явилась явна стеля процесу `COLLECTOR_WORKER_MAX_CONCURRENCY` (типово default ролі §7.6). CLI створює engine рівно під неї: `pool_size = max_slots + 3` (heartbeat + claim + статус), `max_overflow = 0` — більше одночасних checkout-ів не буває за побудовою, тож `pool_timeout` не виникає. Гарячий `desired_concurrency` понад стелю обрізається з `worker.concurrency_clamped` і в heartbeat звітується як фактичні `slots_total` (контролер не отримує обіцянки, якої репліка не виконає). Тест: `test_hot_change_above_the_connection_ceiling_is_clamped`. |
+| M-4 | `medium` — TOCTOU singleton-lease: тік працює на іншому з'єднанні, ніж lease | **fixed (контрактом + вартовим)** | Прив'язати тік до lease-з'єднання не можна без того, щоб тримати його `idle in transaction`, тому гарантія сформульована явно: докстрінги модуля, аліаса `SchedulerTick` і `run()` вимагають **ідемпотентного** тіку і прямо забороняють не-ідемпотентні доменні дії без власного ключа ідемпотентності (§9.3 п.3). Дефолтний тік цьому відповідає за побудовою (`SKIP LOCKED`), і це доведено вартовим `test_maintenance_tick_is_safe_when_two_schedulers_overlap`: два одночасні проходи повертають lease рівно один раз. |
+| L-1 | `low` — `heartbeat × 2 ≤ lease` допускає рівність; фактичний період більший за налаштований | **fixed** | Межа посилена до `heartbeat × 3 ≤ lease` (default Compose 20/60 проходить), а `_heartbeat_loop` планує тіки **від дедлайну**, а не `sleep` після роботи — дрейф на повільній базі більше не накопичується. Тест оновлено: `test_heartbeat_must_leave_room_for_a_missed_beat`. |
+| L-2 | `low` — fenced-стан не видно ззовні процесу | **fixed (у межах PR1)** | `worker.fenced`/`worker.unfenced`/`worker.lease_lost` несуть лічильники `fences`/`lost_leases`, вони ж — у `worker.stopped`; у `worker_instances` фенснутий instance одразу звітує `slots_active = 0`/`active_leases = 0`. Окреме поле причини у схемі — це колонка WP-01A (`migrations/**` — forbidden), метрики — WP-12. |
+| L-3 | `low` — `_abandon` губив handle: скасовані tasks ніхто не чекав | **fixed** | Скасовані handles складаються в `_cancelled` і дочікуються `_await_cancelled_tasks()` — і в `_drain`, і у `finally` самого `run()`, тому у вбудованому запуску доменний handler встигає закрити свої ресурси. |
+| L-4 | `low` — `_report` ловив вужчий набір помилок, ніж решта runtime | **fixed** | Додано `PersistenceError` до `except` у `_report`: `ConflictError`/`InvalidTransitionError`/`NotFoundError` більше не вбивають task мовчки, а дають `worker.report_failed`. |
+| L-5 | `low` — плановий drain-timeout витрачає спробу і пише `last_error_code='drain_timeout'` | **accepted** (owner **WP-01A PR2**, заведено 2026-09-23) | Виправити в PR1 нічим: щоб повернути lease без інкременту спроби, потрібен `queue.release(job_id, owner)` у репозиторії WP-01A (`repositories/**` — не мій файл). Вимогу уточнено в `docs/plan/deps/WP-01D-to-WP-01A.md` §3: `release` має лишати `attempt` і **не** писати `last_error_code`. Сьогоднішній наслідок обмежений: карантину немає (фікс F2), а спроба втрачається лише тоді, коли task не вклався у `stop_grace_period`. |
+| L-6 | `low` — `_discard()` повертав з'єднання в pool без підтвердженого unlock | **fixed** | `release()` перевіряє boolean-результат `pg_advisory_unlock`; якщо він `false` або запит впав — лог `advisory_lease.unlock_unconfirmed` і `connection.invalidate()` замість повернення в pool, тож lock не може «поїхати» разом із pooled-з'єднанням. |
+| L-7 | `low` — дрібниці (дублювання lifecycle, `_ensure_pool` без audit, claim без backoff, нередагований текст винятків, порожній `job_types`) | **частково fixed, решта accepted** (owner **WP-01D PR3**, заведено 2026-09-23) | **fixed:** backoff claim-retry (`min(poll × 2ⁿ, 30 с)`, лог `next_attempt_in`); редакція текстів винятків (`handlers.redact` — credentials у URL і значення `token/api_key/password/secret/signature`) у `result_for_exception`, `worker.task_failed`, `worker.report_failed`, `worker.claim_failed`, `worker.status_update_failed`; порожній `job_types` відхиляється на boot. **accepted:** спільна база lifecycle для `WorkerRuntime`/`SchedulerRuntime` і audit-рядок для bootstrap-pool — обидва природно лягають на PR3 разом із `PoolController` (там же вирішується, чи worker взагалі має право створювати pool). |
+
+Зміна поза owned files: `create_engine` (`src/collector/persistence/postgres/engine.py`, WP-01A)
+отримав **необов'язковий** параметр `command_timeout` — без нього таймаути H-1 не мають нижньої
+межі на рівні драйвера. Зміна адитивна (default `None` — поведінка міграцій не змінилась) і
+записана в `docs/plan/deps/WP-01D-to-WP-01A.md` §4 для підтвердження власником.
+
+Через посилення межі `heartbeat × 3 ≤ lease` (L-1) оновлено один тест gate 2
+(`test_worker_runtime_adversarial.py`: `heartbeat_seconds` 60 → 40 при `lease_seconds=120`) —
+намір тесту («heartbeat не встигне спрацювати») збережено.
+
+### Команди після виправлень gate 3
+
+```text
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src
+All checks passed!
+201 files already formatted
+Success: no issues found in 68 source files
+
+$ uv run pytest -m "not live" -q
+........................................................................ [  8%]
+...  (скорочено)  ...
+=========================== short test summary info ===========================
+SKIPPED [1] tests/unit/test_network_blocked.py:27: Windows: loopback потрібен asyncio
+836 passed, 1 skipped, 9 warnings in 146.08s (0:02:26)
+
+(822 до gate 3 + 14 доданих цим фіксом: зависання бази, стеля concurrency, boot без ready,
+контракт handler-а, редакція текстів, бюджети таймаутів, перекриття тіків scheduler-а)
+
+$ uv run pytest -m integration tests/integration/scaling -q
+................................                                         [100%]
+32 passed in 47.60s
+
+$ docker compose config --quiet
+(порожній вивід, exit=0)
+
+$ COLLECTOR_IMAGE=collector:wp01d docker compose -f docker-compose.yml -f <override мереж> \
+    -p collector-wp01d --profile core --profile workers up -d --wait --wait-timeout 420
+ Container collector-wp01d-parse-worker-2 Healthy
+ Container collector-wp01d-parse-worker-1 Healthy
+ Container collector-wp01d-discovery-worker-1 Healthy
+exit=0
+
+$ docker compose ps -a --format json | python deploy/compose/check-healthy.py
+all 16 containers healthy or exited 0
+exit=0
+
+$ psql -c "select role, status, slots_total, container_id is not null from worker_instances"
+    role     | status | slots_total | has_container_id
+-------------+--------+-------------+------------------
+ discovery   | ready  |           4 | t
+ fetch       | ready  |           8 | t
+ fetch       | ready  |           8 | t
+ parse       | ready  |          12 | t   <- 2 × CPU контейнера, у межах стелі процесу
+ ...         |        |             |
+(9 rows)
+
+$ docker compose ... down -v --remove-orphans
+ Network collector_wp01d_ingress Removed
+ Network collector_wp01d_source_egress Removed
+exit=0
+```
+
 ## Що не перевірено
 
 - **`docker compose up -d --no-recreate --scale fetch-worker=4`** — scale-специфічна команда

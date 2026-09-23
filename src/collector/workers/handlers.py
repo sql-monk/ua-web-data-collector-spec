@@ -15,12 +15,29 @@ WP-01B) реалізують `TaskHandler` і реєструють його у `
   локальному диску (§15) і має бути придатним до скасування (`asyncio.CancelledError` під час
   drain-timeout).
 
+**Handler не має права блокувати event loop.** `handle` виконується як `asyncio.Task` у тому
+самому loop-і, що claim-loop, heartbeat і сторож lease, а `cancel()` — кооперативний. Тому
+синхронна CPU-bound робота (парсинг HTML, regex по великому body, розпакування) **одночасно**
+зупиняє heartbeat (lease спливає), self-fencing (нікому рахувати час) і drain (task не
+скасовується у межах `stop_grace_period`). Правило: будь-яку роботу, що не віддає керування
+довше за десятки мілісекунд, виносити в `await asyncio.to_thread(...)` або в executor. Runtime
+перевіряє контракт на boot (`check_handler_contract`: `handle` має бути `async def`, `job_types`
+— непорожній) і логує `worker.event_loop_stalled`, якщо сторож прокидається пізно (M-2
+код-рев'ю).
+
+Тексти помилок, які повертає handler, потрапляють у `crawl_jobs.last_error_message`,
+`dead_letters` і логи — `redact()` прибирає з них credentials у URL і значення
+token/password/api_key параметрів (§13), але handler усе одно не має класти туди секрети
+свідомо.
+
 Винятки handler-а runtime трактує як retryable (`result_for_exception`), окрім
 `PermanentTaskError` — він означає карантин без подальших спроб.
 """
 
 from __future__ import annotations
 
+import inspect
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -140,13 +157,50 @@ def resolve_handler(role: WorkerRole) -> TaskHandler:
     return factory(role) if factory is not None else NoopHandler(role)
 
 
+_CREDENTIALS_IN_URL = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)[^/\s:@]+:[^/\s@]*@")
+_SECRET_QUERY_PARAM = re.compile(
+    r"(?i)(token|api[_-]?key|apikey|password|passwd|secret|signature|sig)=[^\s&#\"']+"
+)
+REDACTED = "[redacted]"
+
+
+def redact(message: str) -> str:
+    """Прибрати з тексту credentials у URL і значення секретних query-параметрів (§13).
+
+    Runtime пише тексти винятків у `crawl_jobs.last_error_message`, `dead_letters` і логи —
+    дешевше зробити редакцію тут, ніж покладатися на дисципліну пʼяти доменних WP (L-7
+    код-рев'ю). Це страховка, а не дозвіл класти секрети в повідомлення.
+    """
+    redacted = _CREDENTIALS_IN_URL.sub(rf"\g<scheme>{REDACTED}@", message)
+    return _SECRET_QUERY_PARAM.sub(lambda m: f"{m.group(1)}={REDACTED}", redacted)
+
+
+def check_handler_contract(handler: TaskHandler) -> None:
+    """Перевірити контракт handler-а на boot: `async def handle` і непорожні `job_types`.
+
+    Синхронний `handle` заблокував би event loop разом із heartbeat, fencing і drain (M-2),
+    а порожній `job_types` дав би мовчазний простій: `claim` повертав би `[]` вічно (L-7).
+    Обидві помилки коштують дешево на старті й дуже дорого — у проді.
+    """
+    if not inspect.iscoroutinefunction(handler.handle):
+        msg = (
+            f"{type(handler).__name__}.handle має бути `async def`: синхронний handler блокує "
+            "event loop разом із heartbeat, self-fencing і drain; CPU-bound роботу виносьте в "
+            "asyncio.to_thread"
+        )
+        raise TypeError(msg)
+    if not handler.job_types:
+        msg = f"{type(handler).__name__}.job_types порожній — worker не claim-ив би нічого"
+        raise ValueError(msg)
+
+
 def result_for_exception(exc: BaseException) -> TaskResult:
     """Виняток handler-а → `TaskResult`: `PermanentTaskError` → карантин, решта → retry.
 
     Текст винятку потрапляє у `crawl_jobs.last_error_message`/`dead_letters` (обрізається
     репозиторієм), тому handler не має класти в нього секрети чи контакти (§13).
     """
-    message = f"{type(exc).__name__}: {exc}"
+    message = redact(f"{type(exc).__name__}: {exc}")
     if isinstance(exc, PermanentTaskError):
         return TaskResult.permanent(exc.error_code, message)
     return TaskResult.retryable("handler_error", message)
@@ -154,12 +208,15 @@ def result_for_exception(exc: BaseException) -> TaskResult:
 
 __all__ = [
     "HANDLER_FACTORIES",
+    "REDACTED",
     "HandlerFactory",
     "NoopHandler",
     "PermanentTaskError",
     "Task",
     "TaskHandler",
     "TaskResult",
+    "check_handler_contract",
+    "redact",
     "resolve_handler",
     "result_for_exception",
 ]

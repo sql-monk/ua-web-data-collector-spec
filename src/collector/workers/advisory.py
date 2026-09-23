@@ -28,6 +28,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from collector.core.logging import get_logger
+
 ADVISORY_CLASSID: Final[int] = 0x434F4C4C
 """Простір імен advisory locks застосунку (ASCII `COLL`) — щоб ключі `collector` не
 перетиналися з локами інших застосунків у тому самому кластері."""
@@ -62,6 +64,7 @@ class AdvisoryLease:
         self._engine = engine
         self._connection: AsyncConnection | None = None
         self._backend_pid: int | None = None
+        self._log = get_logger("collector.advisory_lease")
 
     @property
     def backend_pid(self) -> int | None:
@@ -114,23 +117,44 @@ class AdvisoryLease:
         return held
 
     async def release(self) -> None:
-        """Звільнити lease і повернути з'єднання (ідемпотентно)."""
+        """Звільнити lease і повернути з'єднання (ідемпотентно).
+
+        Результат `pg_advisory_unlock` перевіряється: `false` (або помилка) означає, що lock
+        міг лишитись на цій сесії. Session-scoped advisory lock переживає `ROLLBACK`, який
+        SQLAlchemy робить при поверненні з'єднання в pool, а `pg_try_advisory_lock`
+        реентрантний у межах сесії — тож витік не побачив би ні `is_held`, ні наступний
+        `try_acquire`, і singleton лишився б зайнятим простоюючим pooled-з'єднанням (L-6
+        код-рев'ю). Тому за будь-якого сумніву з'єднання не повертається в pool, а
+        інвалідовується.
+        """
         connection = self._connection
         if connection is None:
             return
-        with suppress(SQLAlchemyError, OSError):
-            await connection.execute(
-                text("SELECT pg_advisory_unlock(:classid, :objid)"), self.parameters
+        unlocked = False
+        try:
+            unlocked = bool(
+                await connection.scalar(
+                    text("SELECT pg_advisory_unlock(:classid, :objid)"), self.parameters
+                )
             )
-        await self._discard()
+        except (SQLAlchemyError, OSError) as exc:
+            self._log.warning(
+                "advisory_lease.unlock_failed", lease=self.name, error=type(exc).__name__
+            )
+        if not unlocked:
+            self._log.warning("advisory_lease.unlock_unconfirmed", lease=self.name)
+        await self._discard(invalidate=not unlocked)
 
-    async def _discard(self) -> None:
+    async def _discard(self, *, invalidate: bool = True) -> None:
         connection = self._connection
         self._connection = None
         self._backend_pid = None
         if connection is None:
             return
         with suppress(SQLAlchemyError, OSError):
+            if invalidate:
+                # Мертве або сумнівне з'єднання не повертаємо в pool разом із можливим lock-ом.
+                await connection.invalidate()
             await connection.close()
 
 

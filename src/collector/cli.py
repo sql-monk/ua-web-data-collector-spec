@@ -380,20 +380,26 @@ def _scheduler_config() -> SchedulerRuntimeConfig:
 async def _run_worker(settings: PostgresSettings, config: WorkerRuntimeConfig) -> None:
     """Engine на процес + `WorkerRuntime.run()`; повертається після drain (exit code 0).
 
-    Розмір pool рахується від default concurrency ролі (§7.6) з запасом на heartbeat/claim/
-    report: кожна паралельна операція бере власну session. Гарячого підвищення concurrency
-    понад цю межу чекає `max_overflow`, а не відмова claim.
+    Pool рахується **точно** від стелі слотів процесу (`COLLECTOR_WORKER_MAX_CONCURRENCY`,
+    типово default ролі §7.6) плюс резерв на heartbeat/claim/зміну статусу, і без
+    `max_overflow`: одночасних checkout-ів не може бути більше, ніж `max_slots + резерв`, тож
+    черга за з'єднанням (і `pool_timeout`, який runtime побачив би як втрату lease — M-3
+    код-рев'ю) не виникає за побудовою. Гарячий `desired_concurrency` понад стелю runtime
+    обрізає з попередженням, а не мовчки впирається в pool.
+
+    `command_timeout` дорівнює вікну self-fencing: зависання драйвера стає помилкою раніше,
+    ніж instance встигне втратити lease (H-1).
     """
     from collector.persistence.postgres.engine import create_engine, create_session_factory
-    from collector.workers.roles import default_pool_spec
+    from collector.workers.config import CONNECTION_RESERVE
     from collector.workers.runtime import WorkerRuntime
 
-    slots = default_pool_spec(config.role).desired_concurrency
     engine = create_engine(
         settings,
-        pool_size=slots + 2,
-        max_overflow=slots + 4,
+        pool_size=config.max_slots + CONNECTION_RESERVE,
+        max_overflow=0,
         application_name=f"collector-worker-{config.role.value}",
+        command_timeout=config.command_timeout,
     )
     try:
         await WorkerRuntime(config, create_session_factory(engine)).run()
@@ -406,7 +412,14 @@ async def _run_scheduler(settings: PostgresSettings, config: SchedulerRuntimeCon
     from collector.persistence.postgres.engine import create_engine, create_session_factory
     from collector.workers.scheduler import SchedulerRuntime
 
-    engine = create_engine(settings, pool_size=2, max_overflow=2, application_name="collector-sch")
+    engine = create_engine(
+        settings,
+        # lease тримає окреме з'єднання поза pool-ом, тіку вистачає одного.
+        pool_size=2,
+        max_overflow=2,
+        application_name="collector-sch",
+        command_timeout=config.tick_seconds + config.lease_retry_seconds,
+    )
     try:
         await SchedulerRuntime(config, engine, create_session_factory(engine)).run()
     finally:

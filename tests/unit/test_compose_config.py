@@ -402,8 +402,8 @@ def test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire() -> None:
     statements = " ".join(
         line for line in roles_sql.splitlines() if not line.lstrip().startswith("--")
     )
-    # `LOGIN` не матчить `NOLOGIN` (одне слово) — саме цього нам і треба.
-    assert not re.search(r"LOGIN", statements), (
+    # Lookbehind відсікає `NOLOGIN`: спрацювати має лише справжня LOGIN-роль.
+    assert not re.search(r"(?<![A-Z])LOGIN", statements), (
         "у roles.sql зʼявилися LOGIN-ролі — поверніть §13-інваріант: worker/scheduler мають "
         "отримати власні per-role DSN, а не спільний secret postgres_dsn "
         "(docs/plan/deps/WP-01D-to-WP-01A.md §2)"

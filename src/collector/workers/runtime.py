@@ -64,6 +64,8 @@ from collector.workers.handlers import (
     Task,
     TaskHandler,
     TaskResult,
+    check_handler_contract,
+    redact,
     resolve_handler,
     result_for_exception,
 )
@@ -83,6 +85,13 @@ IMMEDIATE_RETRY_POLICY: Final = queue_repo.BackoffPolicy(
 
 DRAIN_TIMEOUT_ERROR_CODE = "drain_timeout"
 BOOTSTRAP_REASON = "bootstrap default pool (§7.6)"
+READY_RETRY_ATTEMPTS = 5
+READY_RETRY_BASE_SECONDS = 0.5
+MAX_CLAIM_BACKOFF_SECONDS = 30.0
+
+
+class WorkerRuntimeError(RuntimeError):
+    """Runtime не може працювати коректно і має завершитись (boot не вдався тощо)."""
 
 
 def _task_from_job(job: CrawlJob) -> Task:
@@ -127,12 +136,18 @@ class WorkerRuntime:
         self.config = config
         self.instance_id = new_entity_id()
         self.handler = handler if handler is not None else resolve_handler(config.role)
+        check_handler_contract(self.handler)
         self._sessions = sessions
         self._clock = clock
         self._log = get_logger(f"collector.worker.{config.role.value}").bind(
             instance_id=str(self.instance_id), role=config.role.value
         )
         self._active: dict[UUID, _ActiveTask] = {}
+        # Скасовані (fencing/втрата lease) tasks: їх треба дочекатись перед виходом, інакше
+        # доменний handler лишається з незакритим з'єднанням (L-3 код-рев'ю).
+        self._cancelled: list[asyncio.Task[None]] = []
+        self._claim_failures = 0
+        self._claim_backoff = 0.0
         self._pool = PoolSnapshot(
             desired_concurrency=default_pool_spec(config.role).desired_concurrency, revision=0
         )
@@ -171,6 +186,11 @@ class WorkerRuntime:
     @property
     def active_tasks(self) -> int:
         return len(self._active)
+
+    @property
+    def effective_concurrency(self) -> int:
+        """Скільки слотів процес реально відкриває: desired з БД, обрізаний стелею pool-у (M-3)."""
+        return min(self._pool.desired_concurrency, self.config.max_slots)
 
     @property
     def fenced(self) -> bool:
@@ -220,22 +240,32 @@ class WorkerRuntime:
             if install_signals
             else StopSignalHandlers()
         )
-        heartbeat: asyncio.Task[None] | None = None
+        background: list[asyncio.Task[None]] = []
         try:
             await self._boot()
-            heartbeat = asyncio.create_task(
-                self._heartbeat_loop(), name=f"worker-heartbeat-{self.instance_id}"
-            )
+            background = [
+                asyncio.create_task(
+                    self._heartbeat_loop(), name=f"worker-heartbeat-{self.instance_id}"
+                ),
+                # Окрема задача навмисно: якщо heartbeat завис у драйвері, він сам себе не
+                # перевірить (H-1 код-рев'ю). Watchdog рахує ЧАС від останнього підтвердженого
+                # heartbeat і не залежить від того, чи повернулась heartbeat-корутина.
+                asyncio.create_task(
+                    self._watchdog_loop(), name=f"worker-watchdog-{self.instance_id}"
+                ),
+            ]
             await self._claim_loop()
             await self._drain()
         except asyncio.CancelledError:
             self._log.warning("worker.cancelled", active_tasks=len(self._active))
             raise
         finally:
-            if heartbeat is not None:
-                heartbeat.cancel()
+            for task in background:
+                task.cancel()
+            for task in background:
                 with suppress(asyncio.CancelledError):
-                    await heartbeat
+                    await task
+            await self._await_cancelled_tasks()
             signals.restore()
 
     def _on_signal(self, signum: object) -> None:
@@ -265,10 +295,35 @@ class WorkerRuntime:
             job_types=list(self.handler.job_types),
         )
         await self._check_ready()
-        await self._set_status("ready")
+        await self._become_ready()
         # Відлік self-fencing починається від підтвердженої реєстрації, а не від створення
         # обʼєкта: повільний boot не має виглядати як втрачений lease.
         self._last_heartbeat_ok = monotonic()
+
+    async def _become_ready(self) -> None:
+        """Перехід `starting → ready` з повторами; невдача = процес не піднявся (M-1 код-рев'ю).
+
+        Одна проковтнута помилка на boot робила worker «живим, але німим»: heartbeat ішов,
+        `mark_stale_instances` такий instance не позначав, healthcheck контейнера бачив живий
+        PostgreSQL — а claim не починався ніколи. Тепер перехід повторюється з backoff, а якщо
+        не вдався — виняток піднімається з `run()`: контейнер падає і його перезапускає Docker
+        (видимо), а рядок `worker_instances` лишається `starting` і застаріває.
+        """
+        delay = READY_RETRY_BASE_SECONDS
+        for attempt in range(1, READY_RETRY_ATTEMPTS + 1):
+            if await self._set_status("ready"):
+                return
+            if attempt == READY_RETRY_ATTEMPTS:
+                break
+            self._log.warning("worker.ready_retry", attempt=attempt, delay_seconds=delay)
+            await asyncio.sleep(delay)
+            delay *= 2
+        msg = (
+            f"instance {self.instance_id}: не вдалося перейти у ready за "
+            f"{READY_RETRY_ATTEMPTS} спроб — процес завершується, щоб оркестратор перезапустив "
+            "репліку замість живого, але німого worker-а"
+        )
+        raise WorkerRuntimeError(msg)
 
     async def _ensure_pool(self) -> PoolSnapshot:
         """Прочитати desired state ролі; на чистій БД створити pool із defaults §7.6."""
@@ -299,6 +354,14 @@ class WorkerRuntime:
         except (ConflictError, IntegrityError):
             # Інша репліка ролі створила pool одночасно — desired state уже є, читаємо його.
             async with self._sessions() as session, session.begin():
+                # Нижня межа для зависань на боці сервера: без неї запит у «чорну діру» чекає
+                # до TCP RTO ядра (десятки хвилин), а не до вікна fencing (H-1).
+                # `set_config(..., is_local => true)` замість `SET LOCAL`: SET не приймає
+                # bind-параметрів, а склеювати SQL рядками не варто навіть із int.
+                await session.execute(
+                    text("SELECT set_config('statement_timeout', :ms, true)"),
+                    {"ms": str(self.config.statement_timeout_ms)},
+                )
                 pool = await pools_repo.get_pool(session, self.config.role)
             if pool is None:  # pragma: no cover — можливо лише при видаленні pool під час boot
                 msg = f"worker pool {self.config.role.value!r} зник під час реєстрації"
@@ -316,12 +379,12 @@ class WorkerRuntime:
             if not self.claiming:
                 await self._idle(self.config.poll_seconds)
                 continue
-            free = self._pool.desired_concurrency - len(self._active)
+            free = self.effective_concurrency - len(self._active)
             claimed = 0
             if free > 0:
                 claimed = await self._claim(min(free, self.config.claim_batch))
             if claimed == 0:
-                await self._idle(self.config.poll_seconds)
+                await self._idle(max(self.config.poll_seconds, self._claim_backoff))
             else:
                 await asyncio.sleep(0)
 
@@ -338,8 +401,19 @@ class WorkerRuntime:
                 )
                 tasks = [_task_from_job(job) for job in jobs]
         except (SQLAlchemyError, OSError, PersistenceError) as exc:
-            self._log.warning("worker.claim_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+            # Backoff, щоб мертву базу не опитував кожен worker раз на секунду (L-7 код-рев'ю).
+            self._claim_failures += 1
+            self._claim_backoff = min(
+                self.config.poll_seconds * 2**self._claim_failures, MAX_CLAIM_BACKOFF_SECONDS
+            )
+            self._log.warning(
+                "worker.claim_failed",
+                error=redact(f"{type(exc).__name__}: {exc}"),
+                next_attempt_in=round(self._claim_backoff, 3),
+            )
             return 0
+        self._claim_failures = 0
+        self._claim_backoff = 0.0
         for task in tasks:
             self._start(task)
         if tasks:
@@ -362,7 +436,7 @@ class WorkerRuntime:
                 self._log.warning(
                     "worker.task_failed",
                     job_id=str(task.job_id),
-                    error=f"{type(exc).__name__}: {exc}"[:300],
+                    error=redact(f"{type(exc).__name__}: {exc}")[:300],
                 )
                 result = result_for_exception(exc)
             await self._report(task, result)
@@ -403,11 +477,13 @@ class WorkerRuntime:
             # Lease забрав `recover_expired_leases` (або оператор) — результат уже не наш.
             self.lost_leases += 1
             self._log.warning("worker.lease_lost", job_id=str(task.job_id), phase="report")
-        except (SQLAlchemyError, OSError) as exc:
+        except (SQLAlchemyError, OSError, PersistenceError) as exc:
+            # Будь-яка інша помилка persistence (`ConflictError`, `InvalidTransitionError`, …)
+            # раніше вилітала з task і зникала у GC без жодного рядка в логах (L-4 код-рев'ю).
             self._log.error(
                 "worker.report_failed",
                 job_id=str(task.job_id),
-                error=f"{type(exc).__name__}: {exc}"[:300],
+                error=redact(f"{type(exc).__name__}: {exc}"),
             )
         else:
             self._log.info(
@@ -417,9 +493,43 @@ class WorkerRuntime:
     # --- heartbeat ---------------------------------------------------------------------------
 
     async def _heartbeat_loop(self) -> None:
+        """Тіки за дедлайном (а не `sleep` після роботи) і з бюджетом на кожен тік.
+
+        `sleep(interval)` після тіку давав період `interval + тривалість тіку`: на повільній базі
+        дрейф накопичувався саме тоді, коли запас до експірації lease потрібен найбільше (L-1).
+        Бюджет `wait_for` відрізає зависання в драйвері: тік, який не вклався, скасовується, і
+        перевірка вікна fencing виконується негайно (H-1).
+        """
+        deadline = monotonic()
+        budget = self.config.heartbeat_tick_budget
         while True:
-            await asyncio.sleep(self.config.heartbeat_seconds)
-            await self._heartbeat()
+            deadline += self.config.heartbeat_seconds
+            await asyncio.sleep(max(deadline - monotonic(), 0.0))
+            try:
+                await asyncio.wait_for(self._heartbeat(), timeout=budget)
+            except TimeoutError:
+                self._log.warning("worker.heartbeat_timeout", budget_seconds=budget)
+                self._fence_if_lease_unconfirmed()
+
+    async def _watchdog_loop(self) -> None:
+        """Сторож lease: незалежно від heartbeat-циклу стежить за часом без підтвердження.
+
+        Друге призначення — помітити заблокований event loop (синхронний `handle`, M-2): якщо
+        власний `sleep` сторожа прокинувся значно пізніше, ніж мав, у логах зʼявляється
+        `worker.event_loop_stalled` — інакше така затримка виглядала б як проблема бази.
+        """
+        interval = self.config.watchdog_interval
+        while True:
+            expected = monotonic() + interval
+            await asyncio.sleep(interval)
+            lag = monotonic() - expected
+            if lag > max(interval, self.config.heartbeat_seconds):
+                self._log.warning(
+                    "worker.event_loop_stalled",
+                    lag_seconds=round(lag, 3),
+                    detail="handle() має бути неблокуючим: CPU-bound роботу — в asyncio.to_thread",
+                )
+            self._fence_if_lease_unconfirmed()
 
     async def _heartbeat(self) -> None:
         """Один тік: instance heartbeat + продовження lease активних tasks + читання pool."""
@@ -430,6 +540,14 @@ class WorkerRuntime:
         drain_requested = self._drain_barrier
         try:
             async with self._sessions() as session, session.begin():
+                # Нижня межа для зависань на боці сервера: без неї запит у «чорну діру» чекає
+                # до TCP RTO ядра (десятки хвилин), а не до вікна fencing (H-1).
+                # `set_config(..., is_local => true)` замість `SET LOCAL`: SET не приймає
+                # bind-параметрів, а склеювати SQL рядками не варто навіть із int.
+                await session.execute(
+                    text("SELECT set_config('statement_timeout', :ms, true)"),
+                    {"ms": str(self.config.statement_timeout_ms)},
+                )
                 pool = await pools_repo.get_pool(session, self.config.role)
                 snapshot = (
                     PoolSnapshot(pool.desired_concurrency, pool.revision)
@@ -439,7 +557,9 @@ class WorkerRuntime:
                 instance = await pools_repo.heartbeat_instance(
                     session,
                     self.instance_id,
-                    slots_total=snapshot.desired_concurrency,
+                    # Саме стільки слотів репліка справді здатна тримати (M-3): heartbeat-derived
+                    # capacity не має обіцяти контролеру більше, ніж є.
+                    slots_total=min(snapshot.desired_concurrency, self.config.max_slots),
                     slots_active=len(active),
                     active_leases=len(active),
                     pool_revision=snapshot.revision,
@@ -465,6 +585,10 @@ class WorkerRuntime:
         self.heartbeats += 1
         self._last_heartbeat_ok = monotonic()
         self._unfence()
+        if self._status == "starting" and not self._stop.is_set():
+            # M-1: одна невдала спроба на boot не має робити worker «живим, але німим» —
+            # перехід повторюється, доки instance не стане ready (або доки процес не зупинять).
+            await self._set_status("ready")
         self._apply_pool(snapshot)
         self._apply_drain_barrier(drain_requested)
         for job_id in lost:
@@ -513,6 +637,20 @@ class WorkerRuntime:
     def _apply_pool(self, snapshot: PoolSnapshot) -> None:
         previous = self._pool
         self._pool = snapshot
+        if snapshot.desired_concurrency > self.effective_concurrency:
+            # M-3: гарячий hot-change не може вимагати більше слотів, ніж процес здатний
+            # обслужити з'єднаннями — інакше checkout-и з pool-у впираються в `pool_timeout`,
+            # heartbeat падає з `TimeoutError` і здорові tasks скасовуються «через базу».
+            self._log.warning(
+                "worker.concurrency_clamped",
+                desired=snapshot.desired_concurrency,
+                effective=self.effective_concurrency,
+                max_concurrency=self.config.max_concurrency,
+                detail=(
+                    "підніміть COLLECTOR_WORKER_MAX_CONCURRENCY і перезапустіть репліку — "
+                    "розмір pool з'єднань фіксується на старті процесу"
+                ),
+            )
         if snapshot.desired_concurrency != previous.desired_concurrency:
             self._log.info(
                 "worker.concurrency_changed",
@@ -543,8 +681,15 @@ class WorkerRuntime:
         if entry is None:
             return
         self.lost_leases += 1
-        self._log.warning("worker.lease_lost", job_id=str(job_id), phase=phase)
+        self._log.warning(
+            "worker.lease_lost",
+            job_id=str(job_id),
+            phase=phase,
+            fences=self.fences,
+            lost_leases=self.lost_leases,
+        )
         entry.handle.cancel()
+        self._cancelled.append(entry.handle)
 
     # --- drain -------------------------------------------------------------------------------
 
@@ -562,8 +707,21 @@ class WorkerRuntime:
                     handle.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
                 await self._release_leases()
+        await self._await_cancelled_tasks()
         await self._set_status("stopped")
-        self._log.info("worker.stopped", heartbeats=self.heartbeats, lost_leases=self.lost_leases)
+        self._log.info(
+            "worker.stopped",
+            heartbeats=self.heartbeats,
+            lost_leases=self.lost_leases,
+            fences=self.fences,
+        )
+
+    async def _await_cancelled_tasks(self) -> None:
+        """Дочекатись скасованих (fencing/втрата lease) tasks — щоб handler закрив свої ресурси."""
+        pending = [task for task in self._cancelled if not task.done()]
+        self._cancelled.clear()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _release_leases(self) -> None:
         """Повернути lease незавершених tasks у чергу (claimable одразу, без backoff).
@@ -615,7 +773,8 @@ class WorkerRuntime:
                 )
             self._active.pop(job_id, None)
 
-    async def _set_status(self, status: str) -> None:
+    async def _set_status(self, status: str) -> bool:
+        """Записати статус instance; `False` — база не підтвердила перехід (викликач вирішує)."""
         try:
             async with self._sessions() as session, session.begin():
                 await pools_repo.set_instance_status(
@@ -625,11 +784,12 @@ class WorkerRuntime:
             self._log.error(
                 "worker.status_update_failed",
                 status=status,
-                error=f"{type(exc).__name__}: {exc}"[:300],
+                error=redact(f"{type(exc).__name__}: {exc}"),
             )
-            return
+            return False
         self._status = status
         self._log.info("worker.status", status=status)
+        return True
 
     # --- утиліти -----------------------------------------------------------------------------
 
@@ -655,8 +815,10 @@ def build_runtime(
 
 __all__ = [
     "DRAIN_TIMEOUT_ERROR_CODE",
+    "MAX_CLAIM_BACKOFF_SECONDS",
     "IMMEDIATE_RETRY_POLICY",
     "PoolSnapshot",
     "WorkerRuntime",
+    "WorkerRuntimeError",
     "build_runtime",
 ]
