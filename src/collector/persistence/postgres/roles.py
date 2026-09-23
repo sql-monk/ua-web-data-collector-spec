@@ -1,17 +1,37 @@
-"""Ролі БД §13: застосування `sql/roles.sql` (CLI `collector db roles`).
+"""Ролі БД §13: `sql/roles.sql` (GRANT) і LOGIN per component (CLI `collector db roles`).
 
-SQL-скрипт ідемпотентний і виконується цілком через simple query protocol asyncpg (DO-блоки з
-крапками з комою не діляться на statements). Transaction boundary: викликач
-(`async with engine.begin()` — увесь скрипт атомарно).
+Дві частини, обидві ідемпотентні:
+
+- `apply_roles` — SQL-скрипт (group-ролі, ownership, GRANT) через simple query protocol
+  asyncpg (DO-блоки з крапками з комою не діляться на statements). Скрипт **не чіпає**
+  LOGIN/паролі: повторний `db roles` без `--with-login` не вимикає вже видані логіни;
+- `apply_logins` — `ALTER ROLE <runtime-роль> LOGIN PASSWORD '<SCRAM verifier>'` для кожної
+  runtime-ролі (§13 «облікові дані БД розділені за компонентами»; dependency WP-01D F1).
+  Пароль береться з DSN-секрету компонента (`postgres_dsn_<component>`), тобто секрет один:
+  той самий файл монтується сервісу як `COLLECTOR_POSTGRES_DSN_FILE` і читається тут, щоб
+  виставити пароль ролі. У БД іде лише SCRAM-SHA-256 verifier (RFC 5802/7677), тож
+  відкритий пароль не потрапляє ні в `log_statement`, ні в `pg_stat_statements`.
+  `collector_migrate` LOGIN не отримує ніколи: міграції виконує окремий login-користувач
+  (у dev — superuser `POSTGRES_USER`), а runtime ним не користується.
+
+Transaction boundary: викликач (`async with engine.begin()` — скрипт і логіни атомарно).
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import secrets
+from collections.abc import Mapping
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError, DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 ROLE_NAMES: tuple[str, ...] = (
@@ -24,7 +44,112 @@ ROLE_NAMES: tuple[str, ...] = (
     "collector_api_ro",
     "collector_export_ro",
 )
-RUNTIME_ROLES: tuple[str, ...] = tuple(r for r in ROLE_NAMES if r != "collector_migrate")
+MIGRATE_ROLE = "collector_migrate"
+RUNTIME_ROLES: tuple[str, ...] = tuple(r for r in ROLE_NAMES if r != MIGRATE_ROLE)
+ROLE_SECRETS_DIR_ENV = "COLLECTOR_POSTGRES_ROLE_SECRETS_DIR"
+DEFAULT_ROLE_SECRETS_DIR = Path("/run/secrets")
+DSN_SECRET_PREFIX = "postgres_dsn_"  # noqa: S105 — префікс імені Docker secret, не пароль
+SCRAM_ITERATIONS = 4096
+"""Типове значення PostgreSQL `scram_iterations`; сервер приймає verifier з будь-яким >= 1."""
+
+
+class RoleLoginError(ValueError):
+    """DSN-секрет runtime-ролі відсутній, не відповідає ролі або роль має зайві права."""
+
+
+def component_of(role: str) -> str:
+    """`collector_fetcher` → `fetcher`: суфікс імені Docker secret `postgres_dsn_<component>`."""
+    if role not in RUNTIME_ROLES:
+        msg = f"{role!r} не є runtime-роллю §13"
+        raise RoleLoginError(msg)
+    return role.removeprefix("collector_")
+
+
+def dsn_secret_name(role: str) -> str:
+    """Ім'я Docker secret з DSN runtime-ролі, напр. `postgres_dsn_fetcher`."""
+    return DSN_SECRET_PREFIX + component_of(role)
+
+
+@dataclass(frozen=True, slots=True)
+class RoleLogin:
+    """Роль і пароль із її DSN-секрету; `repr` пароль не показує."""
+
+    role: str
+    password: str
+
+    def __repr__(self) -> str:
+        return f"RoleLogin(role={self.role!r}, password=***)"
+
+
+def login_from_dsn(role: str, dsn: str) -> RoleLogin:
+    """Розбирає DSN компонента і перевіряє, що він справді для `role` (а не для міграцій).
+
+    Повідомлення помилок не містять DSN — лише назву ролі й причину: секрет не має потрапити
+    у stderr CLI.
+    """
+    secret = dsn_secret_name(role)
+    try:
+        url = make_url(dsn.strip())
+    except (ArgumentError, ValueError) as exc:
+        msg = f"{role}: невалідний DSN у секреті {secret}"
+        raise RoleLoginError(msg) from exc
+    if url.username != role:
+        msg = (
+            f"{role}: секрет {secret} має користувача {url.username!r}, очікувався {role!r} "
+            "(runtime не може ходити чужою або міграційною роллю, §13)"
+        )
+        raise RoleLoginError(msg)
+    password = url.password
+    if not isinstance(password, str) or not password:
+        msg = f"{role}: у секреті {secret} немає пароля"
+        raise RoleLoginError(msg)
+    if not (password.isascii() and password.isprintable()):
+        # Verifier рахується без SASLprep: для printable ASCII він тотожний серверному.
+        msg = f"{role}: пароль у секреті {secret} має бути printable ASCII"
+        raise RoleLoginError(msg)
+    return RoleLogin(role=role, password=password)
+
+
+def load_role_logins(secrets_dir: Path, roles: tuple[str, ...] = RUNTIME_ROLES) -> list[RoleLogin]:
+    """Читає `secrets_dir/postgres_dsn_<component>` для кожної ролі; бракує хоч одного → помилка.
+
+    Усі або жодного: частково увімкнені логіни лишили б частину сервісів на спільному
+    міграційному DSN, і це було б видно лише в runtime.
+    """
+    missing = [
+        dsn_secret_name(role)
+        for role in roles
+        if not (secrets_dir / dsn_secret_name(role)).is_file()
+    ]
+    if missing:
+        msg = f"у {secrets_dir} бракує DSN-секретів: {', '.join(missing)}"
+        raise RoleLoginError(msg)
+    return [
+        login_from_dsn(role, (secrets_dir / dsn_secret_name(role)).read_text(encoding="utf-8"))
+        for role in roles
+    ]
+
+
+def role_secrets_dir(environ: Mapping[str, str]) -> Path:
+    """`COLLECTOR_POSTGRES_ROLE_SECRETS_DIR` або `/run/secrets` (Docker secrets)."""
+    value = environ.get(ROLE_SECRETS_DIR_ENV, "").strip()
+    return Path(value) if value else DEFAULT_ROLE_SECRETS_DIR
+
+
+def scram_sha256_verifier(
+    password: str, *, salt: bytes | None = None, iterations: int = SCRAM_ITERATIONS
+) -> str:
+    """SCRAM-SHA-256 verifier у форматі `pg_authid.rolpassword` (RFC 5802/7677)."""
+    salt_bytes = secrets.token_bytes(16) if salt is None else salt
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_bytes, iterations)
+    client_key = hmac.digest(salted, b"Client Key", "sha256")
+    stored_key = hashlib.sha256(client_key).digest()
+    server_key = hmac.digest(salted, b"Server Key", "sha256")
+
+    def b64(data: bytes) -> str:
+        return base64.b64encode(data).decode("ascii")
+
+    return f"SCRAM-SHA-256${iterations}:{b64(salt_bytes)}${b64(stored_key)}:{b64(server_key)}"
 
 
 def default_roles_sql_path() -> Path:
@@ -55,3 +180,64 @@ async def apply_roles(conn: AsyncConnection, *, sql_path: Path | None = None) ->
         if type(exc).__module__.split(".")[0] != "asyncpg":
             raise
         raise DBAPIError(statement=None, params=None, orig=exc) from exc
+
+
+async def apply_logins(conn: AsyncConnection, logins: list[RoleLogin]) -> list[str]:
+    """`ALTER ROLE … LOGIN PASSWORD '<verifier>'` для runtime-ролей. Ідемпотентно.
+
+    Явні `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` — щоб ручна помилка
+    оператора в минулому не лишила runtime-логін із зайвими атрибутами. Членство runtime-ролі
+    в `collector_migrate` — помилка конфігурації: мовчки `REVOKE` тут не робиться, а
+    операція падає, бо хтось свідомо видав runtime права міграцій.
+
+    Transaction boundary: викликач; зазвичай та сама транзакція, що й `apply_roles`
+    (ролі мають уже існувати).
+    """
+    applied: list[str] = []
+    for login in logins:
+        component_of(login.role)
+        is_migrator = await conn.scalar(
+            text("SELECT pg_has_role(:role, :migrate, 'MEMBER')"),
+            {"role": login.role, "migrate": MIGRATE_ROLE},
+        )
+        if is_migrator:
+            msg = f"{login.role} є членом {MIGRATE_ROLE}: runtime-роль не може мати права міграцій"
+            raise RoleLoginError(msg)
+        verifier = scram_sha256_verifier(login.password)
+        # ALTER ROLE не приймає bind-параметрів. Ім'я ролі — з фіксованого RUNTIME_ROLES
+        # (перевірено вище), verifier складається лише з [A-Za-z0-9+/=:$-], лапок у ньому
+        # бути не може.
+        await conn.execute(
+            text(
+                f'ALTER ROLE "{login.role}" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
+                f"NOREPLICATION NOBYPASSRLS INHERIT PASSWORD '{verifier}'"
+            )
+        )
+        applied.append(login.role)
+    return applied
+
+
+async def verify_runtime_login(conn: AsyncConnection) -> str:
+    """Перевірка для runtime-процесів (WP-01D): поточний логін — не superuser і не міграції.
+
+    Повертає `current_user`, інакше `RoleLoginError`. Призначена для одного виклику при старті
+    процесу: спільний міграційний DSN (знахідка F1 WP-01D) має падати одразу, а не тихо
+    працювати з правами власника схеми (§13).
+    """
+    row = (
+        await conn.execute(
+            text(
+                "SELECT current_user AS name, r.rolsuper AS superuser, "
+                "pg_has_role(current_user, :migrate, 'MEMBER') AS migrate "
+                "FROM pg_roles r WHERE r.rolname = current_user"
+            ),
+            {"migrate": MIGRATE_ROLE},
+        )
+    ).one()
+    if row.superuser or row.migrate:
+        msg = (
+            f"runtime-підключення під {row.name!r} має права superuser/{MIGRATE_ROLE}: "
+            "використайте DSN компонента (postgres_dsn_<component>), §13"
+        )
+        raise RoleLoginError(msg)
+    return str(row.name)

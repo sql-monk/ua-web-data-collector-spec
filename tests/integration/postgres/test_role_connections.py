@@ -8,7 +8,7 @@
 
 - `collector_api_ro`/`collector_export_ro` не мають INSERT/UPDATE/DELETE у **жодній** таблиці
   (і каталог прав, і реально виконаний statement);
-- `collector_parser` не пише напряму у `audit_log`;
+- `collector_parser` лише додає рядки в `audit_log` (INSERT), не читає і не змінює журнал;
 - жодна runtime-роль не може UPDATE/DELETE `audit_log`;
 - `audit_log` UPDATE/DELETE відхиляється тригером навіть для owner (`collector_migrate`);
 - `collector_migrate` не згадується у runtime-коді.
@@ -160,20 +160,27 @@ async def test_read_only_role_cannot_touch_alembic_version_or_ddl(
                 await conn.execute(text(statement))
 
 
-async def test_parser_cannot_write_audit_log_but_keeps_its_queue(
+async def test_parser_appends_audit_but_cannot_read_or_rewrite_it_and_keeps_its_queue(
     role_engine: RoleEngine,
 ) -> None:
-    """Parser веде свої jobs у черзі (claim = UPDATE `crawl_jobs`), але слід у `audit_log`
-    пише лише scheduler/controller — прямий запис parser-а має бути відхилений."""
+    """Parser веде свої jobs у черзі (claim = UPDATE `crawl_jobs`). З PR2 (S-2 пострев'ю PR1)
+    bootstrap `upsert_pool` пише audit у своїй транзакції, тому parser має рівно `INSERT` на
+    `audit_log` — ні читати журнал, ні змінювати/видаляти записи він не може."""
     engine = await role_engine("collector_parser")
     assert await _privileges(engine, "audit_log") == {
         "select": False,
-        "insert": False,
+        "insert": True,
         "update": False,
         "delete": False,
         "truncate": False,
     }
-    for statement in (AUDIT_INSERT, "UPDATE audit_log SET actor = 'x'", "DELETE FROM audit_log"):
+    async with engine.begin() as conn:
+        await conn.execute(text(AUDIT_INSERT))
+    for statement in (
+        "SELECT count(*) FROM audit_log",
+        "UPDATE audit_log SET actor = 'x'",
+        "DELETE FROM audit_log",
+    ):
         with pytest.raises(DBAPIError, match="permission denied"):
             async with engine.begin() as conn:
                 await conn.execute(text(statement))

@@ -19,7 +19,7 @@ from collector.persistence.postgres.migrations import (
     upgrade_to_head,
 )
 from collector.persistence.postgres.partitions import ensure_month_partitions
-from collector.persistence.postgres.roles import apply_roles
+from collector.persistence.postgres.roles import RoleLogin, apply_logins, apply_roles
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,9 +76,11 @@ async def apply_database_roles(
     settings: PostgresSettings,
     *,
     sql_path: Path | None = None,
+    logins: list[RoleLogin] | None = None,
     engine: AsyncEngine | None = None,
-) -> None:
-    """Ролі + GRANT (`sql/roles.sql`) в одній транзакції."""
+) -> list[str]:
+    """Ролі + GRANT (`sql/roles.sql`) і, якщо передано `logins`, LOGIN runtime-ролей — усе в
+    одній транзакції. Повертає ролі, яким виставлено LOGIN (порожньо без `logins`)."""
     own_engine = engine is None
     eng = engine or create_engine(
         settings, pool_size=1, max_overflow=0, application_name="collector-roles"
@@ -86,6 +88,7 @@ async def apply_database_roles(
     try:
         async with eng.begin() as conn:
             await apply_roles(conn, sql_path=sql_path)
+            return await apply_logins(conn, logins) if logins else []
     finally:
         if own_engine:
             await eng.dispose()
