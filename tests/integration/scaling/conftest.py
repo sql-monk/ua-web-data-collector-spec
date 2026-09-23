@@ -3,10 +3,10 @@
 **Фікстури PostgreSQL не дублюються.** `tests/integration/postgres/conftest.py` (WP-01A) дає
 template-БД, testcontainers і session/engine-фабрики; тут той самий модуль завантажується за
 шляхом і його фікстури реекспортуються в цей каталог. Прямий `import` неможливий: у `tests/`
-немає `__init__.py`, а `pytest_plugins` у не-кореневому conftest заборонений з pytest 7. Ціна —
-у сесії, де виконуються обидва каталоги і сервер піднімається testcontainers-ом, буде два
-контейнери (два різні fixturedef-и session-scope); у CI сервер зовнішній
-(`COLLECTOR_TEST_POSTGRES_ADMIN_DSN`), тож дублювання немає.
+немає `__init__.py`, а `pytest_plugins` у не-кореневому conftest заборонений з pytest 7.
+Fixturedef-и при цьому різні (свій у кожному conftest), тому спільним робиться сам **ресурс**:
+`_share_server_and_template` підміняє `_start_container` і `TemplateState` memoized-обгортками,
+і на процес припадає рівно один контейнер із однією template-БД (знахідка F6 gate 2).
 
 Детермінізм: тести чекають **стану**, а не часу — `wait_for` опитує предикат із коротким кроком
 і падає з описом, якщо стан не настав. Жодного `sleep` на секунди й жодної залежності від
@@ -218,6 +218,7 @@ def worker_config() -> Callable[..., WorkerRuntimeConfig]:
         claim_batch: int = 8,
         fence_after_seconds: float | None = None,
         max_concurrency: int | None = None,
+        liveness_path: Path | None = None,
     ) -> WorkerRuntimeConfig:
         return WorkerRuntimeConfig(
             role=role,
@@ -228,6 +229,7 @@ def worker_config() -> Callable[..., WorkerRuntimeConfig]:
             claim_batch=claim_batch,
             fence_after_seconds=fence_after_seconds,
             max_concurrency=max_concurrency,
+            liveness_path=liveness_path,
             deployment="pytest",
             hostname="pytest-host",
             container_id="pytest-container",

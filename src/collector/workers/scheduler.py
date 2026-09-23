@@ -51,6 +51,8 @@ from collector.persistence.postgres.repositories import pools as pools_repo
 from collector.persistence.postgres.repositories import queue as queue_repo
 from collector.workers.advisory import AdvisoryLease
 from collector.workers.config import SchedulerRuntimeConfig
+from collector.workers.liveness import LivenessMarker
+from collector.workers.session import bounded_transaction
 from collector.workers.signals import StopSignalHandlers, install_stop_signal_handlers
 
 if TYPE_CHECKING:
@@ -113,6 +115,7 @@ class SchedulerRuntime:
         self._tick = tick if tick is not None else make_maintenance_tick(config)
         self._clock = clock
         self._log = get_logger("collector.scheduler").bind(lease=config.lease_name)
+        self.liveness = LivenessMarker(config.liveness_path)
         self._stop = asyncio.Event()
         self._active = False
         self.activated = asyncio.Event()
@@ -148,6 +151,8 @@ class SchedulerRuntime:
         )
         try:
             while not self._stop.is_set():
+                # Liveness — те саме, що у worker-а: доводить живий цикл, не чіпаючи БД.
+                self.liveness.refresh()
                 if not self._active:
                     if not await self._try_activate():
                         await self._idle(self.config.lease_retry_seconds)
@@ -160,6 +165,7 @@ class SchedulerRuntime:
         finally:
             self._active = False
             self.activated.clear()
+            self.liveness.remove()
             await self.lease.release()
             signals.restore()
             self._log.info("scheduler.stopped", ticks=self.ticks, activations=self.activations)
@@ -198,7 +204,9 @@ class SchedulerRuntime:
 
     async def _run_tick(self) -> None:
         try:
-            async with self._sessions() as session, session.begin():
+            async with bounded_transaction(
+                self._sessions, self.config.statement_timeout_ms
+            ) as session:
                 await self._tick(session, self._clock())
         except (SQLAlchemyError, OSError, PersistenceError) as exc:
             self._log.error("scheduler.tick_failed", error=f"{type(exc).__name__}: {exc}"[:300])

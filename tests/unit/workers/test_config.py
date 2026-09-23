@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from collector.workers.config import (
@@ -85,7 +87,10 @@ def test_invalid_env_fails_loudly(name: str, value: str) -> None:
 
 
 def test_scheduler_defaults_and_overrides() -> None:
-    assert SchedulerRuntimeConfig.from_env({}) == SchedulerRuntimeConfig()
+    # `from_env` додає ще й шлях маркера liveness (вимога 7 картки) — решта полів дефолтні.
+    from_env = SchedulerRuntimeConfig.from_env({})
+    assert from_env.liveness_path is not None
+    assert dataclasses.replace(from_env, liveness_path=None) == SchedulerRuntimeConfig()
     config = SchedulerRuntimeConfig.from_env(
         {
             "COLLECTOR_SCHEDULER_LEASE_NAME": "scheduler-eu",
@@ -95,7 +100,7 @@ def test_scheduler_defaults_and_overrides() -> None:
             "COLLECTOR_SCHEDULER_RECOVER_LIMIT": "10",
         }
     )
-    assert config == SchedulerRuntimeConfig(
+    assert dataclasses.replace(config, liveness_path=None) == SchedulerRuntimeConfig(
         lease_name="scheduler-eu",
         tick_seconds=0.5,
         lease_retry_seconds=0.2,

@@ -97,8 +97,9 @@ docker compose down -v
 |---|---|---|---|
 | §13: усі 8 runtime-процесів ходять у PostgreSQL під тим самим DSN, що й міграції (роль `collector`, superuser), бо всі `collector_*` ролі — `NOLOGIN`. Радіус ураження — увесь worker pool; **блокер pilot/production і live-збору**, не блокер merge PR1 (знахідка F1 gate 2, доказ у `docs/plan/reports/WP-01D/testing-pr1.md`) | open | **WP-01A PR2** (LOGIN-ролі + per-role DSN), потім WP-01D повертає §13-інваріант у `tests/unit/test_compose_config*.py` | заведено 2026-09-23 |
 | Плановий drain на останній спробі не повертає lease одразу, а чекає експірації (немає `queue.release`) | mitigated (карантину більше немає) | WP-01A PR2 — `queue.release(job_id, owner)` | заведено 2026-09-23 |
+| Залишковий TOCTOU singleton-тіку scheduler-а: перевірка lease і сам тік ідуть різними зʼєднаннями, тому два тіки теоретично можуть перекритися. Закрито **контрактом** «тік мусить бути ідемпотентним» (докстрінги `scheduler.py`, `docs/workers.md` §6) і вартовим `test_maintenance_tick_is_safe_when_two_schedulers_overlap`, а не конструкцією — зобовʼязання лягає на майбутні доменні тіки (насамперед WP-03 `enqueue` discovery-jobs: потрібен власний ключ ідемпотентності §9.3 п.3) | mitigated (контракт + тест-вартовий) | WP-01D PR3 (fencing-токен у тіку, якщо зʼявиться неідемпотентне планування) / доменні WP | заведено 2026-09-23 |
 
-Тест-вартовий: `tests/unit/test_compose_config.py::test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire` падає, щойно у `roles.sql` зʼявиться перша LOGIN-роль.
+Тест-вартовий: `tests/unit/test_compose_config.py::test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire` падає, щойно в будь-якому SQL-файлі ролей зʼявиться LOGIN-роль (`CREATE ROLE … LOGIN`, `ALTER … WITH LOGIN`, `CREATE USER`; case-insensitive, коментарі ігноруються) — сам вартовий накритий зондами `::test_login_tripwire_detects_every_way_to_create_a_login_role` і `::test_login_tripwire_is_quiet_on_nologin_and_comments`.
 
 ## Rollback/disable
 

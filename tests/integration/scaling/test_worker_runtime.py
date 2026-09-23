@@ -11,8 +11,10 @@ lease» моделюється явним `now` у `recover_expired_leases`, а 
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
+from pathlib import Path
 from time import monotonic
 from typing import cast
 from uuid import UUID
@@ -352,6 +354,14 @@ async def test_role_wide_drain_barrier_stops_claim_without_sigterm(
         await pools_repo.mark_draining(session, runtime.instance_id)
     await wait_for(lambda: not runtime.claiming, what="барʼєр drain зупинив claim")
 
+    # Барʼєр зупиняє ПОЧАТОК нових claim; claim, який уже пішов у базу до того, як instance
+    # побачив барʼєр, може ще повернути job — контролер PR3 саме тому чекає на
+    # `active_leases = 0` у heartbeat, а не лише на факт барʼєра. Щоб тест перевіряв контракт,
+    # а не гонку, кладемо job у чергу після того, як цикл claim гарантовано став на паузу.
+    beats = runtime.heartbeats
+    await wait_for(lambda: runtime.heartbeats >= beats + 2, what="цикл claim стоїть під барʼєром")
+    assert runtime.active_tasks == 0
+
     (job_id,) = await enqueue_jobs(1)
     beats = runtime.heartbeats
     await wait_for(lambda: runtime.heartbeats >= beats + 3, what="кілька heartbeat-ів під барʼєром")
@@ -521,7 +531,6 @@ async def test_self_fencing_fires_when_the_database_hangs_without_raising(
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.active_tasks == 1, what="task у роботі")
-    beats = runtime.heartbeats
 
     started = monotonic()
     sessions.hanging = True
@@ -531,7 +540,12 @@ async def test_self_fencing_fires_when_the_database_hangs_without_raising(
         f"fence має спрацювати в межах lease TTL, минуло {elapsed:.2f} с"
     )
     assert sessions.hangs >= 1, "heartbeat справді зависав, а не падав із винятком"
-    assert runtime.heartbeats == beats, "жодного підтвердженого heartbeat не було"
+    # Лічильник читаємо лише після двох зависань поспіль: до цього моменту міг ще
+    # добігати тік, який відкрив свою session ДО перемикання прапорця.
+    await wait_for(lambda: sessions.hangs >= 2, what="другий тік теж зависає")
+    frozen = runtime.heartbeats
+    await wait_for(lambda: sessions.hangs >= 4, what="ще два тіки зависають")
+    assert runtime.heartbeats == frozen, "поки база висить, підтверджених heartbeat немає"
 
     await wait_for(lambda: blocking_handler.cancelled == [job_id], what="активний task скасовано")
     assert runtime.active_tasks == 0
@@ -618,3 +632,31 @@ async def test_boot_fails_loudly_when_the_ready_transition_cannot_be_written(
     assert runtime.status == "starting"
     instance = await read_instance(pg_sessions, runtime.instance_id)
     assert instance.status == "starting", "рядок лишається starting і застаріє за heartbeat TTL"
+
+
+async def test_liveness_marker_is_refreshed_by_the_loop_and_removed_on_stop(
+    pg_sessions: async_sessionmaker[AsyncSession],
+    worker_config: MakeConfig,
+    handler: ControlledHandler,
+    make_pool: MakePool,
+    wait_for: WaitFor,
+    running: list[asyncio.Task[None]],
+    tmp_path: Path,
+) -> None:
+    """Вимога 7 картки: healthcheck читає mtime маркера, який оновлює живий цикл процесу."""
+    await make_pool(concurrency=1)
+    marker = tmp_path / "runtime.alive"
+    runtime = WorkerRuntime(worker_config(liveness_path=marker), pg_sessions, handler)
+    stop = asyncio.Event()
+    task = start(runtime, running, stop)
+
+    await wait_for(lambda: marker.is_file(), what="маркер зʼявився після реєстрації")
+    # «Постаріла» позначка має оновитись сторожем без жодного запиту в БД.
+    stale_ns = marker.stat().st_mtime_ns - 5_000_000_000
+    os.utime(marker, ns=(stale_ns, stale_ns))
+    await wait_for(lambda: marker.stat().st_mtime_ns > stale_ns, what="сторож оновив mtime маркера")
+    assert runtime.liveness.refreshes >= 2
+
+    stop.set()
+    await asyncio.wait_for(task, timeout=15)
+    assert not marker.exists(), "на штатному виході маркер прибирається"

@@ -387,30 +387,83 @@ def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
     assert "collector db roles" in COMPOSE_PATH.read_text(encoding="utf-8")
 
 
+ROLE_SQL_PATHS = (
+    Path("src") / "collector" / "persistence" / "postgres" / "sql" / "roles.sql",
+    Path("deploy") / "compose" / "postgres" / "init" / "01-roles.sql",
+)
+# `CREATE USER` — це синонім `CREATE ROLE … LOGIN`, тому він теж LOGIN-роль.
+LOGIN_ROLE_SQL = re.compile(
+    r"(?is)\bcreate\s+user\b|\b(?:create|alter)\s+role\b(?:(?!;).)*?\blogin\b"
+)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Прибрати `--` і `/* */` коментарі: тест має реагувати на SQL, а не на пояснення."""
+    without_block = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    return "\n".join(line.split("--", 1)[0] for line in without_block.splitlines())
+
+
 def test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire() -> None:
     """§13 (знахідка F1 gate 2): runtime-процеси тимчасово ходять у PG тим самим DSN, що й
     міграції, — бо LOGIN-ролі per component ще не існують.
 
-    Це навмисно **fail-loud** тест-вартовий, а не документація: щойно у `roles.sql` зʼявиться
-    хоч одна LOGIN-роль (WP-01A PR2, dependency-запит `docs/plan/deps/WP-01D-to-WP-01A.md` §2),
-    він упаде і змусить повернути §13-інваріант — per-role DSN для `scheduler` і `*-worker`
-    замість спільного superuser-секрету `postgres_dsn`.
+    Це навмисно **fail-loud** тест-вартовий, а не документація: щойно в будь-якому SQL-файлі
+    ролей зʼявиться LOGIN-роль (WP-01A PR2, dependency-запит
+    `docs/plan/deps/WP-01D-to-WP-01A.md` §2), він упаде і змусить повернути §13-інваріант —
+    per-role DSN для `scheduler` і `*-worker` замість спільного superuser-секрету
+    `postgres_dsn`.
+
+    Пастки, які знято після пострев'ю (S-2): перевірка більше не залежить від регістру, ловить
+    `CREATE USER` (LOGIN без ключового слова) і `ALTER ROLE … WITH LOGIN`, дивиться **всі**
+    файли ролей (пакет + init-скрипт кластера) і не спрацьовує на слово `LOGIN` у коментарі.
+    `NOLOGIN` не матчиться, бо це одне слово (`\\blogin\\b` до нього не застосовний).
     """
-    roles_sql = (
-        REPO_ROOT / "src" / "collector" / "persistence" / "postgres" / "sql" / "roles.sql"
-    ).read_text(encoding="utf-8")
-    statements = " ".join(
-        line for line in roles_sql.splitlines() if not line.lstrip().startswith("--")
-    )
-    # Lookbehind відсікає `NOLOGIN`: спрацювати має лише справжня LOGIN-роль.
-    assert not re.search(r"(?<![A-Z])LOGIN", statements), (
-        "у roles.sql зʼявилися LOGIN-ролі — поверніть §13-інваріант: worker/scheduler мають "
-        "отримати власні per-role DSN, а не спільний secret postgres_dsn "
-        "(docs/plan/deps/WP-01D-to-WP-01A.md §2)"
-    )
+    checked = 0
+    for relative in ROLE_SQL_PATHS:
+        path = REPO_ROOT / relative
+        if not path.is_file():
+            continue
+        checked += 1
+        statements = _strip_sql_comments(path.read_text(encoding="utf-8"))
+        assert not LOGIN_ROLE_SQL.search(statements), (
+            f"{relative}: зʼявилися LOGIN-ролі — поверніть §13-інваріант: worker/scheduler "
+            "мають отримати власні per-role DSN, а не спільний secret postgres_dsn "
+            "(docs/plan/deps/WP-01D-to-WP-01A.md §2)"
+        )
+    assert checked == len(ROLE_SQL_PATHS), "файли ролей перейменовано — онови список вартового"
     deps = REPO_ROOT / "docs" / "plan" / "deps" / "WP-01D-to-WP-01A.md"
     assert deps.is_file(), "тимчасове відхилення від §13 має лишатись оформленим запитом"
     assert "LOGIN" in deps.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE ROLE collector_fetch LOGIN PASSWORD 'x';",
+        "create role collector_fetch login password 'x';",
+        "ALTER ROLE collector_fetcher WITH LOGIN;",
+        "CREATE USER collector_fetch PASSWORD 'x';",
+        "create\n  role collector_fetch\n  login;",
+    ],
+)
+def test_login_tripwire_detects_every_way_to_create_a_login_role(sql: str) -> None:
+    """Зонд самого вартового: кожен спосіб завести LOGIN-роль має його спрацювати."""
+    assert LOGIN_ROLE_SQL.search(_strip_sql_comments(sql)), sql
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE ROLE collector_fetcher NOLOGIN;",
+        "EXECUTE format('CREATE ROLE %I NOLOGIN', role_name);",
+        "-- CREATE ROLE collector_fetch LOGIN PASSWORD 'x';",
+        "/* приклад: CREATE USER app LOGIN */ CREATE ROLE app NOLOGIN;",
+        "GRANT collector_fetcher TO CURRENT_USER;",
+    ],
+)
+def test_login_tripwire_is_quiet_on_nologin_and_comments(sql: str) -> None:
+    """І не спрацьовує там, де LOGIN-ролі немає: `NOLOGIN`, коментарі, GRANT."""
+    assert not LOGIN_ROLE_SQL.search(_strip_sql_comments(sql)), sql
 
 
 def test_dockerfile_optionally_copies_alembic_and_migrations() -> None:
@@ -933,6 +986,17 @@ MIN_HEALTHCHECK_TIMEOUT_S = 15
 MIN_HEALTHCHECK_START_PERIOD_S = 60
 MIN_HEALTHCHECK_RETRIES = 5
 MAX_HEALTHCHECK_START_INTERVAL_S = 10
+# Дешева liveness-проба (WP-01D PR1, вимога 7): читає mtime маркера в tmpfs, не стартує
+# інтерпретатор і не ходить у БД, тому бюджет секундний. Нижні межі тут — це захист від
+# «нуля», а не від повільного старту.
+MIN_LIVENESS_TIMEOUT_S = 1
+MIN_LIVENESS_START_PERIOD_S = 10
+MIN_LIVENESS_RETRIES = 3
+
+
+def _is_liveness_probe(healthcheck: dict[str, Any]) -> bool:
+    """Проба читає лише маркер процесу (`*.alive`), тобто не залежить від жодного сервісу."""
+    return "alive" in " ".join(map(str, healthcheck.get("test", [])))
 
 
 def test_application_healthcheck_budget_survives_parallel_start(
@@ -943,14 +1007,31 @@ def test_application_healthcheck_budget_survives_parallel_start(
     Причина — не конкретний сервіс, а спільний бюджет: `timeout: 5s` на пробу, яка коштує
     ~6 с при 0.25 CPU, і `start_period: 15s` при `interval: 30s` (перша проба виконувалась
     уже ПІСЛЯ grace-періоду, тож її невдача одразу йшла в залік `retries`).
+
+    WP-01D PR1 (вимога 7) розвів два класи проб, тому й бюджети два:
+
+    - **dependency probe** (`api`, `gui`) — стартує інтерпретатор/HTTP-клієнт і чекає на
+      відповідь компонента: для неї лишаються ті самі щедрі мінімуми;
+    - **liveness probe** (worker-и, `scheduler`) — `stat` mtime маркера в tmpfs (~5 мс):
+      секундний бюджет, але `start_interval` і кратність retries лишаються обов'язковими.
     """
     application = {name for name, svc in services.items() if name not in STATEFUL} - ONE_SHOTS
     assert application, "немає application-сервісів"
+    liveness = {name for name in application if _is_liveness_probe(services[name]["healthcheck"])}
+    assert liveness, "жоден довгоживучий runtime не використовує дешеву liveness-пробу"
+    assert application - liveness, "dependency-проби мають лишитись (api/gui)"
     for name in sorted(application):
         healthcheck = services[name]["healthcheck"]
-        assert _seconds(healthcheck["timeout"]) >= MIN_HEALTHCHECK_TIMEOUT_S, name
-        assert _seconds(healthcheck["start_period"]) >= MIN_HEALTHCHECK_START_PERIOD_S, name
-        assert healthcheck["retries"] >= MIN_HEALTHCHECK_RETRIES, name
+        cheap = name in liveness
+        assert _seconds(healthcheck["timeout"]) >= (
+            MIN_LIVENESS_TIMEOUT_S if cheap else MIN_HEALTHCHECK_TIMEOUT_S
+        ), name
+        assert _seconds(healthcheck["start_period"]) >= (
+            MIN_LIVENESS_START_PERIOD_S if cheap else MIN_HEALTHCHECK_START_PERIOD_S
+        ), name
+        assert healthcheck["retries"] >= (
+            MIN_LIVENESS_RETRIES if cheap else MIN_HEALTHCHECK_RETRIES
+        ), name
         # `start_interval` (Docker 25+/API 1.44+): без нього перша проба чекала б цілий
         # `interval`, і `start_period` не давав би нічого.
         assert "start_interval" in healthcheck, f"{name}: немає start_interval"
@@ -959,22 +1040,26 @@ def test_application_healthcheck_budget_survives_parallel_start(
 
 
 def test_healthcheck_budget_is_defined_once(compose: dict[str, Any]) -> None:
-    """Бюджет задається одним anchor — інакше він розійдеться між сервісами при правці."""
+    """Кожен клас проб має рівно один anchor — інакше числа розійдуться між сервісами."""
     text = COMPOSE_PATH.read_text(encoding="utf-8")
     assert "x-healthcheck-budget: &healthcheck-budget" in text
-    # Реальна властивість «задано один раз» — це не кількість входжень `<<:` (частина
-    # worker-ів успадковує бюджет транзитивно через anchor `x-worker`), а те, що ЖОДЕН
-    # application-сервіс не має власних чисел: усі таймінги збігаються побайтово.
+    assert "x-liveness-budget: &liveness-budget" in text
+    # Реальна властивість «задано один раз» — це не кількість входжень `<<:`, а те, що ЖОДЕН
+    # сервіс не має власних чисел: усередині класу таймінги збігаються побайтово.
     services = compose["services"]
     application = {n for n in services if n not in STATEFUL} - ONE_SHOTS
-    budgets = {
-        name: tuple(
-            str(services[name]["healthcheck"].get(key))
-            for key in ("interval", "timeout", "start_period", "start_interval", "retries")
+    groups: dict[bool, set[tuple[str, ...]]] = {True: set(), False: set()}
+    for name in application:
+        healthcheck = services[name]["healthcheck"]
+        groups[_is_liveness_probe(healthcheck)].add(
+            tuple(
+                str(healthcheck.get(key))
+                for key in ("interval", "timeout", "start_period", "start_interval", "retries")
+            )
         )
-        for name in application
-    }
-    assert len(set(budgets.values())) == 1, f"бюджет розійшовся між сервісами: {budgets}"
+    for cheap, budgets in groups.items():
+        assert len(budgets) == 1, f"бюджет розійшовся (liveness={cheap}): {budgets}"
+    assert groups[True] != groups[False], "дешева проба має інший бюджет, ніж dependency-проба"
     # Вимір, на якому тримаються числа, лишається у файлі: без нього наступний рев'юер
     # побачить «магічні» 15/90 і поверне їх назад.
     assert "0.25 CPU" in text and "start_interval" in text

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -78,6 +79,12 @@ def test_advisory_key_is_deterministic_and_fits_oid() -> None:
 
 
 def test_workers_package_writes_nothing_to_local_disk() -> None:
+    """§15/FR-031: жодного стану на локальному диску — і єдиний дозволений виняток.
+
+    Виняток — `liveness.py`: маркер для Docker healthcheck (вимога 7 картки). Це не стан:
+    файл лежить у tmpfs, ніколи не читається самим runtime, не переживає контейнер і ні на
+    що не впливає. Його властивості пінить `test_liveness_marker_only_touches_its_own_path`.
+    """
     offenders: list[str] = []
     for path in sorted(WORKERS_PACKAGE.rglob("*.py")):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -85,3 +92,38 @@ def test_workers_package_writes_nothing_to_local_disk() -> None:
             if FORBIDDEN_LOCAL_STATE.search(code):
                 offenders.append(f"{path.name}:{number}: {line.strip()}")
     assert not offenders, "локальний стан у worker runtime (§15): " + "; ".join(offenders)
+
+
+def test_liveness_marker_only_touches_its_own_path(tmp_path: Path) -> None:
+    """Маркер лише оновлює mtime свого файлу: нічого не читає і нічого не зберігає."""
+    from collector.workers.liveness import LivenessMarker, default_liveness_path
+
+    source = (WORKERS_PACKAGE / "liveness.py").read_text(encoding="utf-8")
+    code = " ".join(line.split("#", 1)[0] for line in source.splitlines())
+    for forbidden in ("read_text", "read_bytes", "open\(", "json", "pickle"):
+        assert not re.search(forbidden, code), f"маркер не має читати стан: {forbidden}"
+
+    path = tmp_path / "runtime.alive"
+    marker = LivenessMarker(path)
+    assert marker.enabled
+    marker.refresh()
+    assert path.is_file() and marker.refreshes == 1
+    first = path.stat().st_mtime_ns
+    os.utime(path, ns=(first - 5_000_000_000, first - 5_000_000_000))
+    marker.refresh()
+    assert path.stat().st_mtime_ns > first - 5_000_000_000, "mtime оновлюється"
+    marker.remove()
+    assert not path.exists()
+    marker.remove()  # ідемпотентно
+
+    disabled = LivenessMarker(None)
+    disabled.refresh()
+    assert not disabled.enabled and disabled.refreshes == 0
+
+    broken = LivenessMarker(tmp_path / "missing-dir" / "runtime.alive")
+    broken.refresh()
+    assert not broken.enabled, "помилка запису вимикає маркер, а не валить процес"
+
+    configured = str(tmp_path / "explicit.alive")
+    assert default_liveness_path({"COLLECTOR_WORKER_LIVENESS_FILE": configured}) == Path(configured)
+    assert default_liveness_path({"TMPDIR": str(tmp_path)}).parent == tmp_path

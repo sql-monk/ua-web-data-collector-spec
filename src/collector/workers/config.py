@@ -16,6 +16,7 @@ Env-змінні worker-а:
 | `COLLECTOR_WORKER_CLAIM_BATCH` | `8` | максимум jobs за один claim (не більше вільних слотів) |
 | `COLLECTOR_WORKER_FENCE_AFTER_SECONDS` | ½ lease TTL | вікно до self-fencing |
 | `COLLECTOR_WORKER_MAX_CONCURRENCY` | default ролі §7.6 | стеля слотів = розмір pool з'єднань |
+| `COLLECTOR_WORKER_LIVENESS_FILE` | `$TMPDIR/…alive` | маркер liveness (healthcheck) |
 | `COLLECTOR_WORKER_DEPLOYMENT` | `compose` | metadata `worker_instances.deployment` |
 | `COLLECTOR_CONTAINER_ID` | `HOSTNAME` | metadata `worker_instances.container_id` |
 
@@ -30,8 +31,10 @@ import os
 import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from collector.core.version import version_info
+from collector.workers.liveness import default_liveness_path
 from collector.workers.roles import WorkerRole, default_pool_spec
 
 WORKER_ENV_PREFIX = "COLLECTOR_WORKER_"
@@ -124,6 +127,9 @@ class WorkerRuntimeConfig:
     # `desired_concurrency` понад цю межу обрізається із попередженням (M-3 код-рев'ю).
     # `None` — вбудований запуск (тести), де engine створює викликач.
     max_concurrency: int | None = None
+    # Маркер liveness для Docker healthcheck (вимога 7 картки). `None` — вимкнено: вбудований
+    # запуск і тести не мають писати нічого, навіть у tmpfs.
+    liveness_path: Path | None = None
     deployment: str = "compose"
     hostname: str | None = field(default=None)
     container_id: str | None = None
@@ -187,7 +193,15 @@ class WorkerRuntimeConfig:
 
     @property
     def command_timeout(self) -> float:
-        """`command_timeout` asyncpg: жоден запит не має жити довше за вікно fencing."""
+        """`command_timeout` asyncpg для engine, який створює `collector.cli` (S-4).
+
+        Це **клієнтська** межа на кожен запит процесу. Друга, серверна, — `statement_timeout`
+        у кожній транзакції runtime (`workers.session.bounded_transaction`,
+        `statement_timeout_ms`). Разом вони покривають обидва типи відмови: сервер не
+        відповідає взагалі / запит виконується надто довго. Вбудований запуск (тести, кілька
+        runtime в одному процесі) створює engine сам і може не мати `command_timeout` — там
+        нижню межу тримають `statement_timeout` і сторож lease.
+        """
         return max(self.fence_after, 1.0)
 
     @property
@@ -216,6 +230,7 @@ class WorkerRuntimeConfig:
                 f"{WORKER_ENV_PREFIX}MAX_CONCURRENCY",
                 default_pool_spec(role).desired_concurrency,
             ),
+            liveness_path=default_liveness_path(dict(env)),
             deployment=env.get(f"{WORKER_ENV_PREFIX}DEPLOYMENT", "compose").strip() or "compose",
             # Docker hostname — лише metadata (§7.5): за нею не приймається жодне рішення.
             hostname=socket.gethostname(),
@@ -237,6 +252,7 @@ class SchedulerRuntimeConfig:
     lease_retry_seconds: float = 5.0
     stale_after_seconds: float = 60.0
     recover_limit: int = 1000
+    liveness_path: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.lease_name:
@@ -245,6 +261,11 @@ class SchedulerRuntimeConfig:
         if self.recover_limit < 1:
             msg = f"recover_limit має бути >= 1, отримано {self.recover_limit}"
             raise WorkerConfigError(msg)
+
+    @property
+    def statement_timeout_ms(self) -> int:
+        """`statement_timeout` транзакції тіку, мс: тік не має пережити власний інтервал."""
+        return max(int((self.tick_seconds + self.lease_retry_seconds) * 1000), 1000)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> SchedulerRuntimeConfig:
@@ -260,6 +281,7 @@ class SchedulerRuntimeConfig:
                 env, f"{SCHEDULER_ENV_PREFIX}STALE_AFTER_SECONDS", 60.0
             ),
             recover_limit=_positive_int(env, f"{SCHEDULER_ENV_PREFIX}RECOVER_LIMIT", 1000),
+            liveness_path=default_liveness_path(dict(env)),
         )
 
 

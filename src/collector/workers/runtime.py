@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic
@@ -69,7 +69,9 @@ from collector.workers.handlers import (
     resolve_handler,
     result_for_exception,
 )
+from collector.workers.liveness import LivenessMarker
 from collector.workers.roles import WorkerRole, default_pool_spec
+from collector.workers.session import bounded_transaction
 from collector.workers.signals import StopSignalHandlers, install_stop_signal_handlers
 
 if TYPE_CHECKING:
@@ -148,6 +150,7 @@ class WorkerRuntime:
         self._cancelled: list[asyncio.Task[None]] = []
         self._claim_failures = 0
         self._claim_backoff = 0.0
+        self.liveness = LivenessMarker(config.liveness_path)
         self._pool = PoolSnapshot(
             desired_concurrency=default_pool_spec(config.role).desired_concurrency, revision=0
         )
@@ -266,6 +269,7 @@ class WorkerRuntime:
                 with suppress(asyncio.CancelledError):
                     await task
             await self._await_cancelled_tasks()
+            self.liveness.remove()
             signals.restore()
 
     def _on_signal(self, signum: object) -> None:
@@ -274,7 +278,7 @@ class WorkerRuntime:
 
     async def _boot(self) -> None:
         self._pool = await self._ensure_pool()
-        async with self._sessions() as session, session.begin():
+        async with self._transaction() as session:
             await pools_repo.register_instance(
                 session,
                 self.instance_id,
@@ -299,6 +303,7 @@ class WorkerRuntime:
         # Відлік self-fencing починається від підтвердженої реєстрації, а не від створення
         # обʼєкта: повільний boot не має виглядати як втрачений lease.
         self._last_heartbeat_ok = monotonic()
+        self.liveness.refresh()
 
     async def _become_ready(self) -> None:
         """Перехід `starting → ready` з повторами; невдача = процес не піднявся (M-1 код-рев'ю).
@@ -327,7 +332,7 @@ class WorkerRuntime:
 
     async def _ensure_pool(self) -> PoolSnapshot:
         """Прочитати desired state ролі; на чистій БД створити pool із defaults §7.6."""
-        async with self._sessions() as session, session.begin():
+        async with self._transaction() as session:
             pool = await pools_repo.get_pool(session, self.config.role)
             if pool is not None:
                 return PoolSnapshot(pool.desired_concurrency, pool.revision)
@@ -340,7 +345,7 @@ class WorkerRuntime:
             resource_profile=spec.resource_profile,
         )
         try:
-            async with self._sessions() as session, session.begin():
+            async with self._transaction() as session:
                 created = await pools_repo.upsert_pool(
                     session,
                     self.config.role,
@@ -353,20 +358,18 @@ class WorkerRuntime:
                 return PoolSnapshot(created.desired_concurrency, created.revision)
         except (ConflictError, IntegrityError):
             # Інша репліка ролі створила pool одночасно — desired state уже є, читаємо його.
-            async with self._sessions() as session, session.begin():
+            async with self._transaction() as session:
                 # Нижня межа для зависань на боці сервера: без неї запит у «чорну діру» чекає
                 # до TCP RTO ядра (десятки хвилин), а не до вікна fencing (H-1).
-                # `set_config(..., is_local => true)` замість `SET LOCAL`: SET не приймає
-                # bind-параметрів, а склеювати SQL рядками не варто навіть із int.
-                await session.execute(
-                    text("SELECT set_config('statement_timeout', :ms, true)"),
-                    {"ms": str(self.config.statement_timeout_ms)},
-                )
                 pool = await pools_repo.get_pool(session, self.config.role)
             if pool is None:  # pragma: no cover — можливо лише при видаленні pool під час boot
                 msg = f"worker pool {self.config.role.value!r} зник під час реєстрації"
                 raise ConflictError(msg) from None
             return PoolSnapshot(pool.desired_concurrency, pool.revision)
+
+    def _transaction(self) -> AbstractAsyncContextManager[AsyncSession]:
+        """Транзакція runtime із `statement_timeout` (S-4): жоден запит не переживає fencing."""
+        return bounded_transaction(self._sessions, self.config.statement_timeout_ms)
 
     async def _check_ready(self) -> None:
         """Readiness §7.5: БД відповідає і доменні залежності ролі готові."""
@@ -390,7 +393,7 @@ class WorkerRuntime:
 
     async def _claim(self, limit: int) -> int:
         try:
-            async with self._sessions() as session, session.begin():
+            async with self._transaction() as session:
                 jobs = await queue_repo.claim(
                     session,
                     self.handler.job_types,
@@ -452,7 +455,7 @@ class WorkerRuntime:
     async def _report(self, task: Task, result: TaskResult) -> None:
         now = self._now()
         try:
-            async with self._sessions() as session, session.begin():
+            async with self._transaction() as session:
                 if result.disposition == "complete":
                     await queue_repo.complete(session, task.job_id, self.owner, now=now)
                 elif result.disposition == "retry":
@@ -522,6 +525,9 @@ class WorkerRuntime:
         while True:
             expected = monotonic() + interval
             await asyncio.sleep(interval)
+            # Маркер оновлює саме сторож: він доводить, що event loop живий і не заблокований
+            # (вимога 7 картки). Жодного запиту в БД проба не робить.
+            self.liveness.refresh()
             lag = monotonic() - expected
             if lag > max(interval, self.config.heartbeat_seconds):
                 self._log.warning(
@@ -539,15 +545,9 @@ class WorkerRuntime:
         snapshot = self._pool
         drain_requested = self._drain_barrier
         try:
-            async with self._sessions() as session, session.begin():
+            async with self._transaction() as session:
                 # Нижня межа для зависань на боці сервера: без неї запит у «чорну діру» чекає
                 # до TCP RTO ядра (десятки хвилин), а не до вікна fencing (H-1).
-                # `set_config(..., is_local => true)` замість `SET LOCAL`: SET не приймає
-                # bind-параметрів, а склеювати SQL рядками не варто навіть із int.
-                await session.execute(
-                    text("SELECT set_config('statement_timeout', :ms, true)"),
-                    {"ms": str(self.config.statement_timeout_ms)},
-                )
                 pool = await pools_repo.get_pool(session, self.config.role)
                 snapshot = (
                     PoolSnapshot(pool.desired_concurrency, pool.revision)
@@ -750,7 +750,7 @@ class WorkerRuntime:
                 self._active.pop(job_id, None)
                 continue
             try:
-                async with self._sessions() as session, session.begin():
+                async with self._transaction() as session:
                     await queue_repo.retry(
                         session,
                         job_id,
@@ -776,7 +776,7 @@ class WorkerRuntime:
     async def _set_status(self, status: str) -> bool:
         """Записати статус instance; `False` — база не підтвердила перехід (викликач вирішує)."""
         try:
-            async with self._sessions() as session, session.begin():
+            async with self._transaction() as session:
                 await pools_repo.set_instance_status(
                     session, self.instance_id, status, now=self._now()
                 )

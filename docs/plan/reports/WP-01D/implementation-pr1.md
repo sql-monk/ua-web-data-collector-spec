@@ -356,8 +356,120 @@ $ docker compose ... down -v --remove-orphans
 exit=0
 ```
 
+## Відповіді на пострев'ю (spec review)
+
+Вердикт — `changes_requested` (0 critical/high; 1 missing, 6 partial); звіт:
+`docs/plan/reports/WP-01D/spec-review-pr1.md`. Гілку спершу перебазовано на `origin/main`
+(там уже WP-00 PR3), конфлікт був один — `docs/acceptance/traceability.md` (обидві сторони
+дописували рядки в кінець таблиці; збережено обидва набори). Усі докази нижче зняті **після**
+rebase.
+
+| # | Знахідка | Рішення | Що саме зроблено |
+|---|---|---|---|
+| S-1 | **missing** — вимога 7 картки PR1: дешевий liveness-probe для Docker healthcheck | **fixed** | Довгоживучий runtime сам оновлює mtime маркера в tmpfs (`collector.workers.liveness`), healthcheck читає лише mtime через `stat`+`date` — без старту інтерпретатора і без БД. Маркер оновлює **сторож lease**, тому заблокований event loop робить контейнер unhealthy. Семантику §7.5 розведено разом із тестом (нижче), бюджет worker/scheduler повернуто до секундних значень. |
+| S-2 | тест-вартовий на LOGIN-ролі слабший, ніж заявлено | **fixed** | Вартовий переписано: case-insensitive, `CREATE ROLE … LOGIN`, `ALTER … WITH LOGIN` і `CREATE USER` (LOGIN без ключового слова), обидва SQL-файли ролей (пакетний `roles.sql` + `deploy/compose/postgres/init/01-roles.sql`), `--` і `/* */` коментарі вирізаються. Сам вартовий накритий зондами: `test_login_tripwire_detects_every_way_to_create_a_login_role` (5 форм) і `test_login_tripwire_is_quiet_on_nologin_and_comments` (5 негативних). Формулювання в картці уточнено під фактичну гарантію. |
+| S-3 | дві внутрішні суперечності у звіті | **fixed** | (а) Ризик 4 переписано: два контейнери — це стан **до** F6; тепер там залишковий ризик крихкості обгортки (перейменування `_start_container`/`TemplateState` у WP-01A ламає набір гучно). Те саме застаріле формулювання прибрано з докстрінга `tests/integration/scaling/conftest.py`. (б) У «Dependency-запитах» LOGIN-ролі названо високим пріоритетом і блокером pilot — як у deps-файлі §2 і картці. |
+| S-4 | `statement_timeout` лише в heartbeat, `command_timeout` лише на CLI-шляху | **fixed** | З'явився спільний `collector.workers.session.bounded_transaction`: **кожна** транзакція runtime (claim, report, статус, bootstrap pool, release lease, heartbeat) і тік scheduler-а ставлять `statement_timeout`. Докстрінг `command_timeout` більше не обіцяє зайвого: названо обидва рівні (клієнтський asyncpg на CLI-шляху + серверний у транзакції) і явно сказано, що у вбудованому запуску діють `statement_timeout` і сторож. |
+| S-5 | залишковий TOCTOU M-4 не в «Відомих ризиках» картки | **fixed** | Третій рядок у таблиці картки: статус `mitigated (контракт + тест-вартовий)`, owner `WP-01D PR3 / доменні WP`, дата 2026-09-23, з явним зобов'язанням для WP-03 (`enqueue` discovery-jobs потребує власного ключа ідемпотентності §9.3 п.3). |
+| DoD §18 п. 6 | немає `docs/workers.md` | **fixed** | Створено `docs/workers.md`: ролі й defaults §7.6, життєвий цикл, lease/self-fencing/таймаути, liveness vs readiness, контракт `TaskHandler` (тільки `async def`, CPU-bound — у `asyncio.to_thread`, скасовуваність, заборона локального стану), покроково «як додати handler», scheduler і його контракт ідемпотентності, повна таблиця env і операційні рецепти. |
+
+### S-1: що саме змінено в семантиці healthcheck
+
+§7.5 вимагає «process + критична dependency». Вимога не змінилась — змінився спосіб її
+виконання для довгоживучих процесів, і картка прямо називає цей тест місцем, де зміну треба
+зафіксувати:
+
+- **liveness** (healthcheck worker-ів і scheduler-а) — свіжість маркера процесу;
+- **readiness** — `depends_on` (`postgres: service_healthy`, one-shots
+  `service_completed_successfully`) плюс `worker_instances.status`/`last_heartbeat_at`.
+
+`tests/unit/test_compose_config_adversarial.py::test_application_healthchecks_name_a_critical_dependency`
+переписано під два класи проб (докстрінг пояснює чому), а вимогу «projector/export бачать
+Mongo; fetch/parse/export — MinIO» перенесено туди, де вона тепер живе:
+`::test_worker_readiness_dependencies_are_declared_in_depends_on` перевіряє `depends_on`.
+Навмисний наслідок, названий у докстрінгу: падіння PostgreSQL більше не робить worker-контейнери
+unhealthy — рестарт цього не лікує, а self-fencing уже зупинив claim.
+
+### S-1: заміри «було/стало»
+
+Вартість **однієї проби** всередині вже запущеного контейнера (`docker exec`, медіана з 3;
+у кожне число входить ~0.4 с накладних витрат самого `docker exec`, однакових для обох проб):
+
+| CPU-ліміт | було: старт інтерпретатора (`python -c "import collector.api.health"`) | стало: `test -f` + `stat -c %Y` |
+|---|---:|---:|
+| 1.00 | 1.77 с | 0.58 с |
+| 0.50 | 3.04 с | 0.43 с |
+| 0.25 | 6.07 с | 0.44 с |
+
+Стара проба додатково відкривала TCP-з'єднання до PostgreSQL (звідси 2.9–6.0 с у вимірі картки);
+нова не робить жодного мережевого виклику, тому її вартість не залежить від CPU-ліміту.
+
+Бюджет healthcheck (`docker compose config`, лише worker-и і `scheduler`; `api`/`gui`
+лишаються на `x-healthcheck-budget`):
+
+| Параметр | було (`x-healthcheck-budget`) | стало (`x-liveness-budget`) |
+|---|---:|---:|
+| `timeout` | 15 с | 3 с |
+| `start_period` | 90 с | 20 с |
+| `interval` | 30 с | 10 с |
+| `start_interval` | 5 с | 2 с |
+| `retries` | 5 | 3 |
+
+Поведінка в Docker після зміни (ізольований проєкт, образ із цією гілкою):
+`docker compose --profile core --profile workers up -d --wait` → **22 с** до «все healthy»
+(16/16), маркер у контейнері оновлюється сторожем кожні ~7 с (спостережений вік маркера
+коливається 0–7 с при порозі свіжості 30 с). Семантика проби перевірена в самому контейнері:
+свіжий маркер → `exit 0`, маркер віком 60 с → `exit 1`, відсутній маркер → `exit 1`.
+
+### Команди після пострев'ю (на перебазованій гілці)
+
+```text
+$ git rebase origin/main
+Successfully rebased and updated refs/heads/wp/01d-1-worker-runtime.
+
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src
+All checks passed!
+216 files already formatted
+Success: no issues found in 70 source files
+
+$ uv run pytest -m "not live" -q
+873 passed, 23 skipped, 8 warnings in 149.21s (0:02:29)
+
+$ uv run pytest -m integration tests/integration/scaling -q
+.................................                                        [100%]
+33 passed in 60.42s (0:01:00)
+
+$ docker compose config --quiet
+(порожній вивід, exit=0)
+
+$ COLLECTOR_IMAGE=collector:wp01d docker compose -f docker-compose.yml -f <override мереж> \
+    -p collector-wp01d --profile core --profile workers up -d --wait --wait-timeout 420
+up exit=0, seconds=22
+
+$ docker compose ps -a --format json | python deploy/compose/check-healthy.py
+all 16 containers healthy or exited 0
+
+$ docker exec <worker> sh -c '<проба healthcheck>'   # семантика порогу
+fresh marker -> exit=0
+stale (60s) marker -> exit=1
+missing marker -> exit=1
+
+$ docker compose ... down -v --remove-orphans
+down exit=0
+```
+
+23 skip-и — це успадковані від WP-00 PR3 e2e/web-тести, які вмикаються прапорцями
+(`COLLECTOR_E2E_REQUIRED=1` у job `docker`), плюс Windows-специфічний
+`test_network_blocked.py`; до WP-01D вони не стосуються.
+
 ## Що не перевірено
 
+- **Liveness-маркер під реально заблокованим процесом у Docker.** Семантику порогу перевірено
+  в контейнері (свіжий маркер → exit 0, вік 60 с → exit 1, відсутній → exit 1), а
+  «заблокований event loop → unhealthy» — логікою (маркер оновлює саме сторож lease) і
+  integration-тестом оновлення mtime. Заморозити процес усередині контейнера не вдалося:
+  в slim-образі немає `ps`/`procps`, щоб знайти PID для `kill -STOP`. Крок лишається для
+  fault-тестів §16.3 (там же, де SIGTERM під активним task).
 - **`docker compose up -d --no-recreate --scale fetch-worker=4`** — scale-специфічна команда
   PR3 (`PoolController`, drain barrier, Compose adapter); у PR1 не виконувалась.
 - **SIGTERM у контейнері під активним task.** Сам SIGTERM у Docker перевірено вручну
@@ -400,11 +512,14 @@ exit=0
    останній спробі повертається в чергу через `recover_expired_leases` — тобто до
    `lease_seconds` (типово 60 с) затримки при плановому scale-down. Прибирає це
    `queue.release(job_id, owner)` — `docs/plan/deps/WP-01D-to-WP-01A.md` §3.
-4. **Два testcontainers-контейнери у повному локальному прогоні.** `tests/integration/scaling`
-   реекспортує фікстури `tests/integration/postgres` через завантаження модуля за шляхом
-   (`pytest_plugins` у не-кореневому conftest заборонений з pytest 7), тому session-scope
-   fixturedef-и різні. У CI сервер зовнішній (`COLLECTOR_TEST_POSTGRES_ADMIN_DSN`), тож
-   дублювання немає; локально це лише повільніше.
+4. **Фікстури PostgreSQL для `tests/integration/scaling` реекспортуються з каталогу WP-01A.**
+   `pytest_plugins` у не-кореневому conftest заборонений з pytest 7, тому модуль фікстур
+   береться за шляхом (а якщо pytest уже його імпортував — використовується той самий обʼєкт),
+   і контейнер із template-БД робиться спільним для обох каталогів memoized-обгортками.
+   Перевірено семплінгом `docker ps`: **1 контейнер** на процес (знахідка F6 gate 2 закрита).
+   Залишковий ризик — крихкість самої обгортки: якщо WP-01A перейменує `_start_container`
+   або `TemplateState`, тест-набір впаде на старті (гучно, не тихо), і обгортку треба буде
+   оновити разом із фікстурами.
 5. **`job_type` = ім'я ролі, поки немає доменних handler-ів.** `NoopHandler.job_types`
    повертає `(role,)`; справжні типи оголосять доменні handler-и у своєму `job_types`. Якщо
    домен обере інші назви і забуде оновити handler, worker просто нічого не claim-итиме —
@@ -430,5 +545,6 @@ exit=0
 `docs/plan/deps/WP-01D-to-WP-01A.md`:
 
 1. нових таблиць/колонок **не потрібно** (singleton — `pg_advisory_lock`);
-2. LOGIN-ролі per component і per-role DSN (§13) — середній пріоритет;
+2. LOGIN-ролі per component і per-role DSN (§13) — **високий пріоритет, блокер pilot**
+   (owner WP-01A PR2, заведено 2026-09-23; та сама класифікація, що в deps-файлі §2 і картці);
 3. `queue.release(job_id, owner)` без інкременту спроб і dead letter — низький пріоритет.
