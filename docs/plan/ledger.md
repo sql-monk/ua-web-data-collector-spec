@@ -19,7 +19,7 @@
 |---|---|---|
 | WP-01A | PR1 merged 758c68c (PR #3); PR2 pending | CI green (python, integration PostgreSQL 18, docker); ADR-0005, `docs/persistence/postgres.md` |
 | WP-01B | pending | після WP-01A |
-| WP-01D | docs (PR1) | пострев'ю changes_requested → закрито (liveness probe: healthcheck 6.07→0.44 с, стек 22 с); 873 + 33 integration |
+| WP-01D | PR1 merged f87df17 (PR #5); PR2 pending | CI green 6/6; ADR-0006, `docs/workers.md`, runbook worker-recovery |
 | WP-02 | pending | після WP-01A |
 | WP-04 | pending | після WP-01A |
 
