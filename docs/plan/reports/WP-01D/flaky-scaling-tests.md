@@ -82,7 +82,7 @@ worker.task_done      disposition=complete
 
 Це порушує контракт R-57, як його формулює картка: «барʼєр зупиняє claim». Контролер PR3,
 побачивши барʼєр і `active_leases = 0` у heartbeat, міг би вважати instance порожнім, хоча
-в'язкий claim ось-ось візьме job.
+запізнілий claim ось-ось візьме job.
 
 **Фікс (runtime).** `_claim_allowed()` у **тій самій транзакції**, що й claim, читає власний
 рядок `worker_instances` під `FOR SHARE` і не claim-ить, якщо `drain_requested_at` задано або
