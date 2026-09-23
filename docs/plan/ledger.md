@@ -19,7 +19,7 @@
 |---|---|---|
 | WP-01A | PR1 merged 758c68c (PR #3); PR2 pending | CI green (python, integration PostgreSQL 18, docker); ADR-0005, `docs/persistence/postgres.md` |
 | WP-01B | pending | після WP-01A |
-| WP-01D | testing (PR1) | картка `docs/plan/cards/WP-01D.md`; 793 + 13 integration; dep до WP-01A: LOGIN-ролі |
+| WP-01D | testing pass → fix (PR1) | 817 + 27 integration; F1 high (superuser у runtime, §13) → блокер pilot, owner WP-01A PR2 |
 | WP-02 | pending | після WP-01A |
 | WP-04 | pending | після WP-01A |
 
@@ -58,4 +58,4 @@
 | `WP-00-to-repo-config.md` | WP-00 PR1 | orchestrator | resolved — MD024 siblings_only у `.markdownlint-cli2.jsonc` (main) |
 | `WP-01C-to-WP-00.md` | WP-01C | WP-00 | resolved — п.1–3 застосовано у `wp/01c-contracts`; Dockerfile COPY реєстру → PR2 |
 | `WP-01A-to-WP-00.md` | WP-01A | WP-00 | resolved — застосовано в WP-01A PR1 і WP-00 PR2 |
-| `WP-01D-to-WP-01A.md` | WP-01D | WP-01A | open — per-component LOGIN-ролі + per-role DSN (§13); бажаний `queue.release` |
+| `WP-01D-to-WP-01A.md` | WP-01D | WP-01A | open (пріоритет) — LOGIN-ролі per component + per-role DSN (§13, рантайм-доказ: усі 8 процесів superuser); `queue.release` без інкременту attempt |
