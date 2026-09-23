@@ -8,7 +8,7 @@
 | Dependency, які закриває | `docs/plan/deps/WP-01D-to-WP-01A.md` §2 (LOGIN-ролі + per-role DSN), §3/§5 (`queue.release`), §4 (`command_timeout`) |
 | Розділи ТЗ | §5.5, §7.3 (кроки 2, 4, 5), §9.1 (рядки PR2), §9.3, §9.5, §10 п.5, п.8, п.10, §13, §15, §18; REVIEW.md R-27, R-36, R-38/R-41, R-42 |
 | Середовище | Windows 11, uv, CPython 3.13.9, PostgreSQL 18 у Docker (`postgres:18@sha256:86c951e0…`, контейнер `wp01a-pg`, loopback-порт 55433) |
-| Commits | `c5f6f70` WIP (попередня сесія), `96c1a40` fix схеми/репозиторіїв, `753d0d1` LOGIN-ролі + GRANT PR2, `e5b047d` тести PR2, `2d06588` dependency-відповіді, + фінальний коміт (re-attach `fetches_default`, §5 dependency WP-01D, цей звіт); після gate 2 — `fix(wp-01a)` (F-1…F-3); після gate 3 — `docs(wp-01a)` звіти рев'ю, `fix(wp-01a)` (CR-1…CR-10, S-1…S-6) |
+| Commits | `c5f6f70` WIP (попередня сесія), `96c1a40` fix схеми/репозиторіїв, `753d0d1` LOGIN-ролі + GRANT PR2, `e5b047d` тести PR2, `2d06588` dependency-відповіді, + фінальний коміт (re-attach `fetches_default`, §5 dependency WP-01D, цей звіт); після gate 2 — `fix(wp-01a)` (F-1…F-3); після gate 3 — `docs(wp-01a)` звіти рев'ю, `fix(wp-01a)` (CR-1…CR-10, S-1…S-6); після gate 4 — `fix(wp-01a)` (SR-1, SR-2, SR-5, N-1…N-5) |
 
 ## Що зроблено
 
@@ -615,4 +615,114 @@ $ uv run pytest -m "not live"
 exit=0
 collected 1000 items
 =========== 977 passed, 23 skipped, 8 warnings in 276.00s (0:04:36) ===========
+```
+
+## Fixes after gate 4
+
+Звіти: `docs/plan/reports/WP-01A/code-review-pr2-r2.md` (gate 3', approve з 5 low) і
+`docs/plan/reports/WP-01A/spec-review-pr2.md` (gate 4, changes_requested). Обидва скопійовано
+як є окремим комітом. ADR-0007 і правки ТЗ/картки/ledger/traceability (SR-3, SR-6, текст
+D-1/D-2) — за docs-writer, тут не робились.
+
+| Знахідка | Виправлення | Тест / перевірка |
+|---|---|---|
+| SR-1 (high) | Unit-тест S-5 будує синтетичне значення в рантаймі (`"-".join(("marker", secrets.token_hex(8)))`), тож gitleaks його більше не матчить. Історія `bad6a25` не переписується (рішення оркестратора): у корені створено `.gitleaksignore` з fingerprint `bad6a259…:tests/unit/persistence/postgres/test_role_logins.py:generic-api-key:126` і коментарем. Цей виняток з owned files зафіксовано в `WP-01A-to-WP-00.md` §5 рядком «resolved by orchestrator» | `gitleaks git --log-opts="main..HEAD"` → `no leaks found` (вивід нижче) |
+| SR-2 (medium) | `record_parse_result` → `_require_consistent_lineage`: `attempt.fetch_id` обов'язковий. `fetch_id`, `raw_sha256`, `parser_version` і `domain` в `attempt` та `artifact_ref` мають збігатися, інакше `InvalidValueError` до першого запису. Фікстура `conftest.attempt_record(ref)` будує узгоджений attempt | `test_projection.py::test_attempt_and_artifact_lineage_must_describe_one_parse[5 кейсів]` (жодного рядка не записано) |
+| SR-5 (low) | docstring `partitions.py`: PK `raw_objects` — UUID `raw_object_id`, плюс `UNIQUE (sha256)` | — (текст) |
+| N-1 (low) | не код: `docs/plan/deps/WP-01A-to-WP-02.md` — ключ normalized artifact як функція `(sha256, entity_uuid)`; `fetch_id` — справжній `fetches.fetch_id` кожного запиту; `target_schema_version` не входить у `parse_key`, тож зміна схеми означає зміну `parser_version` | — |
+| N-2 (low) | не код: `WP-01A-to-WP-01D.md` §7 — publisher loop має рахувати доставки або обробляти crash до `mark_failed` (poison event); інакше dependency-запит до WP-01A на лічильник видач | — |
+| N-3 (low) | `oldest_unpublished_age(topics=(DOMAIN_TOPIC,))` виключає опубліковані й припарковані рядки — той самий предикат, що в `count_backlog` | `test_outbox_entities.py::test_oldest_unpublished_age_matches_backlog_scope` |
+| N-4 (low) | `collector_projector`: `REVOKE UPDATE ON projection_tasks` + column-level UPDATE (`status`, `lease_owner`, `lease_expires_at`, `leased_at`, `not_before`, `attempt`, `finished_at`, `last_error_code`, `last_error_message`, `updated_at`). Колонки звірено з фактичними UPDATE у claim/heartbeat/retry/release/ack/quarantine | `test_role_logins.py::test_projector_cannot_rewrite_task_identity_columns` (`parse_key`, `projection_version`, `artifact_id`, `entity_uuid`, `parse_attempt_id` → permission denied); `::test_each_component_runs_…` (реальний claim + ack під projector-ом) |
+| N-5 (low) | До `PRIVILEGED_BUILTIN_ROLES` додано `pg_read_all_data` і `pg_maintain` (є в PG 18). `privileged_memberships` тепер вважає привілейованими також ролі з `rolcreatedb`/`rolreplication`, з урахуванням непрямого членства. `verify_runtime_login` відмовляє і за власного `CREATEDB`/`REPLICATION` | `::test_gate4_privileged_memberships_are_refused[pg_read_all_data, pg_maintain, createdb-member, replication-member]`, `::test_runtime_login_with_own_createdb_is_refused` |
+
+Ризики після gate 4:
+
+- **N-1 / D-2 тримаються на дисципліні parser-а (WP-02):**
+  - якщо ключ artifact не є функцією `(sha256, entity_uuid)`, у store лишаються об'єкти без
+    посилань, яких orphan-запит не бачить;
+  - спільний `fetch_id` для різних fetch-ів зробить новий стан «повтором»;
+  - зміна схеми без зміни `parser_version` не дасть reprojection.
+
+  Запит — `WP-01A-to-WP-02.md`.
+- **N-2:** poison event, що валить publisher до `mark_failed`, крутиться нескінченно до
+  рішення WP-01D (`WP-01A-to-WP-01D.md` §7).
+- **`.gitleaksignore`:** fingerprint прив'язаний до коміту `bad6a25`; якщо гілку колись
+  перебазують, його треба оновити.
+
+### Команди після виправлень gate 4
+
+```text
+$ uv sync --frozen
+Checked 66 packages in 5ms
+exit=0
+$ uv run ruff check .
+All checks passed!
+exit=0
+$ uv run ruff format --check .
+245 files already formatted
+exit=0
+$ uv run mypy src
+Success: no issues found in 77 source files
+exit=0
+$ gitleaks git --log-opts="main..HEAD"
+6:22PM INF 12 commits scanned.
+6:22PM INF scanned ~508572 bytes (508.57 KB) in 432ms
+6:22PM INF no leaks found
+exit=0
+
+# порожня БД alembic_check, COLLECTOR_POSTGRES_DSN=postgresql://collector_test_admin:***@127.0.0.1:55433/alembic_check
+$ uv run alembic upgrade head
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001_control_queue, WP-01A PR1: control plane, job queue, origin limiter, worker pools, audit log.
+INFO  [alembic.runtime.migration] Running upgrade 0001_control_queue -> 0002_claim_index, WP-01A PR1 (gate 2, I-2): partial index під hot path `claim` (§7.2).
+INFO  [alembic.runtime.migration] Running upgrade 0002_claim_index -> 0003_default_partition, WP-01A PR1 (gate 3): DEFAULT-партиція `audit_log` (M-5) і намір drain (M-2).
+INFO  [alembic.runtime.migration] Running upgrade 0003_default_partition -> 0004_artifacts_projection, WP-01A PR2: artifacts, upload claims, projection tasks/acks, outboxes, entity index.
+INFO  [alembic.runtime.migration] Running upgrade 0004_artifacts_projection -> 0005_entity_version_guard, WP-01A PR2 (gate 2, F-1): trigger-guard — версії `entity_index` ніколи не зменшуються.
+exit=0
+$ uv run alembic check
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+No new upgrade operations detected.
+exit=0
+```
+
+```text
+$ uv run pytest -m integration tests/integration/postgres
+collected 209 items
+tests\integration\postgres\test_adversarial.py ..................        [  8%]
+tests\integration\postgres\test_cli_db.py ......                         [ 11%]
+tests\integration\postgres\test_control_plane.py ....                    [ 13%]
+tests\integration\postgres\test_control_plane_audit.py ...............   [ 20%]
+tests\integration\postgres\test_fetch_partitions.py ...                  [ 22%]
+tests\integration\postgres\test_limiter.py .........                     [ 26%]
+tests\integration\postgres\test_migrations.py .............              [ 32%]
+tests\integration\postgres\test_outbox_entities.py ........              [ 36%]
+tests\integration\postgres\test_pools.py ...........                     [ 41%]
+tests\integration\postgres\test_pr2_adversarial.py ................      [ 49%]
+tests\integration\postgres\test_projection.py ....................       [ 58%]
+tests\integration\postgres\test_queue.py .........                       [ 63%]
+tests\integration\postgres\test_queue_release.py ..                      [ 64%]
+tests\integration\postgres\test_role_connections.py .................    [ 72%]
+tests\integration\postgres\test_role_logins.py .................         [ 80%]
+tests\integration\postgres\test_roles.py .....                           [ 82%]
+tests\integration\postgres\test_schema_contract.py ..................... [ 92%]
+....                                                                     [ 94%]
+tests\integration\postgres\test_upload_claims.py ...........             [100%]
+======================= 209 passed in 349.12s (0:05:49) =======================
+exit=0
+$ uv run pytest -m "not live"
+collected 1012 items
+FAILED tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising
+====== 1 failed, 988 passed, 23 skipped, 8 warnings in 490.48s (0:08:10) ======
+exit=1
+```
+
+Перший прогін `pytest -m "not live"` вище впав на тесті WP-01D `test_self_fencing_fires_when_the_database_hangs_without_raising`. Це той самий нестабільний тест, що відтворювався й на базовому `88323ab` (розділ «Ризики», п.3). PG-частина (209 тестів) зелена. Повторний прогін на тому самому коді:
+
+```text
+$ uv run pytest -m "not live"
+collected 1012 items
+=========== 989 passed, 23 skipped, 8 warnings in 489.34s (0:08:09) ===========
+exit=0
 ```
