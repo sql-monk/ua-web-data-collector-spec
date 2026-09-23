@@ -1,5 +1,7 @@
 # Ledger виконання
 
+> Точка відновлення після паузи — `docs/plan/HANDOFF.md`.
+
 Стани: `ready` (картка є, залежності `merged`) · `in_progress` · `testing` · `code_review` · `spec_review` · `docs` · `merged <sha>` · `blocked <причина>` · `pending` (картки ще немає).
 
 Оновлюється оркестратором після кожного gate. Звіти етапів — `docs/plan/reports/<WP>/`.
