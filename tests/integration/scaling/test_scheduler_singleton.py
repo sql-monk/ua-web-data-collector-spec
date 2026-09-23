@@ -61,12 +61,23 @@ async def terminate_backend(engine: AsyncEngine, pid: int | None) -> None:
         await connection.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
 
 
-async def test_two_schedulers_keep_exactly_one_active_and_standby_takes_over(
+async def test_two_schedulers_keep_exactly_one_active_and_lease_is_retaken_after_a_kill(
     pg_engine: AsyncEngine,
     pg_sessions: async_sessionmaker[AsyncSession],
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
 ) -> None:
+    """Рівно один активний; після вбивства його сесії lease знову бере рівно один процес.
+
+    wp-tester: раніше тест вимагав, щоб lease після `pg_terminate_backend` перебрав **саме
+    резервний** процес — це хибне припущення і воно робило тест flaky (5 падінь із 14 прогонів
+    на одному хості; у логах видно `scheduler.lease_lost` → `scheduler.activated` того самого
+    процесу з новим `backend_pid`). Ні §7.5, ні вимога 6 картки не обіцяють, хто саме виграє
+    гонку за звільнений `pg_try_advisory_lock`: обидва процеси пробують із тим самим інтервалом,
+    і колишній активний має рівні шанси. Контракт, який справді треба тримати, — «активний
+    рівно один» і «без підтвердженого lease планування зупинено», і саме він тепер і
+    перевіряється (інваріант «не двоє активних» — на кожному кроці очікування, а не разово).
+    """
     calls_a: list[datetime] = []
     calls_b: list[datetime] = []
     first = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=counting_tick(calls_a))
@@ -77,25 +88,44 @@ async def test_two_schedulers_keep_exactly_one_active_and_standby_takes_over(
     await wait_for(lambda: first.is_active or second.is_active, what="хтось узяв lease")
     active, standby = (first, second) if first.is_active else (second, first)
 
+    def never_both_active() -> bool:
+        assert not (first.is_active and second.is_active), "двох активних не буває"
+        return True
+
     await wait_for(
-        lambda: standby.acquire_attempts >= 3, what="резервний scheduler пробує взяти lease"
+        lambda: standby.acquire_attempts >= 3 and never_both_active(),
+        what="резервний scheduler пробує взяти lease",
     )
     assert not standby.is_active, "другий instance не стає активним, а чекає"
     assert standby.ticks == 0, "резервний нічого не планує"
     await wait_for(lambda: active.ticks >= 2, what="активний scheduler планує")
 
-    await terminate_backend(pg_engine, active.lease.backend_pid)
-    await wait_for(lambda: standby.is_active, what="резервний перебрав lease після смерті першого")
-    await wait_for(lambda: active.lease_losses >= 1, what="перший помітив втрату lease")
-    assert not (first.is_active and second.is_active), "двох активних не буває"
-
+    killed_pid = active.lease.backend_pid
+    await terminate_backend(pg_engine, killed_pid)
+    await wait_for(lambda: active.lease_losses >= 1, what="колишній активний помітив втрату lease")
     frozen = active.ticks
-    attempts = active.acquire_attempts
     await wait_for(
-        lambda: active.acquire_attempts >= attempts + 3, what="колишній активний лише чекає"
+        lambda: (first.is_active or second.is_active) and never_both_active(),
+        what="звільнений lease знову взято — рівно одним процесом",
     )
-    assert active.ticks == frozen, "без lease планування припинено"
-    await wait_for(lambda: standby.ticks >= 1, what="новий активний планує")
+
+    # Гонку за звільнений lock може виграти будь-хто — і колишній активний теж (саме це
+    # робило тест flaky). Тримаємо те, що обіцяє контракт: переможець один, і той, хто lease
+    # не має, нічого не планує.
+    winner = first if first.is_active else second
+    loser = second if winner is first else first
+    assert winner.lease.backend_pid not in (None, killed_pid), "lease тримає вже нова сесія"
+    assert frozen == active.ticks or winner is active, "без lease колишній активний не планував"
+
+    loser_ticks = loser.ticks
+    attempts = loser.acquire_attempts
+    await wait_for(
+        lambda: loser.acquire_attempts >= attempts + 3 and never_both_active(),
+        what="процес без lease лише повторює спроби",
+    )
+    assert loser.ticks == loser_ticks, "без lease планування не відбувається"
+    ticks = winner.ticks
+    await wait_for(lambda: winner.ticks > ticks, what="активний планує далі")
 
     first.request_stop()
     second.request_stop()
