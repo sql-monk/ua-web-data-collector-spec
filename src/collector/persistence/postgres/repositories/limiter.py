@@ -31,6 +31,7 @@ from collector.contracts import new_entity_id
 from collector.persistence.postgres.clock import resolve_now
 from collector.persistence.postgres.errors import NotFoundError
 from collector.persistence.postgres.models import OriginRateBucket, OriginRatePermit
+from collector.persistence.postgres.repositories.audit import append_audit, require_audit_context
 
 TOKEN_QUANTUM = Decimal("0.0001")
 DenyReason = Literal["blocked", "rate", "concurrency"]
@@ -250,7 +251,9 @@ async def block_origin(
     origin: str,
     until: datetime,
     *,
+    actor: str,
     reason: str,
+    request_id: str | None = None,
     now: datetime | None = None,
 ) -> OriginRateBucket:
     """429/`Retry-After`/challenge: жоден permit до `until` (не скорочує вже довший block).
@@ -261,8 +264,13 @@ async def block_origin(
     `block_origin` (§7.6/FR-033 ввічливість після 429). Активні permits не відкликаються:
     їхній release/expiry обробляється як звичайно.
 
+    Audit (§13) пишеться в тій самій транзакції і **лише коли блокування справді подовжено**:
+    повторний 429 усередині вже чинного вікна нічого не змінює, тож і сліду не лишає.
+    Зупинка цілого origin — рішення, яке оператор має бачити з причиною і часом зняття.
+
     Transaction boundary: викликач.
     """
+    require_audit_context(actor, reason)
     current = resolve_now(now)
     bucket = await session.scalar(
         select(OriginRateBucket).where(OriginRateBucket.origin == origin).with_for_update()
@@ -271,6 +279,7 @@ async def block_origin(
         msg = f"origin bucket {origin!r} не знайдено"
         raise NotFoundError(msg)
     if bucket.blocked_until is None or bucket.blocked_until < until:
+        previous_until = bucket.blocked_until
         bucket.blocked_until = until
         bucket.block_reason = reason[:256]
         bucket.available_tokens = Decimal(0)
@@ -278,6 +287,19 @@ async def block_origin(
         bucket.revision += 1
         bucket.updated_at = current
         await session.flush()
+        await append_audit(
+            session,
+            actor=actor,
+            action="origin.block",
+            resource_type="origin_rate_bucket",
+            resource_id=origin,
+            before={
+                "blocked_until": previous_until.isoformat() if previous_until is not None else None
+            },
+            after={"blocked_until": until.isoformat(), "reason": reason[:256]},
+            request_id=request_id,
+            now=current,
+        )
     return bucket
 
 

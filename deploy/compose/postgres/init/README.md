@@ -17,6 +17,18 @@
 (втрата даних), або `collector db roles` проти живого кластера (ідемпотентно, і саме так це
 робить one-shot `migrate-postgres`).
 
-Паролів у скриптах немає: dev-login (`POSTGRES_USER`) — superuser з compose env/secret;
-runtime-login-користувачі створює оператор як членів ролей
-(`CREATE ROLE ... LOGIN IN ROLE collector_fetcher`).
+Паролів у скриптах немає: dev-login (`POSTGRES_USER`) — superuser з compose env/secret і
+лише для міграцій. Runtime-ролі стають LOGIN-ролями командою (WP-01A PR2, §13):
+
+```bash
+collector db roles --with-login --secrets-dir /run/secrets   # або $COLLECTOR_POSTGRES_ROLE_SECRETS_DIR
+```
+
+Вона читає DSN-секрети компонентів `postgres_dsn_<component>` (`scheduler`, `fetcher`,
+`parser`, `projector`, `translation`, `api_ro`, `export_ro`), перевіряє, що користувач у
+кожному DSN — саме `collector_<component>`, і виконує `ALTER ROLE … LOGIN PASSWORD
+'<SCRAM-SHA-256 verifier>'` (відкритий пароль на сервер не передається). Бракує хоч одного
+секрету — exit 1 без змін. Повторний запуск ідемпотентний; `collector db roles` без
+`--with-login` уже видані логіни не вимикає. Кожен сервіс після цього монтує **свій**
+`postgres_dsn_<component>` як `COLLECTOR_POSTGRES_DSN_FILE` (генерація секретів і compose —
+dependency-запит `docs/plan/deps/WP-01A-to-WP-00.md` §4). `collector_migrate` LOGIN не отримує.

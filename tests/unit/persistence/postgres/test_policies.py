@@ -106,3 +106,10 @@ def test_pool_desired_state_validation_accepts_scale_to_zero() -> None:
     PoolDesiredState(
         desired_replicas=0, desired_concurrency=1, max_replicas=4, mode="autoscale"
     ).validate()
+
+
+@pytest.mark.parametrize("attempt", [1025, 2000, 10**6])
+def test_backoff_exponent_is_capped_before_power(attempt: int) -> None:
+    """Gate 3, CR-3: `2.0 ** 1025` — OverflowError; cap до піднесення віддає `maximum`."""
+    policy = BackoffPolicy()
+    assert policy.delay_for(attempt, random.Random(1)) == policy.maximum  # noqa: S311

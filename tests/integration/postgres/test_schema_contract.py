@@ -15,12 +15,25 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from collector.contracts.enums import DataDomain, RouteState, SourceState
+from collector.contracts.enums import (
+    ContentAccess,
+    DataDomain,
+    FetchOutcome,
+    RouteState,
+    SourceState,
+    UploadClaimStatus,
+)
+from collector.persistence.postgres.models.artifacts import PARSE_OUTCOMES
 from collector.persistence.postgres.models.limiter import PERMIT_RELEASE_REASONS
+from collector.persistence.postgres.models.outbox import OUTBOX_TOPICS
 from collector.persistence.postgres.models.pools import (
     INSTANCE_STATUSES,
     POOL_MODES,
     SCALE_COMMAND_STATUSES,
+)
+from collector.persistence.postgres.models.projection import (
+    CLAIMABLE_PROJECTION_STATUSES,
+    PROJECTION_TASK_STATUSES,
 )
 from collector.persistence.postgres.models.queue import (
     CLAIMABLE_JOB_STATUSES,
@@ -53,6 +66,24 @@ CHECK_CONTRACTS: list[tuple[str, str, frozenset[str]]] = [
         "ck_origin_rate_permits_release_reason",
         frozenset(PERMIT_RELEASE_REASONS),
     ),
+    # PR2
+    ("fetches", "ck_fetches_outcome", frozenset(o.value for o in FetchOutcome)),
+    ("fetches", "ck_fetches_content_access", frozenset(a.value for a in ContentAccess)),
+    ("parse_attempts", "ck_parse_attempts_outcome", frozenset(PARSE_OUTCOMES)),
+    ("parse_attempts", "ck_parse_attempts_domain", frozenset(d.value for d in DataDomain)),
+    (
+        "artifact_upload_claims",
+        "ck_artifact_upload_claims_status",
+        frozenset(s.value for s in UploadClaimStatus),
+    ),
+    (
+        "normalized_artifacts",
+        "ck_normalized_artifacts_domain",
+        frozenset(d.value for d in DataDomain),
+    ),
+    ("projection_tasks", "ck_projection_tasks_status", frozenset(PROJECTION_TASK_STATUSES)),
+    ("entity_index", "ck_entity_index_domain", frozenset(d.value for d in DataDomain)),
+    ("outbox_events", "ck_outbox_events_topic", frozenset(OUTBOX_TOPICS)),
 ]
 
 
@@ -95,6 +126,21 @@ async def test_claim_index_predicate_in_database_matches_claimable_statuses(
     assert indexdef is not None
     where = str(indexdef).split(" WHERE ", 1)[1]
     assert set(_QUOTED.findall(where)) == set(CLAIMABLE_JOB_STATUSES), indexdef
+    assert "priority DESC" in str(indexdef)
+
+
+async def test_projection_claim_index_predicate_matches_claimable_statuses(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Те саме для `ix_projection_tasks_claimable_order` (hot path `claim_projection_tasks`)."""
+    async with pg_engine.connect() as conn:
+        indexdef = await conn.scalar(
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"),
+            {"name": "ix_projection_tasks_claimable_order"},
+        )
+    assert indexdef is not None
+    where = str(indexdef).split(" WHERE ", 1)[1]
+    assert set(_QUOTED.findall(where)) == set(CLAIMABLE_PROJECTION_STATUSES), indexdef
     assert "priority DESC" in str(indexdef)
 
 

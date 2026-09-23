@@ -23,19 +23,16 @@
 
 CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (build + SBOM + trivy обох образів + clean-host `up --wait` + e2e), `pre-commit`, `gitleaks`.
 
-## 3. Незавершене — WP-01A PR2
+## 3. WP-01A PR2 — на рев'ю/CI
 
-- Branch `wp/01a-2-artifacts-projection`, worktree `.worktrees/wp-01a`, запушений на origin.
-- Останній коміт — `c5f6f70 wip(wp-01a): ... stopped mid-implementation`. **Робота обірвана посеред реалізації** за запитом користувача, не через дефект.
-- Створено, але **не перевірено жодною командою**: `migrations/postgres/versions/20260923_0004_artifacts_projection.py`, моделі `artifacts.py`/`outbox.py`/`projection.py`, репозиторії `artifacts.py`/`entities.py`/`outbox.py`/`projection.py`, правки `errors.py`, `partitions.py`, `limiter.py`, `pools.py`, `queue.py`, `sources.py`.
-- **Не зроблено:** LOGIN-ролі per component + per-role DSN, `queue.release`, транзакційний audit для control-plane операцій, тести, звіт, прогін команд.
-- Картка: `docs/plan/cards/WP-01A.md`, розділ PR2 (там уже враховані обидва dependency-запити від WP-01D).
-
-Рішення при відновленні: або продовжити з WIP-коміту, або почати PR2 з чистого аркуша від `main` — WIP не проходив жодного gate, тому довіряти йому не можна; безпечніше перечитати діф і переписати те, що викликає сумнів.
+- Branch `wp/01a-2-artifacts-projection`, worktree `.worktrees/wp-01a`, PR #6.
+- Реалізацію з WIP `c5f6f70` доведено до кінця і пройдено всі gates: testing pass, code review r2 approve, security approve, spec review r2 accept, docs (ADR-0007, правка ТЗ §9.1). Звіти — `docs/plan/reports/WP-01A/*-pr2*.md`.
+- Злиття — лише merge-commit (без squash/rebase): `.gitleaksignore` прив'язаний до SHA `bad6a25`.
+- Лишається поза PR2: per-role DSN у runtime (`deps/WP-01A-to-WP-00.md` §4, `deps/WP-01A-to-WP-01D.md` §1) — блокер pilot; вимоги до parser — `deps/WP-01A-to-WP-02.md`.
 
 ## 4. Наступний крок
 
-1. **WP-01A PR2** (у роботі) — artifacts, upload claims, projection tasks/acks, outboxes, entity index + LOGIN-ролі + `queue.release` + транзакційний audit. Закриває блокер pilot (§13) і відкриває WP-01B.
+1. **WP-01A PR2** (PR #6, очікує CI/merge) — artifacts, upload claims, projection tasks/acks, outboxes, entity index + LOGIN-ролі + `queue.release` + транзакційний audit. Закриває блокер pilot (§13) і відкриває WP-01B.
 2. Далі паралельно: **WP-01B** (MongoDB projector, receipts, reconciler, compaction — головний споживач PR2), **WP-02** (fetch core), **WP-04** (translation core). Карток для них ще немає — писати за зразком WP-01A/WP-01D.
 3. Потім хвиля 2: WP-03, WP-05, WP-07, WP-09.
 
@@ -43,9 +40,9 @@ CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (buil
 
 | # | Що | Owner | Стан |
 |---|---|---|---|
-| 1 | Runtime-процеси ходять у PostgreSQL під superuser-роллю `collector` (ролі §13 створені NOLOGIN) — **блокер pilot** | WP-01A PR2 | dependency `docs/plan/deps/WP-01D-to-WP-01A.md`, тест-вартовий у WP-01D падає з появою LOGIN-ролі |
-| 2 | `queue.release` без інкременту `attempt` для планового drain | WP-01A PR2 | той самий deps-файл §3, §5 |
-| 3 | `command_timeout` в engine — зміна у файлі WP-01A, потребує підтвердження owner | WP-01A PR2 | deps §4 |
+| 1 | Runtime-процеси ходять у PostgreSQL під superuser-роллю `collector` (ролі §13 створені NOLOGIN) — **блокер pilot** | WP-01D / WP-00 | WP-01A PR2 зробив LOGIN-ролі (`db roles --with-login`); лишилось перемкнути сервіси — `deps/WP-01A-to-WP-00.md` §4, `deps/WP-01A-to-WP-01D.md` §1 |
+| 2 | `queue.release` без інкременту `attempt` для планового drain | WP-01A PR2 | зроблено (`queue.release`); перехід runtime — WP-01D |
+| 3 | `command_timeout` в engine — зміна у файлі WP-01A, потребує підтвердження owner | WP-01A PR2 | підтверджено |
 | 4 | Role-wide drain barrier (зараз per-instance), origin limiter runtime, Compose/Swarm adapters | WP-01D PR2/PR3 | картка WP-01D |
 | 5 | TOCTOU у scheduler-тіку (нешкідливо для ідемпотентного maintenance) | WP-01D | «Відомі ризики» картки |
 | 6 | 2 unfixed HIGH CVE (perl, zlib) у базовому образі; 1 HIGH у GUI-образі | WP-13 | датований risk acceptance в ADR-0002, тригер перегляду — merge WP-02 |

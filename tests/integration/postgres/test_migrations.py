@@ -42,6 +42,17 @@ EXPECTED_TABLES = {
     "scale_commands",
     "dead_letters",
     "audit_log",
+    # PR2
+    "fetches",
+    "raw_objects",
+    "parse_attempts",
+    "artifact_upload_claims",
+    "normalized_artifacts",
+    "projection_tasks",
+    "projection_acknowledgements",
+    "entity_index",
+    "change_events",
+    "outbox_events",
 }
 ALLOWED_JSONB = {
     ("crawl_jobs", "args"),
@@ -108,6 +119,9 @@ async def test_models_match_card_contracts(pg_engine: AsyncEngine) -> None:
         "ix_worker_instances_role_status_last_heartbeat_at",
         "ix_audit_log_created_at",
         "uq_crawl_runs_running_full",
+        "ix_projection_tasks_status_not_before_priority",
+        "ix_outbox_events_published_at_available_at",
+        "ix_entity_index_domain_confirmed_version",
     } <= indexes
 
 
@@ -115,7 +129,11 @@ async def test_month_partitions_are_created_and_idempotent(pg_engine: AsyncEngin
     async with pg_engine.begin() as conn:
         created = await ensure_month_partitions(conn, months_ahead=2, start=date(2027, 11, 1))
         again = await ensure_month_partitions(conn, months_ahead=2, start=date(2027, 11, 1))
-    assert created == ["audit_log_y2027m11", "audit_log_y2027m12", "audit_log_y2028m01"]
+    assert created == [
+        f"{table}_y{period}"
+        for table in ("audit_log", "fetches")
+        for period in ("2027m11", "2027m12", "2028m01")
+    ]
     assert again == []
 
 
@@ -290,5 +308,37 @@ async def test_default_partition_from_bare_upgrade_matches_runtime_helper(
         assert [(name, bound) for name, bound in partitions] == [
             (default_partition_name("audit_log"), "DEFAULT")
         ]
+    finally:
+        await engine.dispose()
+
+
+async def test_fetches_default_partition_survives_downgrade_and_is_reattached(
+    pg_empty_database: PostgresSettings,
+) -> None:
+    """Downgrade `0004` від'єднує `fetches_default` (рядки лишаються), повторний upgrade приєднує
+    її назад: `fetches` не лишається без DEFAULT, а lineage-рядок знову видно через parent."""
+    engine = create_async_engine(pg_empty_database.url, poolclass=None)
+    insert = text(
+        "INSERT INTO fetches (fetch_id, fetched_at, requested_url, outcome) "
+        "VALUES (gen_random_uuid(), '2031-01-01T00:00:00+00', 'https://x.test/', 'success')"
+    )
+    is_default_partition = text(
+        "SELECT c.relispartition FROM pg_class c WHERE c.relname = 'fetches_default'"
+    )
+    try:
+        async with engine.begin() as conn:
+            await upgrade_to_head(conn)
+            await conn.execute(insert)  # партицій місяців немає → рядок у DEFAULT
+        async with engine.begin() as conn:
+            await downgrade_to_base(conn)
+        async with engine.connect() as conn:
+            assert await conn.scalar(is_default_partition) is False
+            assert await conn.scalar(text("SELECT count(*) FROM fetches_default")) == 1
+        async with engine.begin() as conn:
+            await upgrade_to_head(conn)
+        async with engine.connect() as conn:
+            assert await conn.scalar(is_default_partition) is True
+            assert await conn.scalar(text("SELECT count(*) FROM fetches")) == 1
+            assert await check_no_drift(conn) == []
     finally:
         await engine.dispose()

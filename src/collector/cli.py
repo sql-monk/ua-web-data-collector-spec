@@ -12,7 +12,9 @@
   і місячні партиції; DSN з `COLLECTOR_POSTGRES_DSN` або `COLLECTOR_POSTGRES_DSN_FILE`
   (Docker secret; у Compose це one-shot `migrate-postgres`). Замінила TCP-перевірку
   «no migrations yet; owner WP-01A» з WP-00 PR2;
-- `db roles [--sql PATH]` — реальна (WP-01A): ролі БД §13 і GRANT, ідемпотентно;
+- `db roles [--sql PATH] [--with-login [--secrets-dir DIR]]` — реальна (WP-01A): ролі БД §13 і
+  GRANT, ідемпотентно; `--with-login` (PR2) вмикає LOGIN runtime-ролей з паролями з
+  DSN-секретів `postgres_dsn_<component>`;
 - `db ensure-mongo` — реально ініціалізує single-member replica set (ідемпотентно; WP-00 PR2);
   `--validators`/`--indexes` лишаються стабом WP-01B (після ініціалізації RS → код 2);
 - `api` — запускає uvicorn зі стабом `GET /api/v1/health/components`
@@ -331,20 +333,60 @@ def db_roles(
             "--sql", help="Альтернативний SQL-файл ролей (типово — вбудований roles.sql)."
         ),
     ] = None,
+    with_login: Annotated[
+        bool,
+        typer.Option(
+            "--with-login",
+            help=(
+                "Увімкнути LOGIN runtime-ролей (§13); пароль кожної — з DSN-секрету "
+                "postgres_dsn_<component> у --secrets-dir."
+            ),
+        ),
+    ] = False,
+    secrets_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--secrets-dir",
+            help=(
+                "Каталог DSN-секретів ролей (типово $COLLECTOR_POSTGRES_ROLE_SECRETS_DIR "
+                "або /run/secrets)."
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """Створює ролі БД §13 і застосовує GRANT (ідемпотентно; після `db migrate`)."""
+    """Створює ролі БД §13 і застосовує GRANT (ідемпотентно; після `db migrate`).
+
+    `--with-login` додатково робить runtime-ролі LOGIN-ролями: секрети читаються **до**
+    з'єднання з БД, тож відсутній або чужий DSN-секрет дає exit 1 без жодних змін.
+    """
     from collector.persistence.postgres.ops import apply_database_roles
-    from collector.persistence.postgres.roles import ROLE_NAMES, default_roles_sql_path
+    from collector.persistence.postgres.roles import (
+        ROLE_NAMES,
+        RoleLoginError,
+        default_roles_sql_path,
+        load_role_logins,
+        role_secrets_dir,
+    )
 
     settings = _postgres_settings()
     path = sql or default_roles_sql_path()
     if not path.is_file():
         typer.echo(f"SQL-файл ролей не знайдено: {path}", err=True)
         raise typer.Exit(code=1)
-    _run_async(apply_database_roles(settings, sql_path=path))
+    try:
+        logins = (
+            load_role_logins(secrets_dir or role_secrets_dir(os.environ)) if with_login else None
+        )
+        enabled = _run_async(apply_database_roles(settings, sql_path=path, logins=logins))
+    except RoleLoginError as exc:
+        # Повідомлення RoleLoginError не містять DSN/паролів — лише роль і причину.
+        typer.echo(f"role logins: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(
         f"roles applied to {settings.redacted_dsn} from {path.name}: {', '.join(ROLE_NAMES)}"
     )
+    if enabled:
+        typer.echo(f"login enabled: {', '.join(enabled)}")
 
 
 def _postgres_settings() -> PostgresSettings:

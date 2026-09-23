@@ -48,7 +48,7 @@ from collector.persistence.postgres.models import (
     WorkerInstance,
     WorkerPool,
 )
-from collector.persistence.postgres.repositories.audit import append_audit
+from collector.persistence.postgres.repositories.audit import append_audit, require_audit_context
 from collector.workers.roles import WorkerRole
 
 INSTANCE_TRANSITIONS: dict[str, frozenset[str]] = {
@@ -122,7 +122,13 @@ async def upsert_pool(
     Невалідний desired state → `InvalidValueError` до будь-якого запису (gate 2, L-1);
     повторне створення наявного pool → `ConflictError`, а не сирий `IntegrityError`
     (gate 3, L-2).
+
+    Audit (§13; знахідка S-2 пострев'ю PR1) пишеться **тут**, у тій самій транзакції: це
+    єдиний шлях зміни desired state поза `request_scale`, і в PR1 він міг пройти без сліду.
+    Bootstrap pool воркером (`expected_revision=None`) теж лишає запис — тому кожна
+    runtime-роль має `INSERT` (і лише INSERT) на `audit_log`.
     """
+    require_audit_context(actor, reason)
     state.validate()
     current = resolve_now(now)
     if expected_revision is None:
@@ -145,7 +151,18 @@ async def upsert_pool(
         )
         session.add(pool)
         await session.flush()
+        await append_audit(
+            session,
+            actor=actor,
+            action="worker_pool.create",
+            resource_type="worker_pool",
+            resource_id=role.value,
+            after=_pool_state(pool) | {"reason": reason},
+            now=current,
+        )
         return pool
+    before = await session.scalar(select(WorkerPool).where(WorkerPool.role == role.value))
+    before_state = _pool_state(before) if before is not None else None
     updated = await session.scalar(
         update(WorkerPool)
         .where(WorkerPool.role == role.value, WorkerPool.revision == expected_revision)
@@ -162,10 +179,34 @@ async def upsert_pool(
             updated_at=current,
         )
         .returning(WorkerPool)
+        # `before` уже в identity map — атрибути мають прийти з RETURNING, а не з кешу.
+        .execution_options(populate_existing=True)
     )
     if updated is None:
         await _raise_stale_or_missing_pool(session, role, expected_revision)
+    await append_audit(
+        session,
+        actor=actor,
+        action="worker_pool.update",
+        resource_type="worker_pool",
+        resource_id=role.value,
+        before=before_state,
+        after=_pool_state(updated) | {"reason": reason},
+        now=current,
+    )
     return updated
+
+
+def _pool_state(pool: WorkerPool) -> JsonObject:
+    """Знімок desired state для before/after у журналі (§13 impact preview)."""
+    return {
+        "desired_replicas": pool.desired_replicas,
+        "desired_concurrency": pool.desired_concurrency,
+        "min_replicas": pool.min_replicas,
+        "max_replicas": pool.max_replicas,
+        "mode": pool.mode,
+        "revision": pool.revision,
+    }
 
 
 async def get_pool(session: AsyncSession, role: WorkerRole) -> WorkerPool | None:

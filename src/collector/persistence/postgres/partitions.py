@@ -1,8 +1,20 @@
 """Місячні партиції великих таблиць (§9.1: `fetched_at`/`created_at` RANGE partitioning).
 
-PR1 партиціонує `audit_log`; PR2 додає `fetches`, `raw_objects`, `change_events`,
-`outbox_events` до `PARTITIONED_TABLES`. Партиції не є частиною міграцій (їх кількість
-залежить від дати), тому:
+PR1 партиціонує `audit_log`, PR2 — `fetches` (по `fetched_at`).
+
+**Три таблиці зі списку «Спільних вимог» картки свідомо лишилися непартиційованими**, бо
+місячне RANGE-партиціонування зруйнувало б їхній головний інваріант — глобальний unique
+(PostgreSQL не вміє unique без partition key у ключі):
+
+- `raw_objects` — PK `raw_object_id` (UUID) і `UNIQUE (sha256)` від `sha256(body)` (§9.3 п.4
+  «однакові bytes фізично не дублюються»);
+  помісячний unique зробив би дедуплікацію помісячною. Розмір обмежений кількістю *різних*
+  тіл, а не спроб (спроби — у партиційованих `fetches`);
+- `change_events`, `outbox_events` — `UNIQUE (event_id)` (§9.1 «unique event ID», §7.3
+  «consumer дедуплікує за `event_id`»). Деталі й розглянуті альтернативи —
+  `models/outbox.py`.
+
+Партиції не є частиною міграцій (їх кількість залежить від дати), тому:
 
 - `ensure_month_partitions(conn, months_ahead=N)` створює відсутні `<table>_yYYYYmMM` від
   поточного місяця на N місяців уперед — викликається CLI `collector db migrate` після
@@ -10,9 +22,12 @@ PR1 партиціонує `audit_log`; PR2 додає `fetches`, `raw_objects`,
 - кожна партиційована таблиця має DEFAULT-партицію (`<table>_default`, створюється міграцією):
   пропущене обслуговування не повинно зупиняти записи — для `audit_log` це зупинило б **усі**
   audited дії control plane, бо `request_scale` пише audit у тій самій транзакції (M-5
-  код-рев'ю). Рядки в DEFAULT — сигнал «партиції відстають» (`default_partition_row_count`,
-  метрика WP-12), а не нормальний режим: поки вони там, місячну партицію того самого періоду
-  створити не можна, доки maintenance їх не перенесе;
+  код-рев'ю), а для `fetches` — знищувало б докази вже виконаних HTTP-запитів (bytes у
+  artifact store є, а lineage-рядка немає). Це і є відповідь на питання картки «зрозуміла
+  помилка чи авто-створення» для `fetches`: **ні те, ні те** — рядок приймається у DEFAULT, а
+  сигналом служить `default_partition_row_count`. Рядки в DEFAULT — сигнал «партиції
+  відстають» (метрика WP-12), а не нормальний режим: поки вони там, місячну партицію того
+  самого періоду створити не можна, доки maintenance їх не перенесе;
 - Alembic autogenerate ігнорує child-таблиці за `is_partition_child_name`.
 
 Transaction boundary: викликач (`AsyncConnection` у власній транзакції; DDL транзакційний).
@@ -27,7 +42,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-PARTITIONED_TABLES: tuple[str, ...] = ("audit_log",)
+PARTITIONED_TABLES: tuple[str, ...] = ("audit_log", "fetches")
 _PARTITION_SUFFIX = re.compile(r"_y(\d{4})m(\d{2})$")
 _PARTITION_CHILD = re.compile(
     r"^(?P<parent>"
