@@ -12,7 +12,8 @@
 |---|---|---|---|---|---|
 | WP-00 | PR1 python+CI | `wp/00-1-python-ci` | merged 7223bec | docs done: `reports/WP-00/docs-pr1.md`; ADR-0001 | CLI = Typer; 127 tests; Linux-паритет підтверджено в Docker |
 | WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | merged 643d41b (PR #2) | усі gates + CI green incl. docker job | ADR-0002; runbooks; 586 tests |
-| WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | merged 715d54e (PR #4) | CI green: 6/6 jobs incl. web + e2e проти стека | **WP-00 закрито повністю** |
+| WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | merged 715d54e (PR #4) | CI green: 6/6 jobs incl. web + e2e проти стека | acceptance WP-00 закрито |
+| WP-00 | PR4 role DSN secrets | `wp/00-4-role-dsn-secrets` | in_progress | — | блокер pilot §13 (deps `WP-01A-to-WP-00.md` §4, §6); паралельно з WP-01D PR1b; worktree `.worktrees/wp-00-4` |
 | WP-01C | — | `wp/01c-contracts` | merged 1f2fbc8 (PR #1) | docs done; ADR-0003/0004; CI green | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
 
 ## Хвиля 1
@@ -21,7 +22,7 @@
 |---|---|---|
 | WP-01A | PR1 merged 758c68c (PR #3); PR2 merged 43ee69f (PR #6); PR3 pending | CI green (PR1: python, integration PostgreSQL 18, docker); ADR-0005, ADR-0007, `docs/persistence/postgres.md`; PR2 (`bad6a25`+fixes) — spec-review gate 4 `changes_requested` закрито (SR-1 gitleaks, SR-2 lineage, SR-5, N-1..N-5 fixed; D-1/D-2 задокументовані ADR-0007 + ТЗ §9.1); CI PR2 green 6/6 на `d83b627` |
 | WP-01B | pending | після WP-01A |
-| WP-01D | PR1 merged f87df17 (PR #5); PR2 pending | CI green 6/6; ADR-0006, `docs/workers.md`, runbook worker-recovery; флак ризик — `tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising` нестабільний під паралельним навантаженням (відтворено на WP-01A PR2 verification, не внесений PR2 — `docs/plan/reports/WP-01A/implementation-pr2.md`) |
+| WP-01D | PR1 merged f87df17 (PR #5); PR1b `wp/01d-1b-runtime-role-dsn` in_progress (блокер pilot §13, паралельно з WP-00 PR4, worktree `.worktrees/wp-01d-1b`); PR2 pending | CI green 6/6; ADR-0006, `docs/workers.md`, runbook worker-recovery; флак ризик — `tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising` нестабільний під паралельним навантаженням (відтворено на WP-01A PR2 verification, не внесений PR2 — `docs/plan/reports/WP-01A/implementation-pr2.md`) |
 | WP-02 | pending | після WP-01A |
 | WP-04 | pending | після WP-01A |
 

@@ -1,6 +1,6 @@
 # Стан робіт і точка відновлення
 
-Оновлено: 2026-09-23. Складено оркестратором перед паузою на запит користувача.
+Оновлено: 2026-09-24.
 
 ## 1. Як відновити роботу
 
@@ -8,7 +8,7 @@
 2. Перевірити середовище: `git -C C:\repos\webscraper worktree list`, `gh pr list`, `docker ps`.
 3. Продовжити з розділу 4 «Наступний крок».
 
-Рольові інструкції субагентів — `.claude/agents/*.md`. У попередній сесії вони запускалися через `general-purpose` із вкладеною інструкцією, бо агенти з `.claude/agents/` підхоплюються лише з наступної сесії. Після перезапуску слід перевірити, чи `wp-implementer`, `wp-tester`, `wp-code-reviewer`, `wp-spec-reviewer`, `wp-docs-writer`, `wp-security-reviewer`, `source-canary` доступні як `subagent_type` напряму — якщо так, використовувати їх.
+Рольові інструкції субагентів — `.claude/agents/*.md`; з 2026-09-24 вони доступні як `subagent_type` напряму (`wp-implementer`, `wp-tester`, `wp-code-reviewer`, `wp-spec-reviewer`, `wp-docs-writer`, `wp-security-reviewer`, `source-canary`).
 
 ## 2. Що зроблено (злито в `main`, усі з зеленим CI)
 
@@ -20,6 +20,7 @@
 | #3 (`758c68c`) | WP-01A PR1 | PostgreSQL: 13 таблиць §9.1, черга `FOR UPDATE SKIP LOCKED` + lease, глобальний origin limiter (R-53), worker pools/scale commands, audit append-only, 8 ролей §13, партиціонування; ADR-0005, `docs/persistence/postgres.md` |
 | #4 (`715d54e`) | WP-00 PR3 | React 19 + Vite 7 GUI scaffold, non-root Nginx із CSP, profile `gui`, job `web` + e2e проти живого стека в CI; закриває WP-00 |
 | #5 (`f87df17`) | WP-01D PR1 | Worker runtime: claim-loop, lease heartbeat, **self-fencing за часом**, drain, singleton scheduler, hot concurrency, дешевий liveness-probe; ADR-0006, `docs/workers.md`, runbook |
+| #6 (`43ee69f`) | WP-01A PR2 | Artifacts, upload claims, projection tasks/acks, outboxes, entity index, LOGIN-ролі (`db roles --with-login`), `queue.release`, транзакційний audit; ADR-0007 |
 
 CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (build + SBOM + trivy обох образів + clean-host `up --wait` + e2e), `pre-commit`, `gitleaks`.
 
@@ -32,7 +33,7 @@ CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (buil
 
 ## 4. Наступний крок
 
-1. **WP-01A PR2** — злито (PR #6); далі WP-01A PR3 — artifacts, upload claims, projection tasks/acks, outboxes, entity index + LOGIN-ролі + `queue.release` + транзакційний audit. Закриває блокер pilot (§13) і відкриває WP-01B.
+1. **Блокер pilot §13 (у роботі, паралельно):** WP-00 PR4 `wp/00-4-role-dsn-secrets` (секрети `postgres_dsn_<component>`, `migrate-postgres` з `--with-login`, REVOKE PUBLIC) і WP-01D PR1b `wp/01d-1b-runtime-role-dsn` (runtime на власних DSN, позитивний тест §13 замість вартового, `verify_runtime_login`, drain через `queue.release`). Обидві гілки вставляють ідентичний блок top-level `secrets:`; WP-01D PR1b зливається після WP-00 PR4 і проходить clean-host `up --wait` уже після rebase. Картки — `cards/WP-00.md` PR4, `cards/WP-01D.md` PR1b.
 2. Далі паралельно: **WP-01B** (MongoDB projector, receipts, reconciler, compaction — головний споживач PR2), **WP-02** (fetch core), **WP-04** (translation core). Карток для них ще немає — писати за зразком WP-01A/WP-01D.
 3. Потім хвиля 2: WP-03, WP-05, WP-07, WP-09.
 
