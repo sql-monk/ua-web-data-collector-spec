@@ -1,0 +1,60 @@
+/* Мінімальний стиль каркаса. Дизайн-систему GUI визначає WP-11C. */
+:root {
+  color-scheme: light dark;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+}
+
+.app-shell__header,
+.app-shell__footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1.5rem;
+  border-color: rgb(0 0 0 / 15%);
+  border-style: solid;
+  border-width: 0;
+}
+
+.app-shell__header {
+  border-bottom-width: 1px;
+  font-weight: 600;
+}
+
+.app-shell__footer {
+  border-top-width: 1px;
+  font-size: 0.875rem;
+  opacity: 0.75;
+}
+
+.app-shell__env {
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+.app-shell__main {
+  flex: 1;
+  padding: 1.5rem;
+  max-width: 60rem;
+}
+
+.note {
+  font-size: 0.9375rem;
+  opacity: 0.8;
+}

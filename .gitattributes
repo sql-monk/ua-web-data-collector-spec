@@ -1,2 +1,8 @@
 # Shell-скрипти виконуються у Linux-контейнерах/CI і в Git Bash: завжди LF незалежно від core.autocrlf.
 *.sh text eol=lf
+
+# WP-00 PR3: вихідники GUI форматуються Prettier з `endOfLine: "lf"`, а nginx.conf потрапляє
+# у Linux-контейнер. Без цього Windows `core.autocrlf` робить CRLF у робочій копії і
+# `npm run lint` (prettier --check) падає локально, хоча в CI (Linux) зелений.
+web/** text eol=lf
+deploy/compose/gui/*.conf text eol=lf

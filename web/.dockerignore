@@ -1,0 +1,10 @@
+# Build-контекст GUI image: лише вихідники і lockfile (node_modules ставить `npm ci`).
+node_modules
+dist
+coverage
+playwright-report
+test-results
+tests/e2e
+.vite
+Dockerfile
+.dockerignore

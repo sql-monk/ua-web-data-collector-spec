@@ -52,8 +52,18 @@ jobs:
 
       # Включно з tests/integration/test_compose_render.py — `docker compose config` через docker
       # CLI runner-а (gate 3, CR-3: render-тести мають реально виконуватись у CI, не skip).
-      - name: pytest (без live)
-        run: uv run pytest -m "not live" -rs
+      # Пострев'ю S-1: runtime-тести gui потребують піднятого стека, якого в цьому job немає
+      # і бути не може — їх виконує job `docker` після `up -d --wait`. Виключаємо їх ПО
+      # ШЛЯХУ, а не селектором `-m "not e2e"`: (1) §16.2 фіксує команду
+      # `uv run pytest -m "not live"` дослівно; (2) маркер `e2e` носитимуть і offline-тести
+      # WP-14 (`collector e2e --source fixtures --offline`), які саме тут і мають
+      # виконуватись — виключення за маркером тихо прибрало б їх з CI назавжди.
+      - name: pytest (без live; runtime-тести gui — у job `docker`)
+        run: >-
+          uv run pytest -m "not live" -rs
+          --ignore=tests/e2e/test_gui_runtime_contract.py
+          --ignore=tests/e2e/test_gui_api_down_branch.py
+          --ignore=tests/e2e/test_runtime_suite_is_enforced.py
 
       - name: contracts JSON Schema snapshots без drift (WP-01C)
         run: uv run collector contracts export --check
@@ -144,6 +154,75 @@ jobs:
       - name: pre-commit run --all-files
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
+  web:
+    # WP-00 PR3 (§7.7, §8, §16.2): ланцюжок `cd web && npm ci && npm run lint && npm run test
+    # && npm run build && npm run test:e2e`. E2E — окремим кроком: він потребує browser binary
+    # Playwright, який ставиться лише після успішних lint/test/build.
+    name: web (lint, test, build, e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      # §13 «Dependency scanning — щотижня і на кожен PR; critical CVE блокує». HIGH/CRITICAL
+      # блокують; moderate/low — видно у виводі, але не зупиняють PR (політика така сама, як
+      # для trivy HIGH нижче: без fix — датоване risk acceptance у звіті/ADR, не мовчазний
+      # ignore). `npm ci` вище гарантує, що аудит іде по lockfile, а не по ре-резолвлених
+      # версіях.
+      # §13 «Dependency scanning — щотижня і на кожен PR; critical CVE блокує». Поріг HIGH
+      # в обох прогонах: перший виділяє runtime-залежності (те, що їде у браузер) окремим
+      # повідомленням, другий покриває весь toolchain — компрометований dev-пакет це теж
+      # ланцюжок постачання. Виняток для конкретного dev-only HIGH без фіксу оформлюється
+      # точковим `--exclude <pkg>` з CVE ID, owner і датою в ADR, а не зниженням порогу.
+      - name: npm audit (HIGH блокує, §13)
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm audit --audit-level=high
+
+      - name: npm run lint (ESLint + Prettier)
+        run: npm run lint
+
+      - name: npm run test (Vitest + Testing Library)
+        run: npm run test
+
+      - name: npm run build (tsc strict + vite)
+        run: npm run build
+
+      # Код-рев'ю H-1: `npm run test` іде ДО збірки, тому tests/unit/build-contract.test.ts
+      # там гарантовано skip-иться (`dist/` у .gitignore). Другий прогін саме цього файлу
+      # після build — єдине місце, де контракт артефакту (route-chunk-и, content hash,
+      # index.html без inline-скрипта) реально перевіряється. `CI=true` забороняє skip.
+      - name: npm run test:build (контракт зібраного dist/)
+        run: npm run test:build
+
+      # Версія browser binary береться з package-lock.json (@playwright/test pinned) — оновлення
+      # Playwright автоматично оновлює й binary (§8).
+      - name: Playwright browser (chromium)
+        run: npx playwright install --with-deps chromium
+
+      - name: npm run test:e2e (Playwright проти vite preview)
+        run: npm run test:e2e
+
+      - name: Playwright report як artifact (лише при падінні)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7
+
   secrets:
     name: gitleaks (secret scan)
     runs-on: ubuntu-latest
@@ -165,14 +244,16 @@ jobs:
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   docker:
-    # WP-00 PR2 (§7.5, §16.1 п.14, §16.2): compose config, build image `collector`, SBOM (syft),
-    # vulnerability scan (trivy; CRITICAL блокує — §13), clean-host start core+workers з --wait.
+    # WP-00 PR2/PR3 (§7.5, §16.1 п.14, §16.2): compose config, build images `collector` і
+    # `collector-gui`, SBOM (syft), trivy (CRITICAL блокує — §13), clean-host start
+    # core+workers+gui з --wait — це acceptance усього WP-00 (§16.3).
     name: docker (compose config, build, sbom, scan, up --wait)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      COMPOSE_PROFILES: core,workers
+      COMPOSE_PROFILES: core,workers,gui
       COLLECTOR_IMAGE: collector:ci
+      COLLECTOR_GUI_IMAGE: collector-gui:ci
     steps:
       - uses: actions/checkout@v5
 
@@ -183,7 +264,9 @@ jobs:
         run: docker compose config --quiet
 
       - name: docker compose config (усі profiles, валідність)
-        run: docker compose --profile core --profile workers --profile browser config --quiet
+        run: >-
+          docker compose --profile core --profile workers --profile browser --profile gui
+          config --quiet
 
       - name: docker build collector
         run: |
@@ -193,6 +276,18 @@ jobs:
             -t "$COLLECTOR_IMAGE" .
           docker inspect "$COLLECTOR_IMAGE" --format 'User={{.Config.User}}' | grep -q 'User=10001:10001'
 
+      # GUI image (WP-00 PR3): node builder → nginx-unprivileged. Збирається через compose,
+      # бо використовує additional build context (deploy/compose/gui).
+      - name: docker compose build gui
+        # COLLECTOR_GIT_SHA — з env workflow; решта — тут, інакше OCI-label `revision`
+        # GUI-образу лишався б `unknown` (код-рев'ю L-9).
+        env:
+          COLLECTOR_VERSION: 0.1.0
+        run: |
+          COLLECTOR_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" docker compose build gui
+          docker inspect "$COLLECTOR_GUI_IMAGE" --format 'User={{.Config.User}}' | grep -q 'User=101:101'
+          docker inspect "$COLLECTOR_GUI_IMAGE"             --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'             | grep -q "${{ github.sha }}"
+
       - name: SBOM (syft, SPDX JSON як artifact)
         uses: anchore/sbom-action@v0.24.2
         with:
@@ -200,6 +295,15 @@ jobs:
           format: spdx-json
           output-file: sbom.spdx.json
           artifact-name: sbom-collector.spdx.json
+          upload-artifact: true
+
+      - name: SBOM GUI (syft, SPDX JSON як artifact)
+        uses: anchore/sbom-action@v0.24.2
+        with:
+          image: collector-gui:ci
+          format: spdx-json
+          output-file: sbom-gui.spdx.json
+          artifact-name: sbom-collector-gui.spdx.json
           upload-artifact: true
 
       # §13: будь-який CRITICAL (і без fix) блокує — unfixed CRITICAL потребує датованого
@@ -224,8 +328,65 @@ jobs:
           exit-code: "1"
           skip-setup-trivy: true
 
-      - name: docker compose up core+workers --wait (clean host, §16.3)
+      # Той самий набір сканів для GUI-образу (gate 2, H-1): він так само публікується на
+      # хост, до того ж це ЄДИНИЙ сервіс з публічним портом, тому політика не м'якша.
+      - name: Vulnerability scan GUI (trivy; CRITICAL блокує, включно з unfixed)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: collector-gui:ci
+          format: table
+          severity: CRITICAL
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: Vulnerability scan GUI (trivy; HIGH з fix блокує)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: collector-gui:ci
+          format: table
+          severity: HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      # §16.2/§16.3 clean-host acceptance усього WP-00: core + workers + gui однією командою.
+      - name: docker compose up core+workers+gui --wait (clean host, §16.3)
         run: docker compose up -d --wait --wait-timeout 300
+
+      - name: GUI віддає сторінку, security headers і проксі /api (§7.7, §13)
+        run: |
+          curl -fsS http://localhost/ | grep -q '<div id="root">'
+          headers="$(curl -fsSI http://localhost/)"
+          echo "$headers"
+          printf '%s' "$headers" | grep -qi "content-security-policy: default-src 'none'"
+          printf '%s' "$headers" | grep -qi 'x-content-type-options: nosniff'
+          printf '%s' "$headers" | grep -qi 'x-frame-options: DENY'
+          curl -fsS http://localhost/api/v1/health/components | grep -q '"status":"ready"'
+
+      # Код-рев'ю H-1: 19 runtime-тестів gui виконуються ЛИШЕ тут — у job `python` немає ні
+      # стека, ні образу, тому там вони skip. Без цього кроку §13-інваріанти nginx
+      # (успадкування add_header, фази rewrite/access) не мають регресійного захисту в CI.
+      # `CI=true` (стандартна змінна GitHub Actions) забороняє skip усередині цих модулів.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python from .python-version
+        run: uv python install
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: pytest -m e2e (runtime-контракт gui проти піднятого стека)
+        # Прапорець виставляється ЛИШЕ тут — після `up -d --wait`, тобто там, де стек
+        # гарантовано є. Саме він (а не універсальний `CI`) вмикає заборону skip усередині
+        # модулів: `CI=true` GitHub Actions ставить в усіх job-ах, і прив'язка до нього
+        # валила job `python`, де стека немає (пострев'ю S-1).
+        env:
+          COLLECTOR_E2E_REQUIRED: "1"
+        run: uv run pytest -m e2e tests/e2e -rs
 
       - name: docker compose ps + health
         # Регресійний assert (gate 3, CR-2): кожен контейнер або running+healthy, або one-shot

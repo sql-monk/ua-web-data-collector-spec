@@ -111,6 +111,12 @@ def test_application_healthchecks_name_a_critical_dependency(
             # і віддає 200 лише за ready (503 інакше) — залежність перевіряється через нього.
             assert "/api/v1/health/components" in joined and "200" in joined, name
             continue
+        if name == "gui":
+            # gui (WP-00 PR3): критична dependency — api через same-origin proxy; БД і
+            # object store gui не бачить узагалі (мережі ingress+frontend, §13).
+            assert "/api/v1/health/components" in joined, name
+            assert svc["healthcheck"]["retries"] >= 3 and svc["healthcheck"]["timeout"], name
+            continue
         assert any(component in joined for component in COMPONENT_NAMES), (
             f"{name}: healthcheck не перевіряє критичну dependency (§7.5)"
         )
@@ -243,9 +249,12 @@ def test_ci_docker_job_order_build_sbom_scan_up_down(docker_job: dict[str, Any])
 def test_ci_docker_job_profiles_and_no_socket_or_hardcoded_secrets(
     docker_job: dict[str, Any],
 ) -> None:
-    assert docker_job["env"]["COMPOSE_PROFILES"] == "core,workers"
+    assert docker_job["env"]["COMPOSE_PROFILES"] == "core,workers,gui"
     text = CI_PATH.read_text(encoding="utf-8")
-    assert "docker.sock" not in text and "privileged" not in text
+    assert "docker.sock" not in text
+    # Саме privileged-режим, а не будь-яке входження підрядка: назва базового образу GUI —
+    # `nginx-unprivileged` (WP-00 PR3) — містить «privileged» і давала хибне спрацювання.
+    assert not re.search(r"(?<![\w-])privileged\s*[:=]|--privileged", text), "privileged mode"
     for line in text.splitlines():
         if re.search(r"(?i)(password|token|secret)\s*[:=]", line) and "${{" not in line:
             assert line.strip().startswith("#"), f"hardcoded credential: {line.strip()}"
