@@ -7,6 +7,12 @@
 Розділи ТЗ: §7.5 (Docker, SIGTERM/SIGKILL, healthcheck), §7.6 (pools, масштабування),
 §15 (stateless worker), §9.3 (ідемпотентність), §13 (секрети й ролі БД).
 
+Схема `worker_pools`/`worker_instances`/`scale_commands` і ролі БД — `docs/persistence/postgres.md`
+(розділи 3, 9); цей документ її не дублює, лише посилається. Обґрунтування часового self-fencing
+і відокремлення liveness від readiness — `docs/decisions/0006-worker-lease-fencing-and-liveness.md`.
+Операційні дії (діагностика, безпечна зупинка, kill -9, placeholder-відкат) —
+`docs/runbooks/worker-recovery.md`.
+
 ## 1. Ролі та їхні defaults (§7.6)
 
 | Role | Робота | Default replicas × concurrency | Особливості |
@@ -140,7 +146,9 @@ class FetchHandler(TaskHandler):
 
 **Тік мусить бути ідемпотентним.** Перевірка lease і сам тік ідуть різними з'єднаннями, тому
 теоретичне перекриття двох тіків можливе; доменне планування зобов'язане мати власний ключ
-ідемпотентності (§9.3 п.3), а не покладатися на lease.
+ідемпотентності (§9.3 п.3), а не покладатися на lease. Це залишковий ризик, прийнятий свідомо —
+обґрунтування і owner подальшого закриття: `docs/decisions/0006-worker-lease-fencing-and-liveness.md`
+(«Residual risks», п. 1).
 
 ## 7. Конфігурація (env)
 
@@ -155,18 +163,34 @@ class FetchHandler(TaskHandler):
 | `COLLECTOR_WORKER_POLL_SECONDS` | `1.0` | пауза claim-loop |
 | `COLLECTOR_WORKER_CLAIM_BATCH` | `8` | максимум jobs за один claim |
 | `COLLECTOR_WORKER_LIVENESS_FILE` | `$TMPDIR/collector-runtime.alive` | маркер liveness |
+| `COLLECTOR_WORKER_DEPLOYMENT` | `compose` | metadata `worker_instances.deployment` |
+| `COLLECTOR_CONTAINER_ID` | `$HOSTNAME` (Docker короткий id контейнера) | metadata `worker_instances.container_id` |
 | `COLLECTOR_WORKER_PLACEHOLDER` | `0` | rollback до placeholder-процесу WP-00 |
 
-Scheduler: `COLLECTOR_SCHEDULER_TICK_SECONDS`, `_LEASE_RETRY_SECONDS`, `_LEASE_NAME`,
-`_STALE_AFTER_SECONDS`, `_RECOVER_LIMIT`.
+Scheduler:
+
+| Змінна | Типово | Призначення |
+|---|---:|---|
+| `COLLECTOR_SCHEDULER_TICK_SECONDS` | `5` | пауза між maintenance-тіками активного scheduler-а |
+| `COLLECTOR_SCHEDULER_LEASE_RETRY_SECONDS` | `5` | пауза перед повторною спробою взяти advisory lease |
+| `COLLECTOR_SCHEDULER_LEASE_NAME` | `scheduler` | ім'я advisory lease (`controller` PR3 — інше ім'я, той самий примітив) |
+| `COLLECTOR_SCHEDULER_STALE_AFTER_SECONDS` | `60` | TTL heartbeat, після якого `mark_stale_instances` позначає instance `stale` |
+| `COLLECTOR_SCHEDULER_RECOVER_LIMIT` | `1000` | максимум leases за один прохід `recover_expired_leases` |
 
 ## 8. Експлуатація
 
-- **Зупинити claim окремої репліки без рестарту:** `mark_draining(instance_id)`; повернути —
-  `mark_ready(instance_id)`.
+Покрокові рецепти (SQL, вивід, orientировочні часи) — `docs/runbooks/worker-recovery.md`. Коротко:
+
+- **Зупинити claim окремої репліки без рестарту:** `pools_repo.mark_draining(session,
+  instance_id)`; повернути — `pools_repo.mark_ready(session, instance_id)`. У PR1 немає CLI для
+  цього — виклик репозиторію (як роблять adversarial-тести) або прямий SQL `UPDATE
+  worker_instances SET status='draining', drain_requested_at=now() WHERE instance_id=...`
+  (`docs/runbooks/worker-recovery.md` §4).
 - **Зупинити claim усієї ролі:** барʼєр треба виставити **кожному** живому instance ролі — це
   робить `PoolController` (WP-01D PR3); у PR1 доступний лише per-instance примітив.
 - **Повернути placeholder-процес** (без перебудови image): `COLLECTOR_WORKER_PLACEHOLDER=1`.
 - **Змінити concurrency без рестарту:** оновити `worker_pools.desired_concurrency` — репліки
   підхоплять на наступному heartbeat; значення понад стелю процесу буде обрізане з
   попередженням `worker.concurrency_clamped`.
+- **Fenced-instance, `stale` vs `draining`, `kill -9`, «worker німий»** —
+  `docs/runbooks/worker-recovery.md` §2–3, §5, §7.

@@ -64,6 +64,8 @@ SchedulerTick = Callable[["AsyncSession", datetime], Awaitable[None]]
 
 @dataclass(frozen=True, slots=True)
 class MaintenanceResult:
+    """Підсумок одного `run_maintenance`: скільки leases повернуто і instances позначено stale."""
+
     recovered_leases: int
     stale_instances: int
 
@@ -131,6 +133,7 @@ class SchedulerRuntime:
         return self._active
 
     def request_stop(self) -> None:
+        """Попросити graceful stop (те саме, що SIGTERM): lease звільняється, тік не чекає TTL."""
         self._stop.set()
 
     async def run(self, *, stop: asyncio.Event | None = None, install_signals: bool = True) -> None:
