@@ -401,6 +401,59 @@ jobs:
           docker compose exec -T api python -m collector.api.health
           docker compose ps -a --format json | python3 deploy/compose/check-healthy.py
 
+      - name: Per-component LOGIN-ролі §13, REVOKE PUBLIC, паролі не витікають (WP-00 PR4)
+        # `migrate-postgres` (`db roles --with-login`) зробив рівно сім runtime-ролей LOGIN;
+        # у PUBLIC не лишилось прав на `collector`/`postgres`/`template1`; під DSN
+        # collector_fetcher підключення до БД застосунку є, до службової `postgres` — ні.
+        # DSN передається в `docker compose exec` через env (`-e PGDSN` без значення), тож
+        # пароль не потрапляє ні в argv, ні в лог кроку. Секрети — ті, що згенерував
+        # `init-secrets.sh` першим кроком job-а (той самий шлях, що локально).
+        run: |
+          set -eu
+          dir=deploy/compose/secrets
+          pg() { PGDSN="$(cat "$dir/$1")" docker compose exec -T -e PGDSN postgres \
+            sh -c 'psql "$PGDSN" -X -v ON_ERROR_STOP=1 -At'; }
+
+          logins="$(pg postgres_dsn <<'SQL'
+          SELECT rolname FROM pg_roles WHERE rolcanlogin AND rolname <> current_user ORDER BY 1;
+          SQL
+          )"
+          expected="$(printf '%s\n' collector_api_ro collector_export_ro collector_fetcher \
+            collector_parser collector_projector collector_scheduler collector_translation)"
+          echo "LOGIN roles:"; echo "$logins"
+          test "$logins" = "$expected"
+
+          public_acl="$(pg postgres_dsn <<'SQL'
+          SELECT d.datname || ':' || a.privilege_type
+          FROM pg_database d, aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a
+          WHERE a.grantee = 0 AND d.datname IN (current_database(), 'postgres', 'template1');
+          SELECT 'temp:' || has_database_privilege('collector_fetcher', current_database(), 'TEMP');
+          SQL
+          )"
+          echo "PUBLIC ACL / TEMP:"; echo "$public_acl"
+          test "$public_acl" = "temp:false"
+
+          test "$(echo 'SELECT current_user;' | pg postgres_dsn_fetcher)" = "collector_fetcher"
+
+          PGDSN="$(sed 's#/[^/]*$#/postgres#' "$dir/postgres_dsn_fetcher")" \
+            docker compose exec -T -e PGDSN postgres \
+            sh -c 'psql "$PGDSN" -X -At -c "SELECT 1"' > /dev/null 2> "$RUNNER_TEMP/denied.txt" \
+            && { echo "collector_fetcher підключився до БД postgres"; exit 1; }
+          grep -q 'permission denied for database "postgres"' "$RUNNER_TEMP/denied.txt"
+
+          docker compose logs --no-color > "$RUNNER_TEMP/compose.log"
+          docker inspect $(docker compose ps -aq) > "$RUNNER_TEMP/inspect.json"
+          for name in postgres_dsn postgres_dsn_scheduler postgres_dsn_fetcher postgres_dsn_parser \
+            postgres_dsn_projector postgres_dsn_translation postgres_dsn_api_ro postgres_dsn_export_ro; do
+            f="$dir/$name"
+            pw="$(sed -E 's#^[^:]+://[^:]+:([^@]+)@.*#\1#' "$f")"
+            test -n "$pw"
+            if grep -qF -- "$pw" "$RUNNER_TEMP/compose.log" "$RUNNER_TEMP/inspect.json" \
+              "$RUNNER_TEMP/denied.txt"; then
+              echo "пароль із $(basename "$f") потрапив у логи/docker inspect"; exit 1
+            fi
+          done
+
       - name: docker compose down -v
         if: always()
         run: docker compose down -v --remove-orphans

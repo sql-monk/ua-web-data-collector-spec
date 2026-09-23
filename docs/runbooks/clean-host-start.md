@@ -63,6 +63,22 @@ non-root uid контейнерів (999, 10001) — 0600 від користу�
 обмежте каталог (`chmod 0700 deploy/compose/secrets` не допоможе контейнерам — потрібні
 Swarm secrets, WP-01D).
 
+Окрім паролів stateful-сервісів, скрипт створює вісім DSN: `postgres_dsn` (міграції, пароль =
+`postgres_password`) і сім `postgres_dsn_<component>` для runtime-ролей §13 — користувач
+`collector_<component>`, у кожного **власний** випадковий пароль. One-shot `migrate-postgres`
+виконує `collector db migrate && collector db roles --with-login` і робить ці ролі LOGIN-ролями.
+Перевірка після `up -d --wait`:
+
+```bash
+docker compose exec -T postgres sh -c 'PGPASSWORD="$(cat /run/secrets/postgres_password)" \
+  psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
+  "SELECT rolname FROM pg_roles WHERE rolcanlogin AND rolname <> current_user ORDER BY 1"'
+# 7 рядків: collector_api_ro … collector_translation (collector_migrate — NOLOGIN)
+```
+
+Секрети, створені до WP-00 PR4, лишаються (скрипт не перезаписує наявні файли) — повторний
+запуск `init-secrets.sh` лише додасть сім нових DSN.
+
 ## Локальна розробка з портами на 127.0.0.1
 
 ```bash
@@ -109,4 +125,5 @@ docker compose down -v         # + видалення volumes (усі дані!)
 | `gui` `unhealthy`, але `curl http://localhost/` віддає сторінку | так і задумано: healthcheck `gui` — це **readiness** (nginx + `api` через proxy), тому падіння `api` робить `gui` unhealthy за ~45 с (`interval 15s × retries 3`), хоча статика далі 200. Діагностика: `curl -s http://localhost/api/v1/health/components` → `not_ready` означає проблему в `api`, не в nginx. Liveness самого nginx — окремий `curl -s http://localhost/healthz` → `ok` (не залежить від `api`). Після відновлення `api` gui стає healthy сам (перевірено — ~20 с) |
 | `up -d --wait` падає з `container collector-gui-1 is unhealthy` | той самий механізм: на деградованому стеку (`api` не healthy) команда з `--wait` впаде свідомо. Спершу полагодьте `api` (`docker compose logs api`, `docker compose exec api python -m collector.api.health`), потім повторіть `up -d --wait` — вона ідемпотентна |
 | порт 80 на хості зайнятий | `GUI_PORT=8081 docker compose up -d --wait` |
+| `migrate-postgres` `Exited (1)`, `у /run/secrets бракує DSN-секретів: …` | секрети створено до WP-00 PR4: повторіть `./deploy/compose/secrets/init-secrets.sh` (додасть лише відсутні `postgres_dsn_<component>`) і `up -d --wait` |
 | secret file `Permission denied` у контейнері | файли секретів мають бути readable для uid 10001/999 (`chmod 0644`) |
