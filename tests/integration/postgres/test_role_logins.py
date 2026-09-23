@@ -301,3 +301,118 @@ async def test_components_cannot_do_each_others_work(role_engine: RoleEngine) ->
             await conn.execute(text("SELECT count(*) FROM outbox_events"))
         await _denied(read_only, "UPDATE entity_index SET confirmed_projection_version = 0")
         await _denied(read_only, "DELETE FROM fetches")
+
+
+async def _confirmed_entity(session: AsyncSession) -> str:
+    """Сутність з `projection_version = 2`, `confirmed_projection_version = 2` (під admin)."""
+    entity = await make_entity(session)
+    for n in (1, 2):
+        task = (await record(session, entity.entity_uuid, n)).task
+        async with session.begin():
+            await projection.acknowledge_projection(
+                session,
+                task.task_id,
+                receipt(task.task_id, entity.entity_uuid, n, applied=True, changed=True),
+                now=T0,
+            )
+    return str(entity.entity_uuid)
+
+
+async def _rejected(engine: AsyncEngine, statement: str, pattern: str, uuid: str) -> None:
+    with pytest.raises(DBAPIError, match=pattern):
+        async with engine.begin() as conn:
+            await conn.execute(text(statement), {"u": uuid})
+
+
+async def test_parser_and_projector_cannot_lower_entity_versions(
+    pg_session: AsyncSession, role_engine: RoleEngine
+) -> None:
+    """Gate 2, F-1: column-level GRANT + тригер `entity_index_versions_monotonic`."""
+    uuid = await _confirmed_entity(pg_session)
+    parser = await role_engine("collector_parser")
+    # Колонки, яких parser не пише, — поза його GRANT.
+    await _rejected(
+        parser,
+        "UPDATE entity_index SET confirmed_projection_version = 0 WHERE entity_uuid = :u",
+        "permission denied",
+        uuid,
+    )
+    await _rejected(
+        parser,
+        "UPDATE entity_index SET canonical_url = 'x' WHERE entity_uuid = :u",
+        "permission denied",
+        uuid,
+    )
+    # Власну колонку зменшити не можна: тригер.
+    await _rejected(
+        parser,
+        "UPDATE entity_index SET projection_version = 0 WHERE entity_uuid = :u",
+        "не зменшуються",
+        uuid,
+    )
+
+    projector = await role_engine("collector_projector")
+    await _rejected(
+        projector,
+        "UPDATE entity_index SET projection_version = 0 WHERE entity_uuid = :u",
+        "permission denied",
+        uuid,
+    )
+    await _rejected(
+        projector,
+        "UPDATE entity_index SET confirmed_projection_version = 1 WHERE entity_uuid = :u",
+        "не зменшуються",
+        uuid,
+    )
+    async with pg_session.begin():
+        row = (
+            await pg_session.execute(
+                text(
+                    "SELECT projection_version, confirmed_projection_version FROM entity_index "
+                    "WHERE entity_uuid = :u"
+                ),
+                {"u": uuid},
+            )
+        ).one()
+    assert tuple(row) == (2, 2)
+
+
+async def test_version_guard_applies_even_to_the_superuser(pg_session: AsyncSession) -> None:
+    uuid = await _confirmed_entity(pg_session)
+    with pytest.raises(DBAPIError, match="не зменшуються"):
+        async with pg_session.begin():
+            await pg_session.execute(
+                text(
+                    "UPDATE entity_index SET confirmed_projection_version = 1 "
+                    "WHERE entity_uuid = :u"
+                ),
+                {"u": uuid},
+            )
+
+
+async def test_parser_cannot_forge_domain_outbox_events(
+    pg_session: AsyncSession, role_engine: RoleEngine
+) -> None:
+    """Gate 2, F-2: RLS — parser вставляє й бачить лише `topic='internal'`."""
+    await _confirmed_entity(pg_session)  # 2 internal + 2 domain рядки
+    insert = (
+        "INSERT INTO outbox_events (outbox_id, event_id, topic, event_type, aggregate_id, "
+        "aggregate_version, payload_schema_version, payload_bytes, payload_media_type, "
+        "payload_sha256) VALUES (gen_random_uuid(), gen_random_uuid(), :topic, "
+        "'catalog.item.changed', gen_random_uuid(), 1, '1.0', '\x7b7d'::bytea, "
+        "'application/json', repeat('0', 64))"
+    )
+    parser = await role_engine("collector_parser")
+    with pytest.raises(DBAPIError, match="row-level security"):
+        async with parser.begin() as conn:
+            await conn.execute(text(insert), {"topic": "domain"})
+    async with parser.begin() as conn:
+        await conn.execute(text(insert), {"topic": "internal"})
+        topics = set((await conn.execute(text("SELECT topic FROM outbox_events"))).scalars())
+    assert topics == {"internal"}
+    # Publisher (scheduler) і projector бачать обидва топіки.
+    for role in ("collector_scheduler", "collector_projector"):
+        engine = await role_engine(role)
+        async with engine.connect() as conn:
+            seen = set((await conn.execute(text("SELECT topic FROM outbox_events"))).scalars())
+        assert seen == {"internal", "domain"}, role

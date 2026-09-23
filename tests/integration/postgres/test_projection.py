@@ -356,3 +356,30 @@ async def test_crash_between_ack_steps_leaves_no_partial_rows(pg_session: AsyncS
     assert replay.created and replay.confirmed_projection_version == 1
     assert replay.outbox_event is not None
     assert replay.outbox_event.payload_bytes == applied.event_bytes
+
+
+async def test_repeated_ack_with_a_different_receipt_is_a_conflict(
+    pg_session: AsyncSession,
+) -> None:
+    """Gate 2, F-3: той самий receipt → ідемпотентно; інший для того самого task → конфлікт."""
+    entity = await make_entity(pg_session)
+    task_id = (await record(pg_session, entity.entity_uuid, 1)).task.task_id
+    entity_uuid = entity.entity_uuid
+    first = receipt(task_id, entity_uuid, 1, applied=True, changed=True)
+    async with pg_session.begin():
+        await projection.acknowledge_projection(pg_session, task_id, first, now=T0)
+    async with pg_session.begin():
+        same = await projection.acknowledge_projection(pg_session, task_id, first, now=T0)
+    assert not same.created
+    # Інший результат projector-а для того самого task (новий event_id/bytes).
+    other = receipt(task_id, entity_uuid, 1, applied=True, changed=True)
+    async with pg_session.begin():
+        with pytest.raises(ConflictError, match="event_id"):
+            await projection.acknowledge_projection(pg_session, task_id, other, now=T0)
+    not_applied = receipt(task_id, entity_uuid, 1, applied=False, changed=False, current_version=1)
+    async with pg_session.begin():
+        with pytest.raises(ConflictError, match="applied_to_current"):
+            await projection.acknowledge_projection(pg_session, task_id, not_applied, now=T0)
+        acks = await _count(pg_session, ProjectionAcknowledgement)
+        events = await _count(pg_session, ChangeEvent)
+    assert (acks, events) == (1, 1)

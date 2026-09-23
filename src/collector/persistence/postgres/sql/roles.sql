@@ -68,6 +68,9 @@ BEGIN
     IF to_regprocedure('public.audit_log_append_only()') IS NOT NULL THEN
         EXECUTE 'ALTER FUNCTION public.audit_log_append_only() OWNER TO collector_migrate';
     END IF;
+    IF to_regprocedure('public.entity_index_versions_monotonic()') IS NOT NULL THEN
+        EXECUTE 'ALTER FUNCTION public.entity_index_versions_monotonic() OWNER TO collector_migrate';
+    END IF;
 END
 $$;
 
@@ -120,14 +123,40 @@ GRANT SELECT, INSERT, UPDATE ON artifact_upload_claims TO collector_fetcher;
 -- на entity_index (FOR UPDATE вимагає UPDATE), projection_tasks, outbox (projection.command).
 GRANT SELECT ON sources, fetches, raw_objects TO collector_parser;
 GRANT INSERT ON crawl_jobs TO collector_parser;
-GRANT SELECT, INSERT, UPDATE ON artifact_upload_claims, normalized_artifacts, entity_index
-    TO collector_parser;
+GRANT SELECT, INSERT, UPDATE ON artifact_upload_claims, normalized_artifacts TO collector_parser;
 GRANT SELECT, INSERT ON parse_attempts, projection_tasks, outbox_events TO collector_parser;
+-- entity_index (gate 2, F-1): лише колонки, які parser справді пише (видача версії). REVOKE
+-- табличного UPDATE спершу — інакше повторний запуск на БД після PR2 до gate 2 лишив би його
+-- (column GRANT не звужує табличний). Зменшення версій забороняє ще й тригер
+-- `entity_index_versions_monotonic` (міграція 0005) — для будь-якої ролі.
+REVOKE UPDATE ON entity_index FROM collector_parser, collector_projector;
+GRANT SELECT, INSERT ON entity_index TO collector_parser;
+GRANT UPDATE (projection_version, updated_at) ON entity_index TO collector_parser;
 
 -- projector (§7.3 п.4): claim/heartbeat/ack projection_tasks, монотонний confirmed version
 -- в entity_index, change_events + outbox(domain.changed). normalized_artifacts — лише
 -- читання pointer-а; domain payload projector пише у MongoDB, не сюди.
 GRANT SELECT ON normalized_artifacts TO collector_projector;
-GRANT SELECT, UPDATE ON projection_tasks, entity_index TO collector_projector;
+GRANT SELECT, UPDATE ON projection_tasks TO collector_projector;
+GRANT SELECT ON entity_index TO collector_projector;
+GRANT UPDATE (confirmed_projection_version, confirmed_at, mongo_collection, mongo_document_id,
+    updated_at) ON entity_index TO collector_projector;
 GRANT SELECT, INSERT ON projection_acknowledgements, change_events, outbox_events
     TO collector_projector;
+
+-- outbox_events (gate 2, F-2): parser створює лише внутрішню `projection.command`
+-- (topic='internal'); `domain.changed` (topic='domain') з'являється тільки в ack-транзакції
+-- projector-а (§7.3 п.4). Row Level Security закриває підробку `domain.changed` parser-ом на
+-- рівні БД. Owner (collector_migrate) і superuser RLS обходять — міграції й maintenance не
+-- зачеплені; ролі без політики рядків не бачать (fetcher/translation GRANT і так не мають).
+ALTER TABLE outbox_events ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS outbox_events_all ON outbox_events;
+DROP POLICY IF EXISTS outbox_events_parser_select ON outbox_events;
+DROP POLICY IF EXISTS outbox_events_parser_insert ON outbox_events;
+CREATE POLICY outbox_events_all ON outbox_events FOR ALL
+    TO collector_scheduler, collector_projector, collector_api_ro, collector_export_ro
+    USING (true) WITH CHECK (true);
+CREATE POLICY outbox_events_parser_select ON outbox_events FOR SELECT
+    TO collector_parser USING (topic = 'internal');
+CREATE POLICY outbox_events_parser_insert ON outbox_events FOR INSERT
+    TO collector_parser WITH CHECK (topic = 'internal');

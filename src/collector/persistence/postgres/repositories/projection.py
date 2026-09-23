@@ -435,7 +435,8 @@ async def acknowledge_projection(
     1. `projection_acknowledgements` `ON CONFLICT (task_id) DO NOTHING`. Конфлікт означає
        повторний ack (crash між Mongo commit і PostgreSQL commit, replay reconciler-а):
        повертається наявний запис, `created=False`, і **жодного** іншого рядка не додається —
-       саме тому повтор не створює другої події;
+       саме тому повтор не створює другої події. Повтор з **іншим** receipt для того самого
+       task → `ConflictError` (gate 2, F-3);
     2. `entity_index.confirmed_projection_version = GREATEST(existing, receipt.projection_version)`
        — out-of-order доставка (3, 1, 2) ніколи не знижує підтверджену версію (§9.5);
     3. task → `succeeded`;
@@ -496,6 +497,7 @@ async def acknowledge_projection(
         if existing is None:  # pragma: no cover — можливо лише поза READ COMMITTED
             msg = f"ack {task_id} зник між INSERT і SELECT (потрібен READ COMMITTED)"
             raise NotFoundError(msg)
+        _require_same_receipt(existing, receipt)
         confirmed = await _confirmed_version(session, receipt.entity_uuid)
         return AcknowledgeResult(
             acknowledgement=existing,
@@ -579,6 +581,38 @@ def _command_outbox_row(command: ProjectionCommand, *, now: datetime) -> OutboxE
         created_at=now,
         updated_at=now,
     )
+
+
+def _require_same_receipt(
+    existing: ProjectionAcknowledgement, receipt: AppliedProjectionReceipt
+) -> None:
+    """Повторний ack ідемпотентний лише для **того самого** receipt (gate 2, F-3).
+
+    Replay reconciler-а після crash приносить byte-equivalent receipt; інший результат для того
+    самого `task_id` (інший `result_hash`/`event_id`/`cluster_time`…) означає суперечність між
+    Mongo і PostgreSQL (ручне втручання, баг projector-а) — це `ConflictError`, а не тихе
+    «уже підтверджено». `acknowledged_at` не порівнюється: це час PostgreSQL, не receipt.
+    """
+    expected = {
+        "entity_uuid": receipt.entity_uuid,
+        "projection_version": receipt.projection_version,
+        "receipt_cluster_time": receipt.cluster_time,
+        "mongo_document_id": receipt.document_id,
+        "applied_to_current": receipt.applied_to_current,
+        "state_changed": receipt.state_changed,
+        "result_version": receipt.result_version,
+        "result_hash": receipt.result_hash,
+        "previous_hash": receipt.previous_hash,
+        "event_id": receipt.event_id,
+        "event_sha256": _receipt_event_sha256(receipt),
+    }
+    differs = sorted(name for name, value in expected.items() if getattr(existing, name) != value)
+    if differs:
+        msg = (
+            f"ack {existing.task_id} уже зафіксовано з іншим receipt "
+            f"(розбіжність: {', '.join(differs)})"
+        )
+        raise ConflictError(msg)
 
 
 def _receipt_event_sha256(receipt: AppliedProjectionReceipt) -> str | None:

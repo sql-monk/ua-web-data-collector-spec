@@ -8,7 +8,7 @@
 | Dependency, які закриває | `docs/plan/deps/WP-01D-to-WP-01A.md` §2 (LOGIN-ролі + per-role DSN), §3/§5 (`queue.release`), §4 (`command_timeout`) |
 | Розділи ТЗ | §5.5, §7.3 (кроки 2, 4, 5), §9.1 (рядки PR2), §9.3, §9.5, §10 п.5, п.8, п.10, §13, §15, §18; REVIEW.md R-27, R-36, R-38/R-41, R-42 |
 | Середовище | Windows 11, uv, CPython 3.13.9, PostgreSQL 18 у Docker (`postgres:18@sha256:86c951e0…`, контейнер `wp01a-pg`, loopback-порт 55433) |
-| Commits | `c5f6f70` WIP (попередня сесія), `96c1a40` fix схеми/репозиторіїв, `753d0d1` LOGIN-ролі + GRANT PR2, `e5b047d` тести PR2, `2d06588` dependency-відповіді, + фінальний коміт (re-attach `fetches_default`, §5 dependency WP-01D, цей звіт) |
+| Commits | `c5f6f70` WIP (попередня сесія), `96c1a40` fix схеми/репозиторіїв, `753d0d1` LOGIN-ролі + GRANT PR2, `e5b047d` тести PR2, `2d06588` dependency-відповіді, + фінальний коміт (re-attach `fetches_default`, §5 dependency WP-01D, цей звіт); після gate 2 — `fix(wp-01a)` (F-1…F-3) |
 
 ## Що зроблено
 
@@ -386,3 +386,99 @@ markdownlint-cli2........................................................Passed
   готовий; §3 `command_timeout` підтверджено; §4 зміни сигнатур; §5 нестабільні тести scaling.
 - Відповідь на `docs/plan/deps/WP-01D-to-WP-01A.md` §2–§5 — у `WP-01A-to-WP-01D.md` (файл
   WP-01D не редагувався).
+
+## Fixes after gate 2
+
+Звіт тестувальника: `docs/plan/reports/WP-01A/testing-pr2.md` (коміт `56aaa03` додав
+`tests/integration/postgres/test_pr2_adversarial.py`, 16 кейсів, усі зелені й після виправлень).
+
+| Знахідка | Виправлення | Тест |
+|---|---|---|
+| F-1 (medium): `collector_parser`/`collector_projector` мали табличний UPDATE на `entity_index` і могли зменшити версії | Два рівні захисту. (1) `sql/roles.sql`: `REVOKE UPDATE ON entity_index` (щоб повторний `db roles` на вже розгорнутій БД прибрав старий табличний grant), далі column-level: parser — `UPDATE (projection_version, updated_at)`, projector — `UPDATE (confirmed_projection_version, confirmed_at, mongo_collection, mongo_document_id, updated_at)`. Для `SELECT … FOR UPDATE` у `record_parse_result` цього досить. (2) Нова міграція `0005_entity_version_guard`: тригер `BEFORE UPDATE` `entity_index_versions_monotonic` відхиляє зменшення `projection_version` і `confirmed_projection_version` (`check_violation`) для **будь-якої** ролі, включно з owner і superuser. Owner функції — `collector_migrate` (блок ownership у `roles.sql`) | `test_role_logins.py::test_parser_and_projector_cannot_lower_entity_versions` (чужі колонки → permission denied; власну колонку зменшити не дає тригер; значення лишаються `(2, 2)`), `::test_version_guard_applies_even_to_the_superuser` |
+| F-2 (low): parser міг вставити `outbox_events.topic='domain'` | `roles.sql`: Row Level Security на `outbox_events`. Політики: `outbox_events_all` (scheduler, projector, api_ro, export_ro — без обмежень), для parser — `SELECT`/`INSERT` лише `topic='internal'`. Owner і superuser RLS обходять, тож міграції й maintenance не зачеплено. Політики пересоздаються ідемпотентно (`DROP POLICY IF EXISTS`) | `test_role_logins.py::test_parser_cannot_forge_domain_outbox_events` (`domain` → «row-level security», `internal` проходить, parser бачить лише `internal`, scheduler/projector бачать обидва) |
+| F-3 (low): повторний ack з іншим receipt мовчки приймався | `projection._require_same_receipt`: на шляху «ack уже є» поля receipt порівнюються з наявним ack. Порівнюються entity, version, `cluster_time`, `document_id`, `applied_to_current`, `state_changed`, `result_version`, `result_hash`, `previous_hash`, `event_id` і `event_sha256`. Однаковий receipt → `created=False`. Інший → `ConflictError` зі списком полів, що розійшлися. `acknowledged_at` не порівнюється: це час PostgreSQL | `test_projection.py::test_repeated_ack_with_a_different_receipt_is_a_conflict` (інший `event_id` → конфлікт; `applied=false` → конфлікт; 1 ack і 1 подія) |
+
+Чому RLS, а не тригер для F-2: тригер за `pg_has_role(current_user, 'collector_parser')`
+спрацював би і для superuser (для нього `pg_has_role` завжди true), а RLS за побудовою не
+діє на owner і superuser. Політики живуть у `roles.sql`, а не в міграції. Причина: вони
+посилаються на ролі, яких на чистому кластері ще немає до `collector db roles`.
+Тригер F-1 від ролей не залежить, тому він у міграції.
+
+Ризики виправлень:
+
+- `alembic check` не бачить ні тригера, ні RLS. Тригер перевіряє
+  `test_version_guard_applies_even_to_the_superuser` на схемі після `upgrade head`, RLS
+  перевіряє `test_parser_cannot_forge_domain_outbox_events` після `roles.sql`.
+- Без запуску `collector db roles` RLS вимкнено, так само як і GRANT-и (поведінка PR1).
+- Нова роль, яка має писати в outbox, потребує власної політики. Інакше вона не побачить рядків.
+
+### Команди після виправлень gate 2
+
+```text
+$ uv sync --frozen
+Checked 66 packages in 4ms
+exit=0
+$ uv run ruff check .
+All checks passed!
+exit=0
+$ uv run ruff format --check .
+240 files already formatted
+exit=0
+$ uv run mypy src
+Success: no issues found in 77 source files
+exit=0
+
+# порожня БД alembic_check, COLLECTOR_POSTGRES_DSN=postgresql://collector_test_admin:***@127.0.0.1:55433/alembic_check
+$ uv run alembic upgrade head
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001_control_queue, WP-01A PR1: control plane, job queue, origin limiter, worker pools, audit log.
+INFO  [alembic.runtime.migration] Running upgrade 0001_control_queue -> 0002_claim_index, WP-01A PR1 (gate 2, I-2): partial index під hot path `claim` (§7.2).
+INFO  [alembic.runtime.migration] Running upgrade 0002_claim_index -> 0003_default_partition, WP-01A PR1 (gate 3): DEFAULT-партиція `audit_log` (M-5) і намір drain (M-2).
+INFO  [alembic.runtime.migration] Running upgrade 0003_default_partition -> 0004_artifacts_projection, WP-01A PR2: artifacts, upload claims, projection tasks/acks, outboxes, entity index.
+INFO  [alembic.runtime.migration] Running upgrade 0004_artifacts_projection -> 0005_entity_version_guard, WP-01A PR2 (gate 2, F-1): trigger-guard — версії `entity_index` ніколи не зменшуються.
+exit=0
+$ uv run alembic check
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+No new upgrade operations detected.
+exit=0
+```
+
+```text
+$ uv run pytest -m integration tests/integration/postgres
+collected 185 items
+
+tests\integration\postgres\test_adversarial.py ..................        [  9%]
+tests\integration\postgres\test_cli_db.py ......                         [ 12%]
+tests\integration\postgres\test_control_plane.py ....                    [ 15%]
+tests\integration\postgres\test_control_plane_audit.py .............     [ 22%]
+tests\integration\postgres\test_fetch_partitions.py ...                  [ 23%]
+tests\integration\postgres\test_limiter.py .........                     [ 28%]
+tests\integration\postgres\test_migrations.py .............              [ 35%]
+tests\integration\postgres\test_outbox_entities.py .....                 [ 38%]
+tests\integration\postgres\test_pools.py ...........                     [ 44%]
+tests\integration\postgres\test_pr2_adversarial.py ................      [ 52%]
+tests\integration\postgres\test_projection.py ...........                [ 58%]
+tests\integration\postgres\test_queue.py .........                       [ 63%]
+tests\integration\postgres\test_queue_release.py ..                      [ 64%]
+tests\integration\postgres\test_role_connections.py .................    [ 74%]
+tests\integration\postgres\test_role_logins.py .........                 [ 78%]
+tests\integration\postgres\test_roles.py .....                           [ 81%]
+tests\integration\postgres\test_schema_contract.py ..................... [ 92%]
+....                                                                     [ 95%]
+tests\integration\postgres\test_upload_claims.py .........               [100%]
+
+======================= 185 passed in 131.70s (0:02:11) =======================
+exit=0
+```
+
+```text
+$ uv run pytest -m "not live"
+collected 984 items
+...
+=========== 961 passed, 23 skipped, 8 warnings in 206.71s (0:03:26) ===========
+exit=0
+```
+
+Цього разу повний `pytest -m "not live"` зелений з першого прогону. Нестабільність scaling-тестів WP-01D (розділ «Ризики», п.3) тестувальник на gate 2 не відтворив у 16 ізольованих прогонах і 8 прогонах під навантаженням (`testing-pr2.md` §6).
