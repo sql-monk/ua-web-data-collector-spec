@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from collector.contracts import ProjectionCommand, decode_event, new_entity_id, sha256_hex
 from collector.persistence.postgres.errors import (
     ConflictError,
+    InvalidValueError,
     LeaseNotOwnedError,
     NotFoundError,
 )
@@ -152,15 +153,15 @@ async def test_projection_queue_claim_heartbeat_retry_release_and_recover(
             pg_session, task_id, "proj-1", 60, now=T0 + timedelta(seconds=10)
         )
         assert expires == T0 + timedelta(seconds=70)
-        # Плановий drain: attempt не змінюється, помилка не пишеться, claimable одразу.
+        # Плановий drain: інкремент claim скасовано (CR-5), помилка не пишеться, claimable одразу.
         released = await projection.release_projection_task(
             pg_session, task_id, "proj-1", now=T0 + timedelta(seconds=11)
         )
-        assert (released.status, released.attempt, released.last_error_code) == ("pending", 1, None)
+        assert (released.status, released.attempt, released.last_error_code) == ("pending", 0, None)
         [again] = await projection.claim_projection_tasks(
             pg_session, "proj-2", 30, now=T0 + timedelta(seconds=11)
         )
-        assert again.attempt == 2
+        assert again.attempt == 1
         retried = await projection.retry_projection_task(
             pg_session,
             task_id,
@@ -172,7 +173,7 @@ async def test_projection_queue_claim_heartbeat_retry_release_and_recover(
         [third] = await projection.claim_projection_tasks(
             pg_session, "proj-3", 30, now=T0 + timedelta(hours=1)
         )
-        assert third.attempt == 3
+        assert third.attempt == 2
         recovered = await projection.recover_expired_projection_leases(
             pg_session, now=T0 + timedelta(hours=2)
         )
@@ -180,7 +181,7 @@ async def test_projection_queue_claim_heartbeat_retry_release_and_recover(
     async with pg_session.begin():
         task = await projection.get_projection_task(pg_session, task_id)
     assert task is not None
-    assert (task.status, task.attempt, task.lease_owner) == ("pending", 3, None)
+    assert (task.status, task.attempt, task.lease_owner) == ("pending", 2, None)
 
 
 async def test_retry_on_last_attempt_quarantines_projection_task(pg_session: AsyncSession) -> None:
@@ -383,3 +384,114 @@ async def test_repeated_ack_with_a_different_receipt_is_a_conflict(
         acks = await _count(pg_session, ProjectionAcknowledgement)
         events = await _count(pg_session, ChangeEvent)
     assert (acks, events) == (1, 1)
+
+
+async def test_state_a_b_a_issues_new_versions_and_reuses_the_artifact_row(
+    pg_session: AsyncSession,
+) -> None:
+    """Gate 3, CR-1: ідемпотентність — за ідентичністю parse-кроку, не за вмістом.
+
+    Стан A (fetch 1) → B (fetch 2) → знову byte-identical A (fetch 3) дає версії 1, 2, 3; третій
+    task посилається на той самий рядок `normalized_artifacts`, що й перший. Повтор parse-кроку
+    fetch 3 → той самий task без нової версії.
+    """
+    entity = await make_entity(pg_session)
+    first = await record(pg_session, entity.entity_uuid, 1, fetch=1)
+    second = await record(pg_session, entity.entity_uuid, 2, fetch=2)
+    third = await record(pg_session, entity.entity_uuid, 1, fetch=3)
+    replay = await record(pg_session, entity.entity_uuid, 1, fetch=3)
+    assert [r.task.projection_version for r in (first, second, third)] == [1, 2, 3]
+    assert third.created and not replay.created
+    assert replay.task.task_id == third.task.task_id
+    assert third.artifact.artifact_id == first.artifact.artifact_id
+    assert third.task.parse_key not in {first.task.parse_key, second.task.parse_key}
+    async with pg_session.begin():
+        counts = [
+            await _count(pg_session, model)
+            for model in (NormalizedArtifact, ProjectionTask, ParseAttempt, OutboxEvent)
+        ]
+        refreshed = await entities.get_entity(pg_session, entity.entity_uuid)
+    assert counts == [2, 3, 3, 3]
+    assert refreshed is not None and refreshed.projection_version == 3
+
+
+async def test_same_bytes_under_another_object_key_reuse_the_row_without_integrity_error(
+    pg_session: AsyncSession,
+) -> None:
+    entity = await make_entity(pg_session)
+    first = await record(pg_session, entity.entity_uuid, 1, fetch=1)
+    async with pg_session.begin():
+        other_key = await projection.record_parse_result(
+            pg_session,
+            attempt=attempt_record(),
+            artifact_ref=artifact_ref(entity.entity_uuid, 1, fetch=2),
+            object_key="normalized/other-key.json",
+            target_collection="catalog_items",
+            target_schema_version="1.0",
+            now=T0,
+        )
+    assert other_key.created and other_key.task.projection_version == 2
+    assert other_key.artifact.artifact_id == first.artifact.artifact_id
+
+
+async def test_conflicting_artifact_for_key_or_parse_is_typed_conflict(
+    pg_session: AsyncSession,
+) -> None:
+    entity = await make_entity(pg_session)
+    await record(pg_session, entity.entity_uuid, 1, fetch=1)
+    # Той самий object_key, інші bytes — content-addressed ключ не може змінити вміст.
+    async with pg_session.begin():
+        with pytest.raises(ConflictError, match="object_key"):
+            await projection.record_parse_result(
+                pg_session,
+                attempt=attempt_record(),
+                artifact_ref=artifact_ref(entity.entity_uuid, 2, fetch=2),
+                object_key=f"normalized/{1:064x}.json",
+                target_collection="catalog_items",
+                target_schema_version="1.0",
+                now=T0,
+            )
+    # Той самий parse-крок (fetch 1), але parser видав інші bytes — недетермінованість.
+    async with pg_session.begin():
+        with pytest.raises(ConflictError, match="недетермінований"):
+            await projection.record_parse_result(
+                pg_session,
+                attempt=attempt_record(),
+                artifact_ref=artifact_ref(entity.entity_uuid, 5, fetch=1),
+                object_key=f"normalized/{5:064x}.json",
+                target_collection="catalog_items",
+                target_schema_version="1.0",
+                now=T0,
+            )
+
+
+async def test_parse_outcome_decides_between_result_and_failure(pg_session: AsyncSession) -> None:
+    """Gate 3, CR-10: artifact лише для `succeeded`/`partial`; failed/skipped — окремий запис."""
+    entity = await make_entity(pg_session)
+    failed = projection.ParseAttemptRecord(
+        raw_sha256="0" * 64,
+        parser_version="parser-1.0",
+        outcome="failed",
+        domain="catalog",
+        error_code="selector_missing",
+    )
+    async with pg_session.begin():
+        with pytest.raises(InvalidValueError, match="record_parse_failure"):
+            await projection.record_parse_result(
+                pg_session,
+                attempt=failed,
+                artifact_ref=artifact_ref(entity.entity_uuid, 1),
+                object_key="normalized/x.json",
+                target_collection="catalog_items",
+                target_schema_version="1.0",
+                now=T0,
+            )
+        with pytest.raises(InvalidValueError, match="record_parse_result"):
+            await projection.record_parse_failure(pg_session, attempt_record(), now=T0)
+        row = await projection.record_parse_failure(pg_session, failed, now=T0)
+        counts = [
+            await _count(pg_session, model)
+            for model in (ParseAttempt, NormalizedArtifact, ProjectionTask)
+        ]
+    assert (row.outcome, row.error_code) == ("failed", "selector_missing")
+    assert counts == [1, 0, 0]

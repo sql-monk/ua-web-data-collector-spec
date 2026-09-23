@@ -116,3 +116,10 @@ WP-01D викликає лише `upsert_pool` (з `actor`/`reason`, суміс�
 Контрольний прогін `tests/integration/scaling` на **базовому** коміті `88323ab` (до змін PR2 у
 `src/`) дав той самий клас збою (1 з 3 прогонів, `test_self_fencing_…`), тобто нестабільність
 не внесена PR2. Деталі й дослівний вивід — `docs/plan/reports/WP-01A/implementation-pr2.md`.
+
+## 6. Уточнення §2 після gate 3 (CR-5): `release` компенсує інкремент claim
+
+`queue.release` і `projection.release_projection_task` тепер ставлять
+`attempt = GREATEST(attempt - 1, 0)`. Інкремент, який зробив claim, скасовується, тож
+перервана плановим drain спроба не «згоряє»: раніше з `max_attempts=2` job після одного drain
+і однієї справжньої помилки йшла в карантин. Полів помилки `release`, як і раніше, не пише.

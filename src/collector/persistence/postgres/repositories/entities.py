@@ -52,7 +52,6 @@ async def upsert_entity(
     session: AsyncSession,
     identity: EntityIdentity,
     *,
-    mongo_collection: str | None = None,
     now: datetime | None = None,
 ) -> EntityIndex:
     """Повертає наявний рядок за unique source identity або створює новий з новим UUIDv7.
@@ -60,6 +59,11 @@ async def upsert_entity(
     **Лічильники версій не чіпаються** — ні при створенні (обидва 0), ні при повторному
     виклику. Це навмисно: єдине місце, де `projection_version` зростає, — видача версії під
     row lock у `record_parse_result`; інакше два шляхи писали б в один лічильник.
+
+    INSERT передає **лише identity-колонки** (gate 3, S-1): версії, `confirmed_at` і
+    `mongo_*` беруться з DB defaults. Parser має column-level INSERT саме на ці колонки, тож
+    навіть прямим SQL не може створити рядок з «підтвердженою» версією без ack; прив'язку до
+    Mongo робить ack (`acknowledge_projection`) або `set_mongo_document`.
 
     Ідемпотентність тримається на `INSERT ... ON CONFLICT DO NOTHING` + повторний SELECT і
     вимагає **READ COMMITTED** (default PostgreSQL) — так само, як `queue.enqueue`.
@@ -75,9 +79,6 @@ async def upsert_entity(
             source_item_id=identity.source_item_id,
             identity_hash=identity.identity_hash,
             canonical_url=identity.canonical_url,
-            mongo_collection=mongo_collection,
-            projection_version=0,
-            confirmed_projection_version=0,
             created_at=current,
             updated_at=current,
         )

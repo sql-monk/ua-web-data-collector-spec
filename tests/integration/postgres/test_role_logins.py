@@ -242,7 +242,9 @@ async def test_each_component_runs_its_repository_operations_under_its_own_role(
 
     scheduler = await _session(await role_engine("collector_scheduler"))
     async with scheduler, scheduler.begin():
-        batch = await outbox.fetch_unpublished(scheduler, now=T0)
+        batch = await outbox.fetch_unpublished(
+            scheduler, topics=(outbox.INTERNAL_TOPIC, outbox.DOMAIN_TOPIC), now=T0
+        )
         assert len(batch) == 2
         assert await outbox.mark_published(scheduler, [e.outbox_id for e in batch], now=T0) == 2
         await projection.recover_expired_projection_leases(scheduler, now=T0)
@@ -416,3 +418,108 @@ async def test_parser_cannot_forge_domain_outbox_events(
         async with engine.connect() as conn:
             seen = set((await conn.execute(text("SELECT topic FROM outbox_events"))).scalars())
         assert seen == {"internal", "domain"}, role
+
+
+async def test_column_level_grants_close_gate3_security_findings(
+    pg_session: AsyncSession, role_engine: RoleEngine
+) -> None:
+    """Gate 3: S-1 (parser INSERT entity_index лише identity), S-2/CR-6 (parser UPDATE
+    normalized_artifacts лише `parse_attempt_id`), S-3 (scheduler UPDATE лише робочих колонок
+    outbox/projection_tasks/upload claims)."""
+    uuid = await _confirmed_entity(pg_session)
+    parser = await role_engine("collector_parser")
+    identity_insert = (
+        "INSERT INTO entity_index (entity_uuid, domain, entity_kind, source_id, source_item_id{}) "
+        "VALUES (gen_random_uuid(), 'catalog', 'catalog_item', 'catalog_ua_example', "
+        "'forged-{}'{})"
+    )
+    for extra_column, extra_value in (
+        (", confirmed_projection_version, projection_version", ", 7, 7"),
+        (", confirmed_at", ", now()"),
+        (", mongo_collection", ", 'catalog_items'"),
+    ):
+        await _denied(
+            parser, identity_insert.format(extra_column, extra_column.strip(", "), extra_value)
+        )
+    async with parser.begin() as conn:
+        await conn.execute(text(identity_insert.format("", "plain", "")))
+    await _denied(parser, "UPDATE normalized_artifacts SET sha256 = repeat('f', 64)")
+    await _denied(parser, "UPDATE normalized_artifacts SET object_key = 'x'")
+    async with parser.begin() as conn:
+        await conn.execute(text("UPDATE normalized_artifacts SET parse_attempt_id = NULL"))
+
+    scheduler = await role_engine("collector_scheduler")
+    for statement in (
+        "UPDATE outbox_events SET topic = 'domain'",
+        "UPDATE outbox_events SET payload_bytes = decode('00', 'hex')",
+        "UPDATE projection_tasks SET projection_version = 99",
+        "UPDATE projection_tasks SET artifact_id = gen_random_uuid()",
+        "UPDATE artifact_upload_claims SET sha256 = repeat('f', 64)",
+        "UPDATE artifact_upload_claims SET uri = 's3://evil'",
+    ):
+        await _denied(scheduler, statement)
+    async with scheduler.begin() as conn:
+        await conn.execute(text("UPDATE outbox_events SET attempts = attempts"))
+        await conn.execute(text("UPDATE projection_tasks SET updated_at = now()"))
+    assert uuid
+
+
+async def test_privileged_membership_is_refused_by_apply_and_verify(
+    logins: Logins, role_engine: RoleEngine
+) -> None:
+    """Gate 3, S-4: членство (транзитивне) в `pg_write_all_data` або ролі з `rolbypassrls`
+    блокує `--with-login` і `verify_runtime_login`; логін поза allowlist теж відхиляється."""
+    admin = create_async_engine(logins.database.url, isolation_level="AUTOCOMMIT", poolclass=None)
+    try:
+        for grants, cleanup in (
+            (
+                ("GRANT pg_write_all_data TO collector_parser",),
+                ("REVOKE pg_write_all_data FROM collector_parser",),
+            ),
+            (
+                (
+                    "CREATE ROLE t_bypass_gate3 NOLOGIN BYPASSRLS",
+                    "CREATE ROLE t_middle_gate3 NOLOGIN IN ROLE t_bypass_gate3",
+                    "GRANT t_middle_gate3 TO collector_parser",
+                ),
+                ("DROP ROLE t_middle_gate3", "DROP ROLE t_bypass_gate3"),
+            ),
+        ):
+            async with admin.connect() as conn:
+                for statement in grants:
+                    await conn.exec_driver_sql(statement)
+            try:
+                with pytest.raises(RoleLoginError, match="привілейованих"):
+                    await apply_database_roles(
+                        logins.database, logins=load_role_logins(logins.secrets_dir)
+                    )
+                engine = await role_engine("collector_parser")
+                async with engine.connect() as conn:
+                    with pytest.raises(RoleLoginError, match="є членом"):
+                        await verify_runtime_login(conn)
+            finally:
+                async with admin.connect() as conn:
+                    for statement in cleanup:
+                        await conn.exec_driver_sql(statement)
+        outsider_password = secrets.token_hex(16)  # одноразовий, лише loopback-БД
+        async with admin.connect() as conn:
+            await conn.exec_driver_sql(
+                f"CREATE ROLE t_outsider_gate3 LOGIN PASSWORD '{outsider_password}' "
+                "IN ROLE collector_fetcher"
+            )
+        try:
+            outsider = create_async_engine(
+                logins.database.url.set(username="t_outsider_gate3", password=outsider_password),
+                poolclass=None,
+            )
+            try:
+                async with outsider.connect() as conn:
+                    with pytest.raises(RoleLoginError, match="не runtime-роль"):
+                        await verify_runtime_login(conn)
+            finally:
+                await outsider.dispose()
+        finally:
+            async with admin.connect() as conn:
+                await conn.exec_driver_sql("DROP ROLE t_outsider_gate3")
+    finally:
+        await admin.dispose()

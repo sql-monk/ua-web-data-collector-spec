@@ -105,8 +105,21 @@ GRANT SELECT, UPDATE ON origin_rate_permits TO collector_scheduler;
 GRANT UPDATE ON dead_letters TO collector_scheduler;  -- resolved_at/resolution оператором
 GRANT SELECT ON fetches, raw_objects, parse_attempts, normalized_artifacts,
     projection_acknowledgements, entity_index, change_events TO collector_scheduler;
-GRANT SELECT, UPDATE ON artifact_upload_claims, projection_tasks, outbox_events
+-- Column-level (gate 3, S-3): лише колонки, які пишуть recover/quarantine projection tasks,
+-- outbox publisher (lease/published/failed/parked/unpark) і sweeper/expire upload claims.
+-- Scheduler не може переписати payload, topic, версію чи fencing-посилання (sha256/uri).
+-- REVOKE табличного UPDATE спершу — повторний `db roles` на БД до gate 3 інакше лишив би його.
+REVOKE UPDATE ON artifact_upload_claims, projection_tasks, outbox_events FROM collector_scheduler;
+GRANT SELECT ON artifact_upload_claims, projection_tasks, outbox_events TO collector_scheduler;
+GRANT UPDATE (status, lease_owner, lease_expires_at, leased_at, finished_at, last_error_code,
+    last_error_message, updated_at) ON projection_tasks TO collector_scheduler;
+GRANT UPDATE (available_at, published_at, parked_at, attempts, last_error_code,
+    last_error_message, updated_at) ON outbox_events TO collector_scheduler;
+GRANT INSERT (claim_id, object_key, owner, status, claim_generation, acquired_at,
+    lease_expires_at, media_type, created_at, updated_at) ON artifact_upload_claims
     TO collector_scheduler;
+GRANT UPDATE (owner, status, claim_generation, acquired_at, lease_expires_at, released_at,
+    media_type, updated_at) ON artifact_upload_claims TO collector_scheduler;
 
 -- discovery/fetch/browser: enqueue наступних jobs, permits, circuit breaker маршрутів,
 -- cursors; PR2: fetch lineage, raw pointers, upload claims (§10 п.5).
@@ -123,14 +136,23 @@ GRANT SELECT, INSERT, UPDATE ON artifact_upload_claims TO collector_fetcher;
 -- на entity_index (FOR UPDATE вимагає UPDATE), projection_tasks, outbox (projection.command).
 GRANT SELECT ON sources, fetches, raw_objects TO collector_parser;
 GRANT INSERT ON crawl_jobs TO collector_parser;
-GRANT SELECT, INSERT, UPDATE ON artifact_upload_claims, normalized_artifacts TO collector_parser;
+GRANT SELECT, INSERT, UPDATE ON artifact_upload_claims TO collector_parser;
+-- normalized_artifacts (gate 3, CR-6/S-2): закомічений pointer незмінний — parser лише
+-- проставляє lineage `parse_attempt_id` новому рядку.
+REVOKE UPDATE ON normalized_artifacts FROM collector_parser;
+GRANT SELECT, INSERT ON normalized_artifacts TO collector_parser;
+GRANT UPDATE (parse_attempt_id) ON normalized_artifacts TO collector_parser;
 GRANT SELECT, INSERT ON parse_attempts, projection_tasks, outbox_events TO collector_parser;
 -- entity_index (gate 2, F-1): лише колонки, які parser справді пише (видача версії). REVOKE
 -- табличного UPDATE спершу — інакше повторний запуск на БД після PR2 до gate 2 лишив би його
 -- (column GRANT не звужує табличний). Зменшення версій забороняє ще й тригер
 -- `entity_index_versions_monotonic` (міграція 0005) — для будь-якої ролі.
-REVOKE UPDATE ON entity_index FROM collector_parser, collector_projector;
-GRANT SELECT, INSERT ON entity_index TO collector_parser;
+-- INSERT теж column-level (gate 3, S-1): лише identity-колонки; версії, `confirmed_at` і
+-- `mongo_*` беруться з DB defaults, тож «підтверджену» версію без ack вставити не можна.
+REVOKE UPDATE, INSERT ON entity_index FROM collector_parser, collector_projector;
+GRANT SELECT ON entity_index TO collector_parser;
+GRANT INSERT (entity_uuid, domain, entity_kind, source_id, source_item_id, identity_hash,
+    canonical_url, created_at, updated_at) ON entity_index TO collector_parser;
 GRANT UPDATE (projection_version, updated_at) ON entity_index TO collector_parser;
 
 -- projector (§7.3 п.4): claim/heartbeat/ack projection_tasks, монотонний confirmed version

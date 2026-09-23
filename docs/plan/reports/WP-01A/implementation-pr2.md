@@ -8,7 +8,7 @@
 | Dependency, які закриває | `docs/plan/deps/WP-01D-to-WP-01A.md` §2 (LOGIN-ролі + per-role DSN), §3/§5 (`queue.release`), §4 (`command_timeout`) |
 | Розділи ТЗ | §5.5, §7.3 (кроки 2, 4, 5), §9.1 (рядки PR2), §9.3, §9.5, §10 п.5, п.8, п.10, §13, §15, §18; REVIEW.md R-27, R-36, R-38/R-41, R-42 |
 | Середовище | Windows 11, uv, CPython 3.13.9, PostgreSQL 18 у Docker (`postgres:18@sha256:86c951e0…`, контейнер `wp01a-pg`, loopback-порт 55433) |
-| Commits | `c5f6f70` WIP (попередня сесія), `96c1a40` fix схеми/репозиторіїв, `753d0d1` LOGIN-ролі + GRANT PR2, `e5b047d` тести PR2, `2d06588` dependency-відповіді, + фінальний коміт (re-attach `fetches_default`, §5 dependency WP-01D, цей звіт); після gate 2 — `fix(wp-01a)` (F-1…F-3) |
+| Commits | `c5f6f70` WIP (попередня сесія), `96c1a40` fix схеми/репозиторіїв, `753d0d1` LOGIN-ролі + GRANT PR2, `e5b047d` тести PR2, `2d06588` dependency-відповіді, + фінальний коміт (re-attach `fetches_default`, §5 dependency WP-01D, цей звіт); після gate 2 — `fix(wp-01a)` (F-1…F-3); після gate 3 — `docs(wp-01a)` звіти рев'ю, `fix(wp-01a)` (CR-1…CR-10, S-1…S-6) |
 
 ## Що зроблено
 
@@ -482,3 +482,137 @@ exit=0
 ```
 
 Цього разу повний `pytest -m "not live"` зелений з першого прогону. Нестабільність scaling-тестів WP-01D (розділ «Ризики», п.3) тестувальник на gate 2 не відтворив у 16 ізольованих прогонах і 8 прогонах під навантаженням (`testing-pr2.md` §6).
+
+## Fixes after gate 3
+
+Звіти: `docs/plan/reports/WP-01A/code-review-pr2.md` (changes_requested) і
+`docs/plan/reports/WP-01A/security-pr2.md` (approve з medium). Рев'юери не мали Write, тож
+обидва звіти скопійовано в репозиторій як є окремим комітом.
+
+### Відхилення від буквального тексту картки (CR-1, рішення оркестратора)
+
+Картка каже: «повторний виклик для того самого artifact → той самий task». Реалізація PR2
+тлумачила «той самий artifact» як «ті самі bytes» (`object_key`/`(sha256, entity_uuid)`), а
+також мала unique `projection_tasks(artifact_id, target_collection)`. Через це стан A→B→A з
+byte-identical artifact повертав task v1: нова версія не видавалася, і Mongo мовчки лишався
+на B. Інший `object_key` з тими самими bytes давав сирий `IntegrityError`.
+
+Тепер «той самий artifact» означає **«той самий parse-результат»**. Ключ ідемпотентності —
+`projection_tasks.parse_key`, unique, `sha256` від
+`fetch_id ␟ raw_sha256 ␟ parser_version ␟ entity_uuid ␟ target_collection`. Колонки взято
+з наявного lineage: `artifact_ref.fetch_id`, `parse_attempts.raw_sha256`,
+`parse_attempts.parser_version`. Поведінка:
+
+- повтор того самого parse-кроку (retry job, replay після crash) повертає той самий task
+  (`created=False`), нової версії немає;
+- новий fetch із byte-identical artifact (A→B→A) — новий parse: нова `projection_version` і
+  новий task, який посилається на **вже наявний** рядок `normalized_artifacts`. Дедуплікація
+  за вмістом лишилася для artifacts;
+- те саме bytes під іншим `object_key` перевикористовує рядок artifact без `IntegrityError`
+  (`ON CONFLICT DO NOTHING` без target + пошук за `object_key` або `(sha256, entity_uuid)`);
+- `object_key` з іншими bytes, а також повтор того самого parse з іншим artifact
+  (недетермінований parser) дають `ConflictError`.
+
+`uq_projection_tasks_artifact_id_target_collection` прибрано з міграції 0004 (вона ще не
+злита); замість нього `uq_projection_tasks_parse_key` і звичайний `ix_projection_tasks_artifact_id`.
+Для lineage додано `projection_tasks.parse_attempt_id` (FK, `SET NULL`).
+
+### Знахідки → виправлення → тести
+
+| Знахідка | Виправлення | Тест |
+|---|---|---|
+| CR-1 (high) | див. вище; `record_parse_result` переписано, `_artifact_for` / `_existing_parse_result` | `test_projection.py::test_state_a_b_a_issues_new_versions_and_reuses_the_artifact_row` (версії 1,2,3; повтор → той самий task; 2 artifacts на 3 tasks), `::test_same_bytes_under_another_object_key_reuse_the_row_without_integrity_error`, `::test_conflicting_artifact_for_key_or_parse_is_typed_conflict`; тестувальницький `test_pr2_adversarial.py::test_concurrent_record_of_same_artifact_yields_one_task` зелений без змін |
+| CR-2 (medium) | `fetch_unpublished` бере рядки `FOR UPDATE SKIP LOCKED` і одразу зсуває їм `available_at` на `visibility_seconds` (типово 60). Це visibility lease: після commit інший publisher рядків не бачить, доки lease не спливе. Publisher, що впав, отримає їх знову після lease («щонайменше один раз») | `test_outbox_entities.py::test_fetched_rows_stay_invisible_after_commit_until_visibility_lease_expires` |
+| CR-3 (medium) | нова колонка `outbox_events.parked_at` (0004). `mark_failed(max_attempts=10)` паркує рядок після межі спроб; `list_parked` і `unpark(actor, reason)` (з audit) — для оператора. Partial index `ix_outbox_events_unpublished` тепер `WHERE published_at IS NULL AND parked_at IS NULL`. `BackoffPolicy.delay_for`: exponent обмежено (`MAX_BACKOFF_EXPONENT = 63`) **до** піднесення | `::test_mark_failed_parks_after_max_attempts_and_operator_unparks_with_audit`; unit `test_policies.py::test_backoff_exponent_is_capped_before_power[1025, 2000, 1000000]` |
+| CR-4 (medium) | docstring `list_orphan_candidates`: обов'язковий протокол sweeper-а — acquire claim → delete → release | `test_upload_claims.py::test_sweeper_fencing_protocol_blocks_the_race_with_a_new_producer`: під claim sweeper-а новий producer отримує `StaleClaimError`, старий не комітить, після release новий producer бере `generation + 1`. `::test_sweeper_claim_is_refused_when_a_producer_reacquired_first` |
+| CR-5 (low) | `queue.release` і `release_projection_task`: `attempt = GREATEST(attempt - 1, 0)`; `WP-01A-to-WP-01D.md` §6 | `test_queue_release.py` (attempt 1 → 0), `test_projection.py::test_projection_queue_…` (лічильник спроб після release) |
+| CR-6 / S-2 | parser: `REVOKE UPDATE ON normalized_artifacts` + `GRANT UPDATE (parse_attempt_id)` | `test_role_logins.py::test_column_level_grants_close_gate3_security_findings` |
+| S-1 (medium) | parser: `REVOKE INSERT, UPDATE ON entity_index` + `GRANT INSERT` лише identity-колонок. `upsert_entity` більше не передає версії й `mongo_*` (параметр `mongo_collection` прибрано, у `src/` його ніхто не передавав); прив'язку до Mongo роблять ack або `set_mongo_document` | той самий тест: INSERT з версіями, `confirmed_at` чи `mongo_collection` → permission denied, identity-only INSERT проходить |
+| S-3 (low) | scheduler: column-level UPDATE на `outbox_events` (lease/published/parked/attempts/помилка), `projection_tasks` (статус/lease/помилка), `artifact_upload_claims` (INSERT + UPDATE колонок claim для sweeper-а, без `sha256`/`uri`/`size_bytes`/`committed_at`) | той самий тест: `topic`, `payload_bytes`, `projection_version`, `artifact_id`, `sha256`, `uri` → permission denied; робочі колонки проходять; `test_each_component_runs_…` (реальний publisher/recover/expire під scheduler) |
+| S-4 (low) | `privileged_memberships(conn, role)` — транзитивне членство в ролях з `rolsuper`/`rolcreaterole`/`rolbypassrls`, у `collector_migrate` і в `pg_write_all_data`/`pg_read_server_files`/`pg_execute_server_program`/`pg_signal_backend`. `apply_logins` відмовляє за будь-якого членства; `verify_runtime_login` перевіряє allowlist `RUNTIME_ROLES`, атрибути ролі й членства | `test_role_logins.py::test_privileged_membership_is_refused_by_apply_and_verify` (пряме `pg_write_all_data`; транзитивне через проміжну роль до ролі з `BYPASSRLS`; логін поза allowlist); `::test_runtime_role_that_is_member_of_migrate_is_refused` |
+| S-5 (low) | `DBAPIError` від `ALTER ROLE` перетворюється на `RoleLoginError("<role>: … (SQLSTATE nnnnn)")` через `from None` — без SQL і без verifier | unit `test_role_logins.py::test_alter_role_failure_reports_role_and_sqlstate_without_the_verifier` |
+| S-6 (low) | `fetch_unpublished(topics=(DOMAIN_TOPIC,))` за замовчуванням, порожній `topics` → `ValueError` | `test_outbox_entities.py::test_fetch_unpublished_is_domain_only_by_default_and_publish_marks` |
+| CR-7 (low) | коментарі й docstring міграції 0004: downgrade лише для dev, місячні партиції губляться, зберігається тільки `fetches_default` | `test_migrations.py::test_fetches_default_partition_survives_downgrade_and_is_reattached` (без змін) |
+| CR-8 (low) | `quarantine(owner=None)` → `require_audit_context` | `test_control_plane_audit.py::test_operator_quarantine_rejects_blank_actor_like_other_audited_operations` |
+| CR-9 (low) | `upsert_cursor`: `ON CONFLICT … DO UPDATE … WHERE` значення змінилися; без зміни рядок не оновлюється (ні `revision`, ні `updated_at`) і audit не пишеться | `::test_unchanged_cursor_is_neither_updated_nor_audited`, `::test_every_listed_mutation_…` (etag-1, etag-1, etag-2 → 2 audit-рядки) |
+| CR-10 (low) | `record_parse_result` приймає лише `succeeded`/`partial`; нова `record_parse_failure` пише `failed`/`skipped` без artifact, версії й task | `test_projection.py::test_parse_outcome_decides_between_result_and_failure` |
+
+Тестові фікстури: `conftest.artifact_ref(..., fetch=…)` тепер дає детермінований `fetch_id`.
+Однаковий `(n, fetch)` — той самий parse, інший `fetch` — новий parse тих самих bytes.
+Раніше `fetch_id` генерувався щоразу новим. Семантику наявних тестів (зокрема тестувальницьких)
+це не змінило: для них «той самий виклик» лишився тим самим parse-кроком.
+
+Ризики:
+
+- `alembic check` не бачить column-level GRANT, RLS і тригерів; їх перевіряють лише
+  integration-тести після `roles.sql`.
+- `parse_key` залежить від того, що WP-02 передає справжній `fetch_id` у `NormalizedArtifactRef`.
+  Однаковий `fetch_id` для різних fetch-ів перетворив би новий стан на «повтор» — це треба
+  явно зазначити в контракті parser-а WP-02.
+- Visibility lease 60 с за замовчуванням має перевищувати час доставки однієї пачки, інакше
+  дубль-публікація можлива (consumer і так дедуплікує за `event_id`).
+
+### Команди після виправлень gate 3
+
+```text
+$ uv sync --frozen
+Checked 66 packages in 6ms
+exit=0
+$ uv run ruff check .
+All checks passed!
+exit=0
+$ uv run ruff format --check .
+242 files already formatted
+exit=0
+$ uv run mypy src
+Success: no issues found in 77 source files
+exit=0
+
+# порожня БД alembic_check, COLLECTOR_POSTGRES_DSN=postgresql://collector_test_admin:***@127.0.0.1:55433/alembic_check
+$ uv run alembic upgrade head
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001_control_queue, WP-01A PR1: control plane, job queue, origin limiter, worker pools, audit log.
+INFO  [alembic.runtime.migration] Running upgrade 0001_control_queue -> 0002_claim_index, WP-01A PR1 (gate 2, I-2): partial index під hot path `claim` (§7.2).
+INFO  [alembic.runtime.migration] Running upgrade 0002_claim_index -> 0003_default_partition, WP-01A PR1 (gate 3): DEFAULT-партиція `audit_log` (M-5) і намір drain (M-2).
+INFO  [alembic.runtime.migration] Running upgrade 0003_default_partition -> 0004_artifacts_projection, WP-01A PR2: artifacts, upload claims, projection tasks/acks, outboxes, entity index.
+INFO  [alembic.runtime.migration] Running upgrade 0004_artifacts_projection -> 0005_entity_version_guard, WP-01A PR2 (gate 2, F-1): trigger-guard — версії `entity_index` ніколи не зменшуються.
+exit=0
+$ uv run alembic check
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+No new upgrade operations detected.
+exit=0
+```
+
+```text
+$ uv run pytest -m integration tests/integration/postgres
+collected 197 items
+tests\integration\postgres\test_adversarial.py ..................        [  9%]
+tests\integration\postgres\test_cli_db.py ......                         [ 12%]
+tests\integration\postgres\test_control_plane.py ....                    [ 14%]
+tests\integration\postgres\test_control_plane_audit.py ...............   [ 21%]
+tests\integration\postgres\test_fetch_partitions.py ...                  [ 23%]
+tests\integration\postgres\test_limiter.py .........                     [ 27%]
+tests\integration\postgres\test_migrations.py .............              [ 34%]
+tests\integration\postgres\test_outbox_entities.py .......               [ 38%]
+tests\integration\postgres\test_pools.py ...........                     [ 43%]
+tests\integration\postgres\test_pr2_adversarial.py ................      [ 51%]
+tests\integration\postgres\test_projection.py ...............            [ 59%]
+tests\integration\postgres\test_queue.py .........                       [ 63%]
+tests\integration\postgres\test_queue_release.py ..                      [ 64%]
+tests\integration\postgres\test_role_connections.py .................    [ 73%]
+tests\integration\postgres\test_role_logins.py ...........               [ 79%]
+tests\integration\postgres\test_roles.py .....                           [ 81%]
+tests\integration\postgres\test_schema_contract.py ..................... [ 92%]
+....                                                                     [ 94%]
+tests\integration\postgres\test_upload_claims.py ...........             [100%]
+======================= 197 passed in 326.84s (0:05:26) =======================
+```
+
+```text
+$ uv run pytest -m "not live"
+exit=0
+collected 1000 items
+=========== 977 passed, 23 skipped, 8 warnings in 276.00s (0:04:36) ===========
+```

@@ -129,12 +129,17 @@ class OutboxEvent(Base):
         Index(
             "ix_outbox_events_published_at_available_at", "published_at", "available_at", "event_id"
         ),
-        # Hot path publisher: лише неопубліковані рядки, у точному порядку ORDER BY.
+        # Hot path publisher: лише неопубліковані й не припарковані рядки, у порядку ORDER BY.
         Index(
             "ix_outbox_events_unpublished",
             "available_at",
             "event_id",
-            postgresql_where=text("published_at IS NULL"),
+            postgresql_where=text("published_at IS NULL AND parked_at IS NULL"),
+        ),
+        Index(
+            "ix_outbox_events_parked_at",
+            "parked_at",
+            postgresql_where=text("parked_at IS NOT NULL"),
         ),
         Index("ix_outbox_events_aggregate_id", "aggregate_id"),
     )
@@ -152,6 +157,8 @@ class OutboxEvent(Base):
     payload_artifact_uri: Mapped[str | None] = mapped_column(Text)
     available_at: Mapped[datetime] = mapped_column(nullable=False, server_default=text("now()"))
     published_at: Mapped[datetime | None]
+    parked_at: Mapped[datetime | None]
+    """Доставку зупинено після `max_attempts` (gate 3, CR-3): рядок чекає рішення оператора."""
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     last_error_code: Mapped[str | None] = mapped_column(String(64))
     last_error_message: Mapped[str | None] = mapped_column(String(2048))

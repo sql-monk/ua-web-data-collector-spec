@@ -413,8 +413,20 @@ async def list_orphan_candidates(
     - **немає живого claim**: lease сплив більш ніж `grace` тому.
 
     `grace` має перевищувати найдовше вікно «PUT + HEAD + commit», інакше sweeper змагається з
-    producer-ом між HEAD і commit (R-38). Функція нічого не змінює — рішення про видалення
-    приймає викликач.
+    producer-ом між HEAD і commit (R-38). Функція нічого не змінює і **сама по собі не дає
+    права видаляти** — між SELECT і DELETE новий producer може взяти ключ.
+
+    **Обов'язковий fencing-протокол sweeper-а (gate 3, CR-4)** — для кожного кандидата:
+
+    1. `acquire_upload_claim(key, owner=<sweeper>, lease_seconds=…)` окремою короткою
+       транзакцією. `StaleClaimError` (живий lease producer-а або ключ уже `committed`) →
+       ключ пропускається: його хтось використовує;
+    2. успішний claim робить sweeper єдиним власником ключа: producer, що прийде тепер,
+       отримає `StaleClaimError` на acquire, а старий producer не закомітить свою
+       `claim_generation` (вона вже менша за поточну);
+    3. видалити об'єкт з artifact store, поки lease sweeper-а живий;
+    4. `release_claim(key, generation, owner=<sweeper>)`. Наступний producer перебере ключ з
+       `claim_generation + 1`, виконає PUT + HEAD заново і лише тоді commit-не reference.
 
     Transaction boundary: викликач; один SELECT без блокувань.
     """

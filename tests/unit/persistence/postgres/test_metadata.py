@@ -77,7 +77,9 @@ def test_pr2_unique_keys_that_carry_idempotency() -> None:
         }
 
     assert ("entity_uuid", "projection_version") in uniques("projection_tasks")
-    assert ("artifact_id", "target_collection") in uniques("projection_tasks")
+    # CR-1: ідемпотентність — за ідентичністю parse-кроку, не за artifact.
+    assert ("parse_key",) in uniques("projection_tasks")
+    assert ("artifact_id", "target_collection") not in uniques("projection_tasks")
     assert ("object_key",) in uniques("artifact_upload_claims")
     assert ("object_key",) in uniques("normalized_artifacts")
     assert ("sha256",) in uniques("raw_objects")

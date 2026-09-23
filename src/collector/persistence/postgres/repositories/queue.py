@@ -30,14 +30,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, insert, select, update
+from sqlalchemy import ColumnElement, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.contracts import new_entity_id
 from collector.persistence.postgres.clock import resolve_now
 from collector.persistence.postgres.errors import (
-    InvalidValueError,
     LeaseNotOwnedError,
     NotFoundError,
 )
@@ -46,7 +45,7 @@ from collector.persistence.postgres.models import (
     CrawlJob,
     DeadLetter,
 )
-from collector.persistence.postgres.repositories.audit import append_audit
+from collector.persistence.postgres.repositories.audit import append_audit, require_audit_context
 
 TERMINAL_JOB_STATUSES: frozenset[str] = frozenset({"succeeded", "quarantined"})
 
@@ -66,6 +65,9 @@ class NewJob:
     source_id: UUID | None = None
 
 
+MAX_BACKOFF_EXPONENT = 63
+
+
 @dataclass(frozen=True, slots=True)
 class BackoffPolicy:
     """Експоненційний backoff з jitter: `base * multiplier**(attempt-1)`, рівномірний jitter у
@@ -81,7 +83,10 @@ class BackoffPolicy:
     jitter_ratio: float = 0.2
 
     def delay_for(self, attempt: int, rng: random.Random) -> timedelta:
-        exponent = max(attempt - 1, 0)
+        # Exponent обмежено ДО піднесення (gate 3, CR-3): `2.0 ** 1025` — OverflowError, тобто
+        # outbox/черга з тисячами спроб падали б замість віддати `maximum`. 2**63 × base уже
+        # на порядки більше будь-якого розумного `maximum`, тож cap нижче значення не змінює.
+        exponent = min(max(attempt - 1, 0), MAX_BACKOFF_EXPONENT)
         maximum = self.maximum.total_seconds()
         delay = min(self.base.total_seconds() * (self.multiplier**exponent), maximum)
         jitter = rng.uniform(0.0, delay * self.jitter_ratio) if self.jitter_ratio > 0 else 0.0
@@ -304,9 +309,9 @@ async def quarantine(
     Transaction boundary: викликач.
     """
     current = resolve_now(now)
-    if owner is None and (not actor or not reason):
-        msg = "операторський quarantine (owner=None) вимагає actor і reason для audit (§13)"
-        raise InvalidValueError(msg)
+    if owner is None:
+        # Та сама перевірка, що в інших audited-операціях: пробільний actor/reason — не слід.
+        require_audit_context(actor, reason)
     job = (
         await _lock_owned(session, job_id, owner)
         if owner is not None
@@ -350,8 +355,9 @@ async def release(
     - він пише `last_error_code`/`last_error_message` (`drain_timeout`), що вводить в оману
       оператора і псує статистику dead letters (уточнення §5 запиту).
 
-    Тому `release` не чіпає ні `attempt`, ні поля помилки — це той самий перехід, що робить
-    `recover_expired_leases`, але за явним викликом власника, без очікування TTL lease.
+    Тому `release` не пише полів помилки і **компенсує інкремент claim**:
+    `attempt = GREATEST(attempt - 1, 0)` (gate 3, CR-5) — спроба, перервана плановим drain, не
+    «згоряє» (інакше `max_attempts=2` давав би карантин після однієї справжньої помилки).
     `not_before = now`, тож job стає claimable одразу.
 
     Чужий/відсутній lease → `LeaseNotOwnedError`: повертати чужу job не можна, її вже виконує
@@ -368,6 +374,7 @@ async def release(
                 lease_expires_at=None,
                 leased_at=None,
                 not_before=current,
+                attempt=func.greatest(CrawlJob.attempt - 1, 0),
                 updated_at=current,
             )
             .returning(CrawlJob)

@@ -182,13 +182,47 @@ async def apply_roles(conn: AsyncConnection, *, sql_path: Path | None = None) ->
         raise DBAPIError(statement=None, params=None, orig=exc) from exc
 
 
+PRIVILEGED_BUILTIN_ROLES: tuple[str, ...] = (
+    "pg_write_all_data",
+    "pg_read_server_files",
+    "pg_execute_server_program",
+    "pg_signal_backend",
+)
+"""Вбудовані ролі, членство в яких дає runtime більше, ніж GRANT-и `roles.sql` (gate 3, S-4)."""
+
+_PRIVILEGED_MEMBERSHIPS = text(
+    "SELECT r.rolname FROM pg_roles r "
+    "WHERE r.rolname <> :role AND pg_has_role(:role, r.oid, 'MEMBER') "
+    "AND (r.rolsuper OR r.rolcreaterole OR r.rolbypassrls OR r.rolname = ANY(:privileged)) "
+    "ORDER BY r.rolname"
+)
+
+
+async def privileged_memberships(conn: AsyncConnection, role: str) -> list[str]:
+    """Ролі (транзитивно), членом яких є `role` і які дають права понад runtime (S-4).
+
+    Привілейована — роль з `rolsuper`/`rolcreaterole`/`rolbypassrls`, `collector_migrate` або
+    одна з `PRIVILEGED_BUILTIN_ROLES`. Для superuser `pg_has_role` істинний для всіх ролей,
+    тож superuser-логін завжди має непорожній результат.
+    """
+    rows = await conn.execute(
+        _PRIVILEGED_MEMBERSHIPS,
+        {"role": role, "privileged": [MIGRATE_ROLE, *PRIVILEGED_BUILTIN_ROLES]},
+    )
+    return [str(name) for name in rows.scalars()]
+
+
 async def apply_logins(conn: AsyncConnection, logins: list[RoleLogin]) -> list[str]:
     """`ALTER ROLE … LOGIN PASSWORD '<verifier>'` для runtime-ролей. Ідемпотентно.
 
     Явні `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` — щоб ручна помилка
-    оператора в минулому не лишила runtime-логін із зайвими атрибутами. Членство runtime-ролі
-    в `collector_migrate` — помилка конфігурації: мовчки `REVOKE` тут не робиться, а
-    операція падає, бо хтось свідомо видав runtime права міграцій.
+    оператора в минулому не лишила runtime-логін із зайвими атрибутами. Роль має бути з
+    allowlist `RUNTIME_ROLES` і **не** бути (транзитивно) членом привілейованих ролей
+    (`privileged_memberships`, gate 3 S-4): мовчки `REVOKE` тут не робиться — операція падає,
+    бо хтось свідомо видав runtime зайві права.
+
+    Помилка самого `ALTER ROLE` → `RoleLoginError` лише з назвою ролі та SQLSTATE (S-5): текст
+    `DBAPIError` містить SQL разом із SCRAM verifier і не має потрапити у stderr/CI-логи.
 
     Transaction boundary: викликач; зазвичай та сама транзакція, що й `apply_roles`
     (ролі мають уже існувати).
@@ -196,47 +230,71 @@ async def apply_logins(conn: AsyncConnection, logins: list[RoleLogin]) -> list[s
     applied: list[str] = []
     for login in logins:
         component_of(login.role)
-        is_migrator = await conn.scalar(
-            text("SELECT pg_has_role(:role, :migrate, 'MEMBER')"),
-            {"role": login.role, "migrate": MIGRATE_ROLE},
-        )
-        if is_migrator:
-            msg = f"{login.role} є членом {MIGRATE_ROLE}: runtime-роль не може мати права міграцій"
+        extra = await privileged_memberships(conn, login.role)
+        if extra:
+            msg = (
+                f"{login.role} є членом привілейованих ролей {', '.join(extra)}: "
+                "runtime-роль не може мати прав понад GRANT-и roles.sql (§13)"
+            )
             raise RoleLoginError(msg)
         verifier = scram_sha256_verifier(login.password)
         # ALTER ROLE не приймає bind-параметрів. Ім'я ролі — з фіксованого RUNTIME_ROLES
         # (перевірено вище), verifier складається лише з [A-Za-z0-9+/=:$-], лапок у ньому
         # бути не може. `exec_driver_sql`, а не `text()`: `:<base64>` у verifier `text()`
         # сприйняв би як bind-параметр.
-        await conn.exec_driver_sql(
-            f'ALTER ROLE "{login.role}" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
-            f"NOREPLICATION NOBYPASSRLS INHERIT PASSWORD '{verifier}'"
-        )
+        try:
+            await conn.exec_driver_sql(
+                f'ALTER ROLE "{login.role}" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
+                f"NOREPLICATION NOBYPASSRLS INHERIT PASSWORD '{verifier}'"
+            )
+        except DBAPIError as exc:
+            sqlstate = _sqlstate(exc)
+            msg = f"{login.role}: ALTER ROLE … LOGIN не вдалося (SQLSTATE {sqlstate})"
+            raise RoleLoginError(msg) from None
         applied.append(login.role)
     return applied
 
 
-async def verify_runtime_login(conn: AsyncConnection) -> str:
-    """Перевірка для runtime-процесів (WP-01D): поточний логін — не superuser і не міграції.
+def _sqlstate(exc: DBAPIError) -> str:
+    """SQLSTATE з помилки драйвера без її тексту (текст може містити SQL із verifier)."""
+    orig: Any = exc.orig
+    for source in (orig, getattr(orig, "__cause__", None)):
+        code = getattr(source, "sqlstate", None) or getattr(source, "pgcode", None)
+        if isinstance(code, str) and code:
+            return code
+    return "unknown"
 
-    Повертає `current_user`, інакше `RoleLoginError`. Призначена для одного виклику при старті
-    процесу: спільний міграційний DSN (знахідка F1 WP-01D) має падати одразу, а не тихо
-    працювати з правами власника схеми (§13).
+
+async def verify_runtime_login(conn: AsyncConnection) -> str:
+    """Перевірка для runtime-процесів (WP-01D): поточний логін — runtime-роль без зайвих прав.
+
+    Вимоги (gate 3, S-4): `current_user` з allowlist `RUNTIME_ROLES`; без `rolsuper`/
+    `rolcreaterole`/`rolbypassrls`; без (транзитивного) членства в привілейованих ролях
+    (`privileged_memberships`, включно з `collector_migrate`). Повертає `current_user`, інакше
+    `RoleLoginError`. Призначена для одного виклику при старті процесу: спільний міграційний
+    DSN (знахідка F1 WP-01D) має падати одразу, а не тихо працювати з правами власника схеми.
     """
     row = (
         await conn.execute(
             text(
                 "SELECT current_user AS name, r.rolsuper AS superuser, "
-                "pg_has_role(current_user, :migrate, 'MEMBER') AS migrate "
+                "r.rolcreaterole AS createrole, r.rolbypassrls AS bypassrls "
                 "FROM pg_roles r WHERE r.rolname = current_user"
-            ),
-            {"migrate": MIGRATE_ROLE},
+            )
         )
     ).one()
-    if row.superuser or row.migrate:
+    name = str(row.name)
+    hint = "використайте DSN компонента (postgres_dsn_<component>), §13"
+    if row.superuser or row.createrole or row.bypassrls:
         msg = (
-            f"runtime-підключення під {row.name!r} має права superuser/{MIGRATE_ROLE}: "
-            "використайте DSN компонента (postgres_dsn_<component>), §13"
+            f"runtime-підключення під {name!r} має атрибути superuser/createrole/bypassrls: {hint}"
         )
         raise RoleLoginError(msg)
-    return str(row.name)
+    if name not in RUNTIME_ROLES:
+        msg = f"runtime-підключення під {name!r}: це не runtime-роль {RUNTIME_ROLES}; {hint}"
+        raise RoleLoginError(msg)
+    extra = await privileged_memberships(conn, name)
+    if extra:
+        msg = f"runtime-підключення під {name!r} є членом {', '.join(extra)}: {hint}"
+        raise RoleLoginError(msg)
+    return name

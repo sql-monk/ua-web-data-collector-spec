@@ -7,11 +7,17 @@ from datetime import timedelta
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from collector.contracts import new_entity_id
 from collector.contracts.enums import DataDomain, EntityKind
-from collector.persistence.postgres.errors import NotFoundError
+from collector.persistence.postgres.errors import (
+    InvalidTransitionError,
+    InvalidValueError,
+    NotFoundError,
+)
+from collector.persistence.postgres.models import AuditLog
 from collector.persistence.postgres.repositories import entities, outbox, projection
 
 from .conftest import FIXED_NOW, make_entity, receipt, record
@@ -33,46 +39,108 @@ async def _one_domain_event(session: AsyncSession) -> None:
         )
 
 
-async def test_fetch_unpublished_respects_topic_availability_and_publish_marks(
+BOTH_TOPICS = (outbox.INTERNAL_TOPIC, outbox.DOMAIN_TOPIC)
+
+
+async def test_fetch_unpublished_is_domain_only_by_default_and_publish_marks(
     pg_session: AsyncSession,
 ) -> None:
     await _one_domain_event(pg_session)  # 1 internal projection.command + 1 domain.changed
     async with pg_session.begin():
-        domain = await outbox.fetch_unpublished(pg_session, topics=[outbox.DOMAIN_TOPIC], now=T0)
-        everything = await outbox.fetch_unpublished(pg_session, now=T0)
-        assert await outbox.count_backlog(pg_session, now=T0) == 2
+        assert await outbox.count_backlog(pg_session) == 2
+        # S-6: без явних topics — лише `domain` (внутрішня команда назовні не йде, R-30).
+        domain = await outbox.fetch_unpublished(pg_session, now=T0)
+        internal = await outbox.fetch_unpublished(
+            pg_session, topics=[outbox.INTERNAL_TOPIC], now=T0
+        )
     assert [e.event_type for e in domain] == ["catalog.item.changed"]
-    assert {e.topic for e in everything} == {"internal", "domain"}
+    assert [e.topic for e in internal] == ["internal"]
     async with pg_session.begin():
         assert await outbox.mark_published(pg_session, [domain[0].outbox_id], now=T0) == 1
         # Повторне підтвердження (publisher перезапустився після доставки) — нічого не змінює.
         assert await outbox.mark_published(pg_session, [domain[0].outbox_id], now=T0) == 0
-        assert await outbox.fetch_unpublished(pg_session, topics=["domain"], now=T0) == []
-        assert await outbox.count_backlog(pg_session, topic="domain", now=T0) == 0
+        assert await outbox.count_backlog(pg_session, topic="domain") == 0
         stored = await outbox.get_event(pg_session, domain[0].event_id)
+        with pytest.raises(ValueError, match="topics"):
+            await outbox.fetch_unpublished(pg_session, topics=(), now=T0)
     assert stored is not None and stored.published_at == T0
+
+
+async def test_fetched_rows_stay_invisible_after_commit_until_visibility_lease_expires(
+    pg_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """CR-2: publisher A бере рядки й комітить; publisher B після commit їх не бачить до спливу
+    lease; якщо A помер (не позначив), рядки повертаються — «щонайменше один раз»."""
+    async with pg_sessions() as session:
+        await _one_domain_event(session)
+    async with pg_sessions() as a, a.begin():
+        taken = await outbox.fetch_unpublished(a, visibility_seconds=30, now=T0)
+    assert len(taken) == 1
+    async with pg_sessions() as b, b.begin():
+        assert await outbox.fetch_unpublished(b, now=T0 + timedelta(seconds=29)) == []
+        again = await outbox.fetch_unpublished(b, now=T0 + timedelta(seconds=30))
+        # Лічильник backlog рахує і рядки в польоті.
+        assert await outbox.count_backlog(b, topic="domain") == 1
+    assert [e.outbox_id for e in again] == [taken[0].outbox_id]
 
 
 async def test_mark_failed_backs_off_and_keeps_row(pg_session: AsyncSession) -> None:
     await _one_domain_event(pg_session)
     async with pg_session.begin():
-        [event] = await outbox.fetch_unpublished(pg_session, topics=["domain"], now=T0)
+        [event] = await outbox.fetch_unpublished(pg_session, now=T0)
         failed = await outbox.mark_failed(
             pg_session, event.outbox_id, error_code="broker_down", error_message="x", now=T0
         )
-        assert (failed.attempts, failed.last_error_code) == (1, "broker_down")
+        assert (failed.attempts, failed.last_error_code, failed.parked_at) == (
+            1,
+            "broker_down",
+            None,
+        )
         assert failed.available_at > T0
         # Недоступна до backoff, але не загублена.
-        assert await outbox.fetch_unpublished(pg_session, topics=["domain"], now=T0) == []
-        later = await outbox.fetch_unpublished(
-            pg_session, topics=["domain"], now=T0 + timedelta(hours=1)
-        )
+        assert await outbox.fetch_unpublished(pg_session, now=T0) == []
+        later = await outbox.fetch_unpublished(pg_session, now=T0 + timedelta(hours=1))
         assert [e.outbox_id for e in later] == [event.outbox_id]
         age = await outbox.oldest_unpublished_age(pg_session, now=T0 + timedelta(minutes=1))
     assert age == timedelta(minutes=1)
     async with pg_session.begin():
         with pytest.raises(NotFoundError):
             await outbox.mark_failed(pg_session, new_entity_id(), error_code="x", now=T0)
+
+
+async def test_mark_failed_parks_after_max_attempts_and_operator_unparks_with_audit(
+    pg_session: AsyncSession,
+) -> None:
+    """CR-3: після `max_attempts` рядок паркується, publisher його не бере; `unpark` —
+    операторська дія з audit, після неї доставка відновлюється з `attempts = 0`."""
+    await _one_domain_event(pg_session)
+    moment = T0
+    async with pg_session.begin():
+        [event] = await outbox.fetch_unpublished(pg_session, now=moment)
+        for _ in range(3):
+            event = await outbox.mark_failed(
+                pg_session, event.outbox_id, error_code="broker_down", max_attempts=3, now=moment
+            )
+            moment += timedelta(days=1)
+    assert event.attempts == 3 and event.parked_at is not None
+    async with pg_session.begin():
+        assert await outbox.fetch_unpublished(pg_session, now=moment + timedelta(days=30)) == []
+        assert [e.outbox_id for e in await outbox.list_parked(pg_session)] == [event.outbox_id]
+        assert await outbox.count_backlog(pg_session, topic="domain") == 0
+        with pytest.raises(InvalidValueError):
+            await outbox.unpark(pg_session, event.outbox_id, actor=" ", reason="x", now=moment)
+        unparked = await outbox.unpark(
+            pg_session, event.outbox_id, actor="op", reason="broker fixed", now=moment
+        )
+        assert (unparked.parked_at, unparked.attempts) == (None, 0)
+        with pytest.raises(InvalidTransitionError):
+            await outbox.unpark(pg_session, event.outbox_id, actor="op", reason="x", now=moment)
+        audits = list(
+            await pg_session.scalars(select(AuditLog).where(AuditLog.action == "outbox.unpark"))
+        )
+        redelivered = await outbox.fetch_unpublished(pg_session, now=moment)
+    assert len(audits) == 1 and audits[0].actor == "op"
+    assert [e.outbox_id for e in redelivered] == [event.outbox_id]
 
 
 async def test_parallel_publishers_do_not_receive_the_same_row(
@@ -86,7 +154,7 @@ async def test_parallel_publishers_do_not_receive_the_same_row(
 
     async def publisher() -> list[UUID]:
         async with pg_sessions() as session, session.begin():
-            batch = await outbox.fetch_unpublished(session, limit=4, now=T0)
+            batch = await outbox.fetch_unpublished(session, topics=BOTH_TOPICS, limit=4, now=T0)
             await barrier.wait()  # обидві транзакції тримають locks одночасно
             return [row.outbox_id for row in batch]
 

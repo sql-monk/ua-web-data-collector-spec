@@ -370,8 +370,11 @@ async def upsert_cursor(
     request_id: str | None = None,
     now: datetime | None = None,
 ) -> SourceCursor:
-    """Вставляє або оновлює cursor (`revision + 1` при кожному оновленні) + audit на **кожен**
-    виклик (кожен змінює `revision`/`updated_at`, тобто є мутацією).
+    """Вставляє або оновлює cursor (`revision + 1` при кожному оновленні) + audit.
+
+    Gate 3 (CR-9): якщо `cursor_value`/`cursor_at`/`route_id` не змінилися, рядок **не
+    оновлюється** (ні `revision`, ні `updated_at`) і audit не пишеться — немає мутації, немає
+    сліду; повертається наявний cursor. Будь-яка справжня зміна — рівно один audit-рядок.
 
     Cursor визначає, з якого місця система продовжить обхід, тож його ручний або помилковий
     зсув — класична причина «мовчазної» втрати даних; before/after у журналі роблять таке
@@ -413,12 +416,32 @@ async def upsert_cursor(
                 "revision": SourceCursor.revision + 1,
                 "updated_at": current,
             },
+            where=(
+                SourceCursor.cursor_value.is_distinct_from(cursor_value)
+                | SourceCursor.cursor_at.is_distinct_from(cursor_at)
+                | SourceCursor.route_id.is_distinct_from(route_id)
+            ),
         )
         .returning(SourceCursor)
         # Рядок міг уже бути в identity map (той самий session) — оновити атрибути з RETURNING.
         .execution_options(populate_existing=True)
     )
-    cursor = (await session.execute(stmt)).scalar_one()
+    cursor = (await session.execute(stmt)).scalar_one_or_none()
+    if cursor is None:
+        # ON CONFLICT … WHERE не спрацював: значення ті самі — повертаємо наявний без сліду.
+        unchanged = await session.scalar(
+            select(SourceCursor)
+            .where(
+                SourceCursor.source_id == source_pk,
+                SourceCursor.cursor_kind == cursor_kind,
+                SourceCursor.cursor_key == cursor_key,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if unchanged is None:  # pragma: no cover — можливо лише поза READ COMMITTED
+            msg = f"cursor {cursor_kind}/{cursor_key} зник між INSERT і SELECT"
+            raise NotFoundError(msg)
+        return unchanged
     await append_audit(
         session,
         actor=actor,

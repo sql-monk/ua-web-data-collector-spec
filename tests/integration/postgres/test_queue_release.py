@@ -1,4 +1,5 @@
-"""`queue.release` (dependency WP-01D→WP-01A §3/§5): плановий drain без інкременту `attempt`,
+"""`queue.release` (dependency WP-01D→WP-01A §3/§5; gate 3 CR-5): плановий drain компенсує
+інкремент `attempt` від claim (`GREATEST(attempt - 1, 0)`),
 без полів помилки і без карантину навіть на останній спробі."""
 
 from __future__ import annotations
@@ -35,7 +36,8 @@ async def test_release_returns_job_immediately_without_attempt_or_error(
     async with pg_session.begin():
         released = await queue.release(pg_session, job.job_id, "w-1", now=T0 + timedelta(seconds=5))
     assert released.status == "pending"
-    assert (released.attempt, released.lease_owner, released.lease_expires_at) == (1, None, None)
+    # Спроба, перервана drain, не «згоряє»: інкремент claim скасовано (CR-5).
+    assert (released.attempt, released.lease_owner, released.lease_expires_at) == (0, None, None)
     assert (released.last_error_code, released.last_error_message) == (None, None)
     assert released.not_before == T0 + timedelta(seconds=5)
     async with pg_session.begin():

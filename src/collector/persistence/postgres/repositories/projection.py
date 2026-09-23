@@ -1,6 +1,7 @@
 """Крок 2 і крок 4 потоку §7.3: видача projection version і фіксація Mongo receipt.
 
-Операції: `record_parse_result`, `claim_projection_tasks`, `heartbeat_projection_task`,
+Операції: `record_parse_result`, `record_parse_failure`, `claim_projection_tasks`,
+`heartbeat_projection_task`,
 `retry_projection_task`, `release_projection_task`, `recover_expired_projection_leases`,
 `quarantine_projection_task`, `acknowledge_projection`, `get_projection_task`.
 
@@ -51,6 +52,7 @@ from collector.contracts.canonical import CANONICAL_JSON_MEDIA_TYPE
 from collector.persistence.postgres.clock import resolve_now
 from collector.persistence.postgres.errors import (
     ConflictError,
+    InvalidValueError,
     LeaseNotOwnedError,
     NotFoundError,
 )
@@ -103,6 +105,32 @@ class ParseResult:
     """`False` — повторний виклик для того самого artifact: повернено наявні task/command."""
 
 
+SUCCESS_PARSE_OUTCOMES: frozenset[str] = frozenset({"succeeded", "partial"})
+"""Outcome, для яких parser видає normalized artifact (`record_parse_result`)."""
+FAILED_PARSE_OUTCOMES: frozenset[str] = frozenset({"failed", "skipped"})
+"""Outcome без artifact (`record_parse_failure`)."""
+
+
+def parse_key(
+    *,
+    fetch_id: UUID,
+    raw_sha256: str,
+    parser_version: str,
+    entity_uuid: UUID,
+    target_collection: str,
+) -> str:
+    """Ідентичність parse-кроку для `projection_tasks.parse_key` (gate 3, CR-1).
+
+    Той самий fetch (lineage raw object), та сама версія парсера, та сама сутність і target
+    collection — це **той самий** parse: повтор (retry job, replay після crash) не видає нової
+    версії. Новий fetch того самого URL — новий parse, навіть якщо bytes/artifact byte-identical
+    (стан A→B→A має стати версією 3, а не «вже бачили»). Роздільник `\\x1f` не зустрічається в
+    жодному з полів.
+    """
+    parts = (str(fetch_id), raw_sha256, parser_version, str(entity_uuid), target_collection)
+    return sha256_hex("\x1f".join(parts).encode("utf-8"))
+
+
 async def record_parse_result(
     session: AsyncSession,
     *,
@@ -118,24 +146,33 @@ async def record_parse_result(
 ) -> ParseResult:
     """§7.3 крок 2 / §10 п.8 — **одна транзакція**, викликач лише робить commit.
 
-    Послідовність:
+    Ідемпотентність — за **ідентичністю parse-кроку** (`parse_key`: `artifact_ref.fetch_id` +
+    `attempt.raw_sha256` + `attempt.parser_version` + `entity_uuid` + `target_collection`), а не
+    за вмістом artifact (gate 3, CR-1; тлумачення картки «той самий artifact → той самий task»
+    як «той самий parse-результат»):
 
     1. row lock на `entity_index` сутності (`SELECT … FOR UPDATE`) — серіалізує видачу версій
-       для цієї сутності і нікого більше; рядок має вже існувати
-       (`entities.upsert_entity` — identity resolution передує парсингу, §9.3);
-    2. `normalized_artifacts` `ON CONFLICT (object_key) DO NOTHING`. Конфлікт означає
-       **повторний виклик для того самого artifact**: функція повертає наявний task і
-       `created=False`, не витрачаючи нову `projection_version` і не пишучи ні другого
-       `parse_attempt`, ні другого outbox-рядка (ключ ідемпотентності — content-addressed
-       `object_key`);
-    3. `parse_attempts`;
-    4. `entity_index.projection_version + 1` → `projection_tasks`;
-    5. `outbox_events` з canonical bytes `ProjectionCommand` (топік `internal`: R-30 —
-       команда не публікується зовнішнім споживачам; `event_id = task_id` робить її unique).
+       і повтори того самого parse; рядок має вже існувати (`entities.upsert_entity`);
+    2. task із тим самим `parse_key` уже є → повертається він (`created=False`), нова версія
+       не видається; якщо повтор приніс **інший** artifact (недетермінований parser) →
+       `ConflictError`;
+    3. `normalized_artifacts` — дедуплікація за вмістом: `ON CONFLICT DO NOTHING` за
+       `object_key` або `(sha256, entity_uuid)`; наявний рядок із тими самими bytes
+       перевикористовується (стан A→B→A), інша сутність або інші bytes за тим самим ключем →
+       `ConflictError` (жодного сирого `IntegrityError`);
+    4. `parse_attempts` → `entity_index.projection_version + 1` → `projection_tasks` (з
+       `parse_key`, `parse_attempt_id`) → `outbox_events(projection.command, topic=internal,
+       event_id = task_id)`.
 
-    `artifact_ref.entity_uuid` — джерело істини для сутності; `ConflictError`, якщо він не
-    збігається з `entity_uuid` наявного artifact.
+    `attempt.outcome` має бути `succeeded`/`partial` (CR-10), інакше `InvalidValueError`;
+    невдалий/пропущений parse без artifact пише `record_parse_failure`.
     """
+    if attempt.outcome not in SUCCESS_PARSE_OUTCOMES:
+        msg = (
+            f"record_parse_result: outcome {attempt.outcome!r} не дає artifact — використайте "
+            f"record_parse_failure (дозволені {sorted(SUCCESS_PARSE_OUTCOMES)})"
+        )
+        raise InvalidValueError(msg)
     current = resolve_now(now)
     entity = await session.scalar(
         select(EntityIndex)
@@ -151,19 +188,22 @@ async def record_parse_result(
         )
         raise NotFoundError(msg)
 
-    values = normalized_artifact_values(artifact_ref, object_key=object_key, now=current)
-    values["parse_attempt_id"] = None
-    inserted = (
-        await session.execute(
-            pg_insert(NormalizedArtifact)
-            .values(**values)
-            .on_conflict_do_nothing(index_elements=[NormalizedArtifact.object_key])
-            .returning(NormalizedArtifact)
-        )
-    ).scalar_one_or_none()
-    if inserted is None:
-        return await _existing_parse_result(session, object_key, target_collection, artifact_ref)
+    key = parse_key(
+        fetch_id=artifact_ref.fetch_id,
+        raw_sha256=attempt.raw_sha256,
+        parser_version=attempt.parser_version,
+        entity_uuid=artifact_ref.entity_uuid,
+        target_collection=target_collection,
+    )
+    existing_task = await session.scalar(
+        select(ProjectionTask)
+        .where(ProjectionTask.parse_key == key)
+        .execution_options(populate_existing=True)
+    )
+    if existing_task is not None:
+        return await _existing_parse_result(session, existing_task, artifact_ref)
 
+    artifact = await _artifact_for(session, artifact_ref, object_key=object_key, now=current)
     parse_attempt = ParseAttempt(
         parse_attempt_id=new_entity_id(),
         fetch_id=attempt.fetch_id,
@@ -183,7 +223,9 @@ async def record_parse_result(
     )
     session.add(parse_attempt)
     await session.flush()
-    inserted.parse_attempt_id = parse_attempt.parse_attempt_id
+    if artifact.parse_attempt_id is None:
+        # Lineage першого parse, що приніс ці bytes; повторні parse-и видно через tasks.
+        artifact.parse_attempt_id = parse_attempt.parse_attempt_id
 
     version = entity.projection_version + 1
     entity.projection_version = version
@@ -191,8 +233,10 @@ async def record_parse_result(
 
     task = ProjectionTask(
         task_id=new_entity_id(),
-        artifact_id=inserted.artifact_id,
+        artifact_id=artifact.artifact_id,
         entity_uuid=entity.entity_uuid,
+        parse_attempt_id=parse_attempt.parse_attempt_id,
+        parse_key=key,
         projection_version=version,
         target_collection=target_collection,
         target_schema_version=target_schema_version,
@@ -223,12 +267,48 @@ async def record_parse_result(
     await session.flush()
     return ParseResult(
         parse_attempt=parse_attempt,
-        artifact=inserted,
+        artifact=artifact,
         task=task,
         command=command,
         outbox_event=outbox_event,
         created=True,
     )
+
+
+async def record_parse_failure(
+    session: AsyncSession, attempt: ParseAttemptRecord, *, now: datetime | None = None
+) -> ParseAttempt:
+    """`parse_attempts` для `failed`/`skipped` без artifact, версії і task (CR-10).
+
+    Transaction boundary: викликач (зазвичай разом із `queue.retry`/`quarantine`/`complete`).
+    """
+    if attempt.outcome not in FAILED_PARSE_OUTCOMES:
+        msg = (
+            f"record_parse_failure: outcome {attempt.outcome!r} дає artifact — використайте "
+            f"record_parse_result (дозволені {sorted(FAILED_PARSE_OUTCOMES)})"
+        )
+        raise InvalidValueError(msg)
+    current = resolve_now(now)
+    row = ParseAttempt(
+        parse_attempt_id=new_entity_id(),
+        fetch_id=attempt.fetch_id,
+        job_id=attempt.job_id,
+        source_id=attempt.source_id,
+        raw_sha256=attempt.raw_sha256,
+        domain=attempt.domain,
+        parser_version=attempt.parser_version,
+        outcome=attempt.outcome,
+        records_count=attempt.records_count,
+        validation_errors_count=attempt.validation_errors_count,
+        error_code=attempt.error_code,
+        error_message=_truncate(attempt.error_message),
+        started_at=attempt.started_at,
+        finished_at=attempt.finished_at or current,
+        created_at=current,
+    )
+    session.add(row)
+    await session.flush()
+    return row
 
 
 async def claim_projection_tasks(
@@ -341,8 +421,9 @@ async def retry_projection_task(
 async def release_projection_task(
     session: AsyncSession, task_id: UUID, owner: str, *, now: datetime | None = None
 ) -> ProjectionTask:
-    """Плановий drain projector-а: `leased` → `pending` без інкременту `attempt` і без
-    помилки (та сама семантика, що `queue.release`)."""
+    """Плановий drain projector-а: `leased` → `pending`, `attempt = GREATEST(attempt - 1, 0)`
+    (компенсує інкремент claim, gate 3 CR-5), без помилки — та сама семантика, що
+    `queue.release`."""
     current = resolve_now(now)
     task = await session.scalar(
         update(ProjectionTask)
@@ -353,6 +434,7 @@ async def release_projection_task(
             lease_expires_at=None,
             leased_at=None,
             not_before=current,
+            attempt=func.greatest(ProjectionTask.attempt - 1, 0),
             updated_at=current,
         )
         .returning(ProjectionTask)
@@ -693,51 +775,88 @@ def _domain_changed_rows(
     return change_event, outbox_event
 
 
-async def _existing_parse_result(
-    session: AsyncSession,
-    object_key: str,
-    target_collection: str,
-    artifact_ref: NormalizedArtifactRef,
-) -> ParseResult:
-    artifact = await session.scalar(
-        select(NormalizedArtifact)
-        .where(NormalizedArtifact.object_key == object_key)
-        .execution_options(populate_existing=True)
+async def _artifact_for(
+    session: AsyncSession, artifact_ref: NormalizedArtifactRef, *, object_key: str, now: datetime
+) -> NormalizedArtifact:
+    """Рядок `normalized_artifacts` для bytes artifact-а: новий або наявний (дедуплікація).
+
+    `ON CONFLICT DO NOTHING` без target покриває обидва unique (`object_key` і
+    `(sha256, entity_uuid)`), тож конкурентний або повторний запис не дає `IntegrityError`.
+    Наявний рядок приймається лише якщо це ті самі bytes тієї самої сутності.
+    """
+    values = normalized_artifact_values(artifact_ref, object_key=object_key, now=now)
+    values["parse_attempt_id"] = None
+    inserted = (
+        await session.execute(
+            pg_insert(NormalizedArtifact)
+            .values(**values)
+            .on_conflict_do_nothing()
+            .returning(NormalizedArtifact)
+        )
+    ).scalar_one_or_none()
+    if inserted is not None:
+        return inserted
+    candidates = list(
+        (
+            await session.execute(
+                select(NormalizedArtifact)
+                .where(
+                    (NormalizedArtifact.object_key == object_key)
+                    | (
+                        (NormalizedArtifact.sha256 == artifact_ref.sha256)
+                        & (NormalizedArtifact.entity_uuid == artifact_ref.entity_uuid)
+                    )
+                )
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
     )
-    if artifact is None:  # pragma: no cover — можливо лише поза READ COMMITTED
+    for candidate in candidates:
+        if (
+            candidate.entity_uuid != artifact_ref.entity_uuid
+            or candidate.sha256 != artifact_ref.sha256
+        ):
+            msg = (
+                f"object_key {object_key!r} уже зайнятий іншим artifact (entity "
+                f"{candidate.entity_uuid}, sha256 {candidate.sha256}) — content-addressed ключ "
+                "не може вказувати на інші bytes"
+            )
+            raise ConflictError(msg)
+    if not candidates:  # pragma: no cover — можливо лише поза READ COMMITTED
         msg = f"normalized artifact {object_key!r} зник між INSERT і SELECT"
         raise NotFoundError(msg)
-    if artifact.entity_uuid != artifact_ref.entity_uuid:
+    return candidates[0]
+
+
+async def _existing_parse_result(
+    session: AsyncSession, task: ProjectionTask, artifact_ref: NormalizedArtifactRef
+) -> ParseResult:
+    """Повтор того самого parse-кроку: наявні task/artifact/parse_attempt/команда."""
+    artifact = await session.get(NormalizedArtifact, task.artifact_id, populate_existing=True)
+    if artifact is None:  # pragma: no cover — FK RESTRICT
+        msg = f"artifact task {task.task_id} відсутній"
+        raise NotFoundError(msg)
+    if artifact.sha256 != artifact_ref.sha256 or task.entity_uuid != artifact_ref.entity_uuid:
         msg = (
-            f"object_key {object_key!r} уже належить сутності {artifact.entity_uuid}, "
-            f"а не {artifact_ref.entity_uuid}"
+            f"parse {task.parse_key} уже дав task {task.task_id} з artifact {artifact.sha256}; "
+            f"повтор приніс {artifact_ref.sha256} — parser недетермінований або lineage зіпсовано"
         )
         raise ConflictError(msg)
-    task = await session.scalar(
-        select(ProjectionTask).where(
-            ProjectionTask.artifact_id == artifact.artifact_id,
-            ProjectionTask.target_collection == target_collection,
-        )
-    )
-    if task is None:
-        msg = (
-            f"artifact {object_key!r} уже є, але task для {target_collection!r} немає — "
-            "часткова транзакція неможлива, перевірте ручні втручання у схему"
-        )
-        raise ConflictError(msg)
-    outbox_event = await session.scalar(
-        select(OutboxEvent).where(OutboxEvent.event_id == task.task_id)
-    )
+    outbox_event = (
+        await session.execute(select(OutboxEvent).where(OutboxEvent.event_id == task.task_id))
+    ).scalar_one_or_none()
     if outbox_event is None:  # pragma: no cover — пишеться в тій самій транзакції, що й task
         msg = f"outbox-рядок команди для task {task.task_id} відсутній"
         raise ConflictError(msg)
     parse_attempt = (
-        await session.get(ParseAttempt, artifact.parse_attempt_id)
-        if artifact.parse_attempt_id is not None
+        await session.get(ParseAttempt, task.parse_attempt_id)
+        if task.parse_attempt_id is not None
         else None
     )
     if parse_attempt is None:  # pragma: no cover — пишеться в тій самій транзакції
-        msg = f"parse_attempt артефакту {object_key!r} відсутній"
+        msg = f"parse_attempt task {task.task_id} відсутній"
         raise ConflictError(msg)
     command = ProjectionCommand(
         task_id=task.task_id,
@@ -824,7 +943,9 @@ __all__ = [
     "heartbeat_projection_task",
     "quarantine_projection_task",
     "recover_expired_projection_leases",
+    "record_parse_failure",
     "record_parse_result",
+    "parse_key",
     "release_projection_task",
     "retry_projection_task",
 ]

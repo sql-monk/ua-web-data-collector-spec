@@ -115,7 +115,8 @@ async def test_every_listed_mutation_writes_exactly_one_audit_row(
             reason="5xx",
             now=T0,
         )
-        for value in ("etag-1", "etag-1"):  # кожен виклик змінює revision → кожен аудитується
+        # etag-1 → той самий etag-1 (без мутації, без сліду, CR-9) → etag-2: рівно 2 audit-рядки.
+        for value in ("etag-1", "etag-1", "etag-2"):
             await sources.upsert_cursor(
                 pg_session,
                 source.id,
@@ -246,3 +247,42 @@ async def test_operator_quarantine_requires_actor_and_reason(pg_session: AsyncSe
             await queue.quarantine(pg_session, job.job_id, None, error_code="manual", now=T0)
         stored = await pg_session.get(CrawlJob, job.job_id)
     assert stored is not None and stored.status == "pending"
+
+
+async def test_operator_quarantine_rejects_blank_actor_like_other_audited_operations(
+    pg_session: AsyncSession,
+) -> None:
+    """Gate 3, CR-8: `quarantine(owner=None)` перевіряє `require_audit_context` (пробіли — ні)."""
+    async with pg_session.begin():
+        job = await queue.enqueue(pg_session, queue.NewJob(job_type="fetch", idempotency_key="j"))
+        with pytest.raises(InvalidValueError, match="audit"):
+            await queue.quarantine(
+                pg_session, job.job_id, None, error_code="manual", actor="  ", reason="x", now=T0
+            )
+        with pytest.raises(InvalidValueError, match="audit"):
+            await queue.quarantine(
+                pg_session, job.job_id, None, error_code="manual", actor="op", reason=" ", now=T0
+            )
+
+
+async def test_unchanged_cursor_is_neither_updated_nor_audited(pg_session: AsyncSession) -> None:
+    """Gate 3, CR-9: той самий cursor — не мутація: revision і `updated_at` незмінні."""
+    source = await _source(pg_session)
+    async with pg_session.begin():
+        first = await sources.upsert_cursor(
+            pg_session, source.id, "rss", "k", "v1", actor="d", reason="tick", now=T0
+        )
+        revision, updated_at = first.revision, first.updated_at
+        same = await sources.upsert_cursor(
+            pg_session,
+            source.id,
+            "rss",
+            "k",
+            "v1",
+            actor="d",
+            reason="tick",
+            now=T0 + timedelta(minutes=5),
+        )
+        audits = await _audits(pg_session, "source_cursor.upsert")
+    assert (same.id, same.revision, same.updated_at) == (first.id, revision, updated_at)
+    assert len(audits) == 1

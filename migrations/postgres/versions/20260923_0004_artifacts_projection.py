@@ -14,7 +14,7 @@ hot paths (claim projection tasks, публікація outbox, orphan candidate
 
 - `normalized_artifacts(object_key)` — ідемпотентність `record_parse_result`;
 - `projection_tasks(entity_uuid, projection_version)` — монотонна версія без дублів (R-36);
-- `projection_tasks(artifact_id, target_collection)` — artifact projection key;
+- `projection_tasks(parse_key)` — ідентичність parse-кроку (gate 3, CR-1: не вмісту artifact);
 - `artifact_upload_claims(object_key)` — один власник ключа (R-38/R-41);
 - `change_events(event_id)`, `outbox_events(event_id)` — глобальна дедуплікація подій
   (R-42). Саме через них ці дві таблиці **не** партиціоновані — див. docstring
@@ -23,8 +23,10 @@ hot paths (claim projection tasks, публікація outbox, orphan candidate
 `raw_objects` теж не партиціонована: unique `sha256(body)` (§9.3 п.4), і місячні партиції
 зробили б дедуплікацію помісячною.
 
-Downgrade реалізовано (PR2 додає лише нові таблиці; для production forward-only, див. картку
-«Rollback/disable»).
+Downgrade реалізовано **лише для dev/test** (production — forward-only, картка
+«Rollback/disable»). Він **втрачає дані**: нові таблиці видаляються, місячні партиції
+`fetches_yYYYYmMM` зникають разом із `fetches`. Від'єднаною лишається тільки `fetches_default`;
+повторний upgrade приєднує її назад (gate 3, CR-7).
 
 Revision ID: 0004_artifacts_projection
 Revises: 0003_default_partition
@@ -214,9 +216,9 @@ def upgrade() -> None:
     # DEFAULT-партиція (аргумент — `0003`): пропущене обслуговування не повинно знищувати
     # lineage вже виконаних HTTP-запитів. DDL заморожений у ревізії і не імпортує runtime-хелпер
     # `partitions` (S-4 пострев'ю PR1) — збіг імен перевіряє тест у `test_migrations.py`.
-    # Downgrade лише від'єднує DEFAULT (дані не губляться), тож повторний upgrade приєднує ту
-    # саму таблицю назад, а не мовчки лишає `fetches` без DEFAULT (`CREATE … IF NOT EXISTS`
-    # пропустив би створення через однойменну від'єднану таблицю).
+    # Downgrade від'єднує DEFAULT (місячні партиції при цьому губляться, див. docstring), тож
+    # повторний upgrade приєднує ту саму таблицю назад, а не мовчки лишає `fetches` без DEFAULT
+    # (`CREATE … IF NOT EXISTS` пропустив би створення через однойменну від'єднану таблицю).
     op.execute(
         f"""
         DO $$
@@ -255,6 +257,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("parked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("attempts", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("last_error_code", sa.String(length=64), nullable=True),
         sa.Column("last_error_message", sa.String(length=2048), nullable=True),
@@ -300,7 +303,14 @@ def upgrade() -> None:
         "outbox_events",
         ["available_at", "event_id"],
         unique=False,
-        postgresql_where=sa.text("published_at IS NULL"),
+        postgresql_where=sa.text("published_at IS NULL AND parked_at IS NULL"),
+    )
+    op.create_index(
+        "ix_outbox_events_parked_at",
+        "outbox_events",
+        ["parked_at"],
+        unique=False,
+        postgresql_where=sa.text("parked_at IS NOT NULL"),
     )
     op.create_table(
         "parse_attempts",
@@ -430,6 +440,8 @@ def upgrade() -> None:
         sa.Column("task_id", sa.Uuid(), nullable=False),
         sa.Column("artifact_id", sa.Uuid(), nullable=False),
         sa.Column("entity_uuid", sa.Uuid(), nullable=False),
+        sa.Column("parse_attempt_id", sa.Uuid(), nullable=True),
+        sa.Column("parse_key", sa.String(length=64), nullable=False),
         sa.Column("projection_version", sa.BigInteger(), nullable=False),
         sa.Column("target_collection", sa.String(length=120), nullable=False),
         sa.Column("target_schema_version", sa.String(length=16), nullable=False),
@@ -475,6 +487,15 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "projection_version >= 1", name=op.f("ck_projection_tasks_version_positive")
         ),
+        sa.CheckConstraint(
+            "parse_key ~ '^[0-9a-f]{64}$'", name=op.f("ck_projection_tasks_parse_key_hex")
+        ),
+        sa.ForeignKeyConstraint(
+            ["parse_attempt_id"],
+            ["parse_attempts.parse_attempt_id"],
+            name=op.f("fk_projection_tasks_parse_attempt_id_parse_attempts"),
+            ondelete="SET NULL",
+        ),
         sa.ForeignKeyConstraint(
             ["artifact_id"],
             ["normalized_artifacts.artifact_id"],
@@ -488,11 +509,7 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("task_id", name=op.f("pk_projection_tasks")),
-        sa.UniqueConstraint(
-            "artifact_id",
-            "target_collection",
-            name=op.f("uq_projection_tasks_artifact_id_target_collection"),
-        ),
+        sa.UniqueConstraint("parse_key", name=op.f("uq_projection_tasks_parse_key")),
         sa.UniqueConstraint(
             "entity_uuid",
             "projection_version",
@@ -508,6 +525,9 @@ def upgrade() -> None:
     )
     op.create_index(
         "ix_projection_tasks_entity_uuid", "projection_tasks", ["entity_uuid"], unique=False
+    )
+    op.create_index(
+        "ix_projection_tasks_artifact_id", "projection_tasks", ["artifact_id"], unique=False
     )
     op.create_index(
         "ix_projection_tasks_lease_expires_at",
@@ -647,6 +667,7 @@ def downgrade() -> None:
         table_name="projection_tasks",
         postgresql_where=sa.text("status = 'leased'"),
     )
+    op.drop_index("ix_projection_tasks_artifact_id", table_name="projection_tasks")
     op.drop_index("ix_projection_tasks_entity_uuid", table_name="projection_tasks")
     op.drop_index(
         "ix_projection_tasks_claimable_order",
@@ -668,12 +689,21 @@ def downgrade() -> None:
     op.drop_index(
         "ix_outbox_events_unpublished",
         table_name="outbox_events",
-        postgresql_where=sa.text("published_at IS NULL"),
+        postgresql_where=sa.text("published_at IS NULL AND parked_at IS NULL"),
+    )
+    op.drop_index(
+        "ix_outbox_events_parked_at",
+        table_name="outbox_events",
+        postgresql_where=sa.text("parked_at IS NOT NULL"),
     )
     op.drop_index("ix_outbox_events_published_at_available_at", table_name="outbox_events")
     op.drop_index("ix_outbox_events_aggregate_id", table_name="outbox_events")
     op.drop_table("outbox_events")
-    # DETACH перед DROP: рядки, що осіли в DEFAULT, лишаються у відчепленій таблиці.
+    # DETACH перед DROP: відчепленою лишається лише `fetches_default`; місячні партиції
+    # видаляються разом із `fetches` (їхні рядки втрачаються — downgrade тільки для dev).
+    # Якщо в збереженій DEFAULT є рядки місяця, для якого після повторного upgrade
+    # maintenance створює партицію, `ensure_month_partitions` падає, доки їх не перенесуть
+    # (`partitions.default_partition_row_count`).
     op.execute(f"ALTER TABLE fetches DETACH PARTITION {FETCHES_DEFAULT_PARTITION}")
     op.drop_index("ix_fetches_source_id_fetched_at", table_name="fetches")
     op.drop_index("ix_fetches_raw_sha256", table_name="fetches")

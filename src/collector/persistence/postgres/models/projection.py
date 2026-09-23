@@ -4,8 +4,10 @@
 
 - `projection_tasks` — черга projector-а з тією самою lease-семантикою, що й `crawl_jobs`;
   unique `(entity_uuid, projection_version)` (монотонна версія видається атомарно) і unique
-  artifact projection key `(artifact_id, target_collection)` — повторний `record_parse_result`
-  для того самого artifact повертає той самий task, а не дубль;
+  `parse_key` — ідентичність **parse-кроку** (fetch + raw + parser_version + entity +
+  target collection; gate 3, CR-1): повтор того самого parse повертає той самий task, а новий
+  parse з byte-identical artifact (стан A→B→A) отримує нову версію й посилається на вже
+  наявний рядок `normalized_artifacts` (дедуплікація за вмістом лишається для artifacts);
 - `projection_acknowledgements` — PK `task_id`: повторний ack ідемпотентний за побудовою;
 - `entity_index` — PK `entity_uuid`, unique source identity (§9.3 п.1), лічильники версій:
   `projection_version` (остання **видана**) і `confirmed_projection_version` (остання
@@ -69,7 +71,8 @@ class ProjectionTask(Base):
     __tablename__ = "projection_tasks"
     __table_args__ = (
         UniqueConstraint("entity_uuid", "projection_version"),
-        UniqueConstraint("artifact_id", "target_collection"),
+        UniqueConstraint("parse_key"),
+        CheckConstraint("parse_key ~ '^[0-9a-f]{64}$'", name="parse_key_hex"),
         enum_check("status", PROJECTION_TASK_STATUSES, "status"),
         CheckConstraint("projection_version >= 1", name="version_positive"),
         CheckConstraint("attempt >= 0 AND max_attempts >= 1", name="attempts"),
@@ -100,6 +103,7 @@ class ProjectionTask(Base):
             postgresql_where=text("status = 'leased'"),
         ),
         Index("ix_projection_tasks_entity_uuid", "entity_uuid"),
+        Index("ix_projection_tasks_artifact_id", "artifact_id"),
     )
 
     task_id: Mapped[UuidPk]
@@ -109,6 +113,10 @@ class ProjectionTask(Base):
     entity_uuid: Mapped[UUID] = mapped_column(
         ForeignKey("entity_index.entity_uuid", ondelete="RESTRICT"), nullable=False
     )
+    parse_attempt_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("parse_attempts.parse_attempt_id", ondelete="SET NULL")
+    )
+    parse_key: Mapped[str] = mapped_column(String(64), nullable=False)
     projection_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     target_collection: Mapped[str] = mapped_column(String(120), nullable=False)
     target_schema_version: Mapped[str] = mapped_column(String(16), nullable=False)

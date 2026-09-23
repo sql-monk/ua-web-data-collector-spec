@@ -200,3 +200,65 @@ async def test_release_and_expire_claims(pg_session: AsyncSession) -> None:
         assert await artifacts.release_claim(pg_session, "raw/expiring", 1, owner="x") is None
         expired = await artifacts.expire_claims(pg_session, now=T0 + timedelta(minutes=1))
     assert expired == ["raw/expiring"]
+
+
+async def test_sweeper_fencing_protocol_blocks_the_race_with_a_new_producer(
+    pg_session: AsyncSession,
+) -> None:
+    """Gate 3, CR-4: sweeper видаляє orphan лише під власним claim.
+
+    1) кандидат є; 2) sweeper бере claim — producer, що прийшов саме тоді, отримує
+    `StaleClaimError` і не пише об'єкт, а старий producer не комітить свою generation;
+    3) sweeper видаляє об'єкт і звільняє claim; 4) новий producer перебирає ключ із новою
+    generation, пише заново і комітить. Якщо ж producer встиг перебрати ключ **до** sweeper-а,
+    claim sweeper-а відхиляється — видалення не відбувається.
+    """
+    grace = timedelta(minutes=10)
+    later = T0 + timedelta(hours=1)
+    stale = await _acquire(pg_session, "fetch-old", now=T0)  # lease сплив, reference немає
+    stale_generation = stale.claim_generation
+    async with pg_session.begin():
+        assert await artifacts.list_orphan_candidates(pg_session, grace=grace, now=later) == [KEY]
+    sweeper = await _acquire(pg_session, "sweeper", now=later)
+    sweeper_generation = sweeper.claim_generation
+    with pytest.raises(StaleClaimError, match="живий lease"):
+        await _acquire(pg_session, "fetch-new", now=later + timedelta(seconds=1))
+    with pytest.raises(StaleClaimError):
+        await _commit(pg_session, "fetch-old", stale_generation, now=later + timedelta(seconds=1))
+    # … sweeper видаляє об'єкт з artifact store, поки його lease живий …
+    async with pg_session.begin():
+        released = await artifacts.release_claim(
+            pg_session, KEY, sweeper_generation, owner="sweeper", now=later + timedelta(seconds=2)
+        )
+    assert released is not None and released.status == "released"
+    fresh = await _acquire(pg_session, "fetch-new", now=later + timedelta(seconds=3))
+    assert fresh.claim_generation == sweeper_generation + 1
+    committed = await _commit(
+        pg_session, "fetch-new", fresh.claim_generation, now=later + timedelta(seconds=4)
+    )
+    assert committed.status == "committed"
+    # Тепер ключ має reference: sweeper його не отримає ні як кандидата, ні як claim.
+    async with pg_session.begin():
+        assert (
+            await artifacts.list_orphan_candidates(
+                pg_session, grace=grace, now=later + timedelta(days=1)
+            )
+            == []
+        )
+    with pytest.raises(StaleClaimError, match="committed"):
+        await _acquire(pg_session, "sweeper", now=later + timedelta(days=1))
+
+
+async def test_sweeper_claim_is_refused_when_a_producer_reacquired_first(
+    pg_session: AsyncSession,
+) -> None:
+    grace = timedelta(minutes=10)
+    later = T0 + timedelta(hours=1)
+    await _acquire(pg_session, "fetch-old", now=T0)
+    async with pg_session.begin():
+        candidates = await artifacts.list_orphan_candidates(pg_session, grace=grace, now=later)
+    assert candidates == [KEY]
+    # Між SELECT sweeper-а і його claim producer перебрав ключ.
+    await _acquire(pg_session, "fetch-new", now=later)
+    with pytest.raises(StaleClaimError, match="живий lease"):
+        await _acquire(pg_session, "sweeper", now=later + timedelta(seconds=1))

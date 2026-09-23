@@ -211,7 +211,12 @@ def state_hash(n: int) -> str:
     return f"v1:{n:064x}"
 
 
-def artifact_ref(entity_uuid: UUID, n: int) -> NormalizedArtifactRef:
+def artifact_ref(entity_uuid: UUID, n: int, *, fetch: int | None = None) -> NormalizedArtifactRef:
+    """Artifact із bytes `n`; `fetch` — номер fetch (lineage parse-кроку, CR-1), типово = `n`.
+
+    Однакові `(n, fetch)` — **той самий parse** (повтор); той самий `n` з іншим `fetch` —
+    новий parse byte-identical artifact-а (стан A→B→A).
+    """
     sha = f"{n:064x}"
     return NormalizedArtifactRef(
         uri=f"s3://normalized/{sha}.json",
@@ -222,7 +227,7 @@ def artifact_ref(entity_uuid: UUID, n: int) -> NormalizedArtifactRef:
         entity_uuid=entity_uuid,
         domain=DataDomain.CATALOG,
         parser_version="parser-1.0",
-        fetch_id=new_entity_id(),
+        fetch_id=UUID(int=n if fetch is None else fetch),
         raw_sha256=RAW_SHA,
         raw_uri="s3://raw/" + RAW_SHA,
         produced_at=FIXED_NOW,
@@ -249,12 +254,14 @@ async def make_entity(session: AsyncSession, item: str = "item-1") -> EntityInde
         )
 
 
-async def record(session: AsyncSession, entity_uuid: UUID, n: int) -> projection.ParseResult:
+async def record(
+    session: AsyncSession, entity_uuid: UUID, n: int, *, fetch: int | None = None
+) -> projection.ParseResult:
     async with session.begin():
         return await projection.record_parse_result(
             session,
             attempt=attempt_record(),
-            artifact_ref=artifact_ref(entity_uuid, n),
+            artifact_ref=artifact_ref(entity_uuid, n, fetch=fetch),
             object_key=f"normalized/{n:064x}.json",
             target_collection=COLLECTION,
             target_schema_version="1.0",

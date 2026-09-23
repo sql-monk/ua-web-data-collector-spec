@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from collector.persistence.postgres.roles import (
     DEFAULT_ROLE_SECRETS_DIR,
@@ -16,6 +17,7 @@ from collector.persistence.postgres.roles import (
     RUNTIME_ROLES,
     RoleLogin,
     RoleLoginError,
+    apply_logins,
     component_of,
     dsn_secret_name,
     load_role_logins,
@@ -92,3 +94,40 @@ def test_scram_verifier_matches_rfc_7677_derivation() -> None:
     # Випадкова сіль за замовчуванням: той самий пароль — різні verifier-и.
     assert scram_sha256_verifier("pencil") != scram_sha256_verifier("pencil")
     assert "'" not in scram_sha256_verifier("it's")
+
+
+class _SqlStateError(Exception):
+    sqlstate = "42501"
+
+
+class _FailingAlterConnection:
+    """Мінімальний AsyncConnection: членств немає, а `ALTER ROLE` падає з текстом SQL."""
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    async def execute(self, *_: object, **__: object) -> _EmptyResult:
+        return _EmptyResult()
+
+    async def exec_driver_sql(self, statement: str) -> None:
+        self.statements.append(statement)
+        raise DBAPIError(statement=statement, params=None, orig=_SqlStateError(statement))
+
+
+class _EmptyResult:
+    def scalars(self) -> list[str]:
+        return []
+
+
+async def test_alter_role_failure_reports_role_and_sqlstate_without_the_verifier() -> None:
+    """Gate 3, S-5: текст `DBAPIError` містить SQL із SCRAM verifier — назовні лише роль і
+    SQLSTATE."""
+    conn = _FailingAlterConnection()
+    login = RoleLogin(role="collector_fetcher", password="pw-0123456789")  # noqa: S106 — синтетичний
+    with pytest.raises(RoleLoginError) as info:
+        await apply_logins(conn, [login])  # type: ignore[arg-type]  # fake AsyncConnection
+    message = str(info.value)
+    assert "collector_fetcher" in message and "42501" in message
+    assert "SCRAM" not in message and "pw-0123456789" not in message
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+    assert "SCRAM-SHA-256$" in conn.statements[0]  # verifier справді був у SQL
