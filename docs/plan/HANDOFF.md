@@ -23,7 +23,7 @@
 
 CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (build + SBOM + trivy обох образів + clean-host `up --wait` + e2e), `pre-commit`, `gitleaks`.
 
-## 3. WP-01A PR2 — на рев'ю/CI
+## 3. WP-01A PR2 — злито (PR #6, `43ee69f`)
 
 - Branch `wp/01a-2-artifacts-projection`, worktree `.worktrees/wp-01a`, PR #6.
 - Реалізацію з WIP `c5f6f70` доведено до кінця і пройдено всі gates: testing pass, code review r2 approve, security approve, spec review r2 accept, docs (ADR-0007, правка ТЗ §9.1). Звіти — `docs/plan/reports/WP-01A/*-pr2*.md`.
@@ -32,7 +32,7 @@ CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (buil
 
 ## 4. Наступний крок
 
-1. **WP-01A PR2** (PR #6, очікує CI/merge) — artifacts, upload claims, projection tasks/acks, outboxes, entity index + LOGIN-ролі + `queue.release` + транзакційний audit. Закриває блокер pilot (§13) і відкриває WP-01B.
+1. **WP-01A PR2** — злито (PR #6); далі WP-01A PR3 — artifacts, upload claims, projection tasks/acks, outboxes, entity index + LOGIN-ролі + `queue.release` + транзакційний audit. Закриває блокер pilot (§13) і відкриває WP-01B.
 2. Далі паралельно: **WP-01B** (MongoDB projector, receipts, reconciler, compaction — головний споживач PR2), **WP-02** (fetch core), **WP-04** (translation core). Карток для них ще немає — писати за зразком WP-01A/WP-01D.
 3. Потім хвиля 2: WP-03, WP-05, WP-07, WP-09.
 
