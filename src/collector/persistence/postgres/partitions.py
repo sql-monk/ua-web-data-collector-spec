@@ -6,7 +6,8 @@ PR1 партиціонує `audit_log`, PR2 — `fetches` (по `fetched_at`).
 місячне RANGE-партиціонування зруйнувало б їхній головний інваріант — глобальний unique
 (PostgreSQL не вміє unique без partition key у ключі):
 
-- `raw_objects` — PK `sha256(body)` (§9.3 п.4 «однакові bytes фізично не дублюються»);
+- `raw_objects` — PK `raw_object_id` (UUID) і `UNIQUE (sha256)` від `sha256(body)` (§9.3 п.4
+  «однакові bytes фізично не дублюються»);
   помісячний unique зробив би дедуплікацію помісячною. Розмір обмежений кількістю *різних*
   тіл, а не спроб (спроби — у партиційованих `fetches`);
 - `change_events`, `outbox_events` — `UNIQUE (event_id)` (§9.1 «unique event ID», §7.3

@@ -234,9 +234,18 @@ def artifact_ref(entity_uuid: UUID, n: int, *, fetch: int | None = None) -> Norm
     )
 
 
-def attempt_record() -> projection.ParseAttemptRecord:
+def attempt_record(ref: NormalizedArtifactRef | None = None) -> projection.ParseAttemptRecord:
+    """Parse attempt; з `ref` — узгоджений з artifact lineage (SR-2: той самий fetch/raw/parser)."""
+    if ref is None:
+        return projection.ParseAttemptRecord(
+            raw_sha256=RAW_SHA, parser_version="parser-1.0", outcome="succeeded", domain="catalog"
+        )
     return projection.ParseAttemptRecord(
-        raw_sha256=RAW_SHA, parser_version="parser-1.0", outcome="succeeded", domain="catalog"
+        raw_sha256=ref.raw_sha256,
+        parser_version=ref.parser_version,
+        outcome="succeeded",
+        domain=ref.domain.value,
+        fetch_id=ref.fetch_id,
     )
 
 
@@ -260,7 +269,7 @@ async def record(
     async with session.begin():
         return await projection.record_parse_result(
             session,
-            attempt=attempt_record(),
+            attempt=attempt_record(artifact_ref(entity_uuid, n, fetch=fetch)),
             artifact_ref=artifact_ref(entity_uuid, n, fetch=fetch),
             object_key=f"normalized/{n:064x}.json",
             target_collection=COLLECTION,

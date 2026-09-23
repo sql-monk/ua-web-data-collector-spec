@@ -121,3 +121,12 @@ cwd/пакета. Image має або `COPY alembic.ini migrations/ /app/` (з `
 Нічого з цього не ламає поточний stack: поки секретів немає, `collector db roles` без
 `--with-login` працює як у PR1, а runtime лишається на `postgres_dsn` (відоме відхилення §13,
 записане у WP-01D).
+
+## 5. `.gitleaksignore` у корені репозиторію — resolved by orchestrator
+
+Коміт `bad6a25` (WP-01A PR2) містить синтетичне значення в unit-тесті, яке gitleaks
+класифікує як `generic-api-key` (SR-1 spec-review PR2). Історію запушеної гілки не
+переписуємо. Оркестратор дозволив WP-01A як виняток з owned files створити кореневий
+`.gitleaksignore` з fingerprint саме цього finding і коментарем-поясненням; сам тест
+переписано, щоб значення будувалося в рантаймі. Від WP-00 дій не потрібно. **Resolved by
+orchestrator.**

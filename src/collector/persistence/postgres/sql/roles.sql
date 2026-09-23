@@ -159,7 +159,14 @@ GRANT UPDATE (projection_version, updated_at) ON entity_index TO collector_parse
 -- в entity_index, change_events + outbox(domain.changed). normalized_artifacts — лише
 -- читання pointer-а; domain payload projector пише у MongoDB, не сюди.
 GRANT SELECT ON normalized_artifacts TO collector_projector;
-GRANT SELECT, UPDATE ON projection_tasks TO collector_projector;
+-- projection_tasks (gate 4, N-4): лише колонки claim/heartbeat/retry/release/ack/quarantine.
+-- `parse_key`, `projection_version`, `artifact_id`, `entity_uuid`, `parse_attempt_id` —
+-- незмінні для projector-а (переписаний `parse_key` зламав би ідемпотентність parse, CR-1).
+REVOKE UPDATE ON projection_tasks FROM collector_projector;
+GRANT SELECT ON projection_tasks TO collector_projector;
+GRANT UPDATE (status, lease_owner, lease_expires_at, leased_at, not_before, attempt,
+    finished_at, last_error_code, last_error_message, updated_at) ON projection_tasks
+    TO collector_projector;
 GRANT SELECT ON entity_index TO collector_projector;
 GRANT UPDATE (confirmed_projection_version, confirmed_at, mongo_collection, mongo_document_id,
     updated_at) ON entity_index TO collector_projector;

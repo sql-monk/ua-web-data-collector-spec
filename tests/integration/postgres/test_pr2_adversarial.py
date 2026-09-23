@@ -315,7 +315,7 @@ async def test_rolled_back_record_parse_result_leaves_no_version_gap(
         async with pg_session.begin():
             result = await projection.record_parse_result(
                 pg_session,
-                attempt=attempt_record(),
+                attempt=attempt_record(artifact_ref(entity_uuid, 1)),
                 artifact_ref=artifact_ref(entity_uuid, 1),
                 object_key=f"normalized/{1:064x}.json",
                 target_collection=COLLECTION,

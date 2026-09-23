@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import re
+import secrets
 from pathlib import Path
 
 import pytest
@@ -123,11 +124,13 @@ async def test_alter_role_failure_reports_role_and_sqlstate_without_the_verifier
     """Gate 3, S-5: текст `DBAPIError` містить SQL із SCRAM verifier — назовні лише роль і
     SQLSTATE."""
     conn = _FailingAlterConnection()
-    login = RoleLogin(role="collector_fetcher", password="pw-0123456789")  # noqa: S106 — синтетичний
+    # Значення будується в рантаймі (SR-1): літерал-«пароль» у коді ловить gitleaks.
+    synthetic = "-".join(("marker", secrets.token_hex(8)))
+    login = RoleLogin(role="collector_fetcher", password=synthetic)
     with pytest.raises(RoleLoginError) as info:
         await apply_logins(conn, [login])  # type: ignore[arg-type]  # fake AsyncConnection
     message = str(info.value)
     assert "collector_fetcher" in message and "42501" in message
-    assert "SCRAM" not in message and "pw-0123456789" not in message
+    assert "SCRAM" not in message and synthetic not in message
     assert info.value.__cause__ is None and info.value.__suppress_context__
     assert "SCRAM-SHA-256$" in conn.statements[0]  # verifier справді був у SQL

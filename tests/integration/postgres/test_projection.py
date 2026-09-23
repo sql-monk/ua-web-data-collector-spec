@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import timedelta
+from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
@@ -118,7 +120,7 @@ async def test_record_parse_result_requires_known_entity_and_matching_artifact_o
         with pytest.raises(ConflictError):
             await projection.record_parse_result(
                 pg_session,
-                attempt=attempt_record(),
+                attempt=attempt_record(artifact_ref(other.entity_uuid, 2)),
                 artifact_ref=artifact_ref(other.entity_uuid, 2),
                 object_key=f"normalized/{1:064x}.json",
                 target_collection="catalog_items",
@@ -129,7 +131,7 @@ async def test_record_parse_result_requires_known_entity_and_matching_artifact_o
         with pytest.raises(NotFoundError, match="entity_index"):
             await projection.record_parse_result(
                 pg_session,
-                attempt=attempt_record(),
+                attempt=attempt_record(artifact_ref(new_entity_id(), 3)),
                 artifact_ref=artifact_ref(new_entity_id(), 3),
                 object_key="normalized/unknown.json",
                 target_collection="catalog_items",
@@ -189,7 +191,7 @@ async def test_retry_on_last_attempt_quarantines_projection_task(pg_session: Asy
     async with pg_session.begin():
         result = await projection.record_parse_result(
             pg_session,
-            attempt=attempt_record(),
+            attempt=attempt_record(artifact_ref(entity.entity_uuid, 1)),
             artifact_ref=artifact_ref(entity.entity_uuid, 1),
             object_key="normalized/one.json",
             target_collection="catalog_items",
@@ -423,7 +425,7 @@ async def test_same_bytes_under_another_object_key_reuse_the_row_without_integri
     async with pg_session.begin():
         other_key = await projection.record_parse_result(
             pg_session,
-            attempt=attempt_record(),
+            attempt=attempt_record(artifact_ref(entity.entity_uuid, 1, fetch=2)),
             artifact_ref=artifact_ref(entity.entity_uuid, 1, fetch=2),
             object_key="normalized/other-key.json",
             target_collection="catalog_items",
@@ -444,7 +446,7 @@ async def test_conflicting_artifact_for_key_or_parse_is_typed_conflict(
         with pytest.raises(ConflictError, match="object_key"):
             await projection.record_parse_result(
                 pg_session,
-                attempt=attempt_record(),
+                attempt=attempt_record(artifact_ref(entity.entity_uuid, 2, fetch=2)),
                 artifact_ref=artifact_ref(entity.entity_uuid, 2, fetch=2),
                 object_key=f"normalized/{1:064x}.json",
                 target_collection="catalog_items",
@@ -456,7 +458,7 @@ async def test_conflicting_artifact_for_key_or_parse_is_typed_conflict(
         with pytest.raises(ConflictError, match="недетермінований"):
             await projection.record_parse_result(
                 pg_session,
-                attempt=attempt_record(),
+                attempt=attempt_record(artifact_ref(entity.entity_uuid, 5, fetch=1)),
                 artifact_ref=artifact_ref(entity.entity_uuid, 5, fetch=1),
                 object_key=f"normalized/{5:064x}.json",
                 target_collection="catalog_items",
@@ -495,3 +497,39 @@ async def test_parse_outcome_decides_between_result_and_failure(pg_session: Asyn
         ]
     assert (row.outcome, row.error_code) == ("failed", "selector_missing")
     assert counts == [1, 0, 0]
+
+
+@pytest.mark.parametrize(
+    ("change", "field"),
+    [
+        ({"fetch_id": None}, "fetch_id"),
+        ({"fetch_id": UUID(int=999)}, "fetch_id"),
+        ({"raw_sha256": "f" * 64}, "raw_sha256"),
+        ({"parser_version": "parser-2.0"}, "parser_version"),
+        ({"domain": "vehicle"}, "domain"),
+    ],
+)
+async def test_attempt_and_artifact_lineage_must_describe_one_parse(
+    pg_session: AsyncSession, change: dict[str, object], field: str
+) -> None:
+    """Gate 4, SR-2: розбіжність lineage `attempt` ↔ `artifact_ref` → `InvalidValueError` до
+    першого запису; `fetch_id` обов'язковий."""
+    entity = await make_entity(pg_session)
+    ref = artifact_ref(entity.entity_uuid, 1)
+    attempt = dataclasses.replace(attempt_record(ref), **change)
+    async with pg_session.begin():
+        with pytest.raises(InvalidValueError, match=field):
+            await projection.record_parse_result(
+                pg_session,
+                attempt=attempt,
+                artifact_ref=ref,
+                object_key="normalized/x.json",
+                target_collection="catalog_items",
+                target_schema_version="1.0",
+                now=T0,
+            )
+        counts = [
+            await _count(pg_session, model)
+            for model in (ParseAttempt, NormalizedArtifact, ProjectionTask)
+        ]
+    assert counts == [0, 0, 0]

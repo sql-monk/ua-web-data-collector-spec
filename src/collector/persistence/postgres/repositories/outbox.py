@@ -245,12 +245,28 @@ async def count_backlog(session: AsyncSession, *, topic: str | None = None) -> i
 
 
 async def oldest_unpublished_age(
-    session: AsyncSession, *, now: datetime | None = None
+    session: AsyncSession,
+    *,
+    topics: Sequence[str] = (DOMAIN_TOPIC,),
+    now: datetime | None = None,
 ) -> timedelta | None:
-    """Вік найстарішої недоставленої події — джерело алерту §14.2; `None`, якщо backlog порожній."""
+    """Вік найстарішої недоставленої події — джерело алерту §14.2; `None`, якщо backlog порожній.
+
+    Предикат узгоджено з `count_backlog` (gate 4, N-3): не опубліковано й не припарковано,
+    лише задані топіки (типово `domain`). Внутрішні `projection.command` publisher не
+    публікує, тож без фільтра вік ріс би безмежно і алерт горів би завжди; припарковані
+    рядки мають власний сигнал (`list_parked`).
+    """
+    if not topics:
+        msg = "topics не може бути порожнім"
+        raise ValueError(msg)
     current = resolve_now(now)
     oldest = await session.scalar(
-        select(func.min(OutboxEvent.created_at)).where(OutboxEvent.published_at.is_(None))
+        select(func.min(OutboxEvent.created_at)).where(
+            OutboxEvent.published_at.is_(None),
+            OutboxEvent.parked_at.is_(None),
+            OutboxEvent.topic.in_(list(topics)),
+        )
     )
     return None if oldest is None else current - oldest
 

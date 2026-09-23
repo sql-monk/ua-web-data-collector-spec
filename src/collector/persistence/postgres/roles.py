@@ -183,7 +183,9 @@ async def apply_roles(conn: AsyncConnection, *, sql_path: Path | None = None) ->
 
 
 PRIVILEGED_BUILTIN_ROLES: tuple[str, ...] = (
+    "pg_read_all_data",
     "pg_write_all_data",
+    "pg_maintain",
     "pg_read_server_files",
     "pg_execute_server_program",
     "pg_signal_backend",
@@ -193,7 +195,8 @@ PRIVILEGED_BUILTIN_ROLES: tuple[str, ...] = (
 _PRIVILEGED_MEMBERSHIPS = text(
     "SELECT r.rolname FROM pg_roles r "
     "WHERE r.rolname <> :role AND pg_has_role(:role, r.oid, 'MEMBER') "
-    "AND (r.rolsuper OR r.rolcreaterole OR r.rolbypassrls OR r.rolname = ANY(:privileged)) "
+    "AND (r.rolsuper OR r.rolcreaterole OR r.rolbypassrls OR r.rolcreatedb OR r.rolreplication "
+    "OR r.rolname = ANY(:privileged)) "
     "ORDER BY r.rolname"
 )
 
@@ -201,7 +204,8 @@ _PRIVILEGED_MEMBERSHIPS = text(
 async def privileged_memberships(conn: AsyncConnection, role: str) -> list[str]:
     """Ролі (транзитивно), членом яких є `role` і які дають права понад runtime (S-4).
 
-    Привілейована — роль з `rolsuper`/`rolcreaterole`/`rolbypassrls`, `collector_migrate` або
+    Привілейована — роль з `rolsuper`/`rolcreaterole`/`rolbypassrls`/`rolcreatedb`/
+    `rolreplication` (останні два — gate 4, N-5), `collector_migrate` або
     одна з `PRIVILEGED_BUILTIN_ROLES`. Для superuser `pg_has_role` істинний для всіх ролей,
     тож superuser-логін завжди має непорожній результат.
     """
@@ -269,7 +273,8 @@ async def verify_runtime_login(conn: AsyncConnection) -> str:
     """Перевірка для runtime-процесів (WP-01D): поточний логін — runtime-роль без зайвих прав.
 
     Вимоги (gate 3, S-4): `current_user` з allowlist `RUNTIME_ROLES`; без `rolsuper`/
-    `rolcreaterole`/`rolbypassrls`; без (транзитивного) членства в привілейованих ролях
+    `rolcreaterole`/`rolbypassrls`/`rolcreatedb`/`rolreplication` (N-5); без (транзитивного)
+    членства в привілейованих ролях
     (`privileged_memberships`, включно з `collector_migrate`). Повертає `current_user`, інакше
     `RoleLoginError`. Призначена для одного виклику при старті процесу: спільний міграційний
     DSN (знахідка F1 WP-01D) має падати одразу, а не тихо працювати з правами власника схеми.
@@ -278,16 +283,18 @@ async def verify_runtime_login(conn: AsyncConnection) -> str:
         await conn.execute(
             text(
                 "SELECT current_user AS name, r.rolsuper AS superuser, "
-                "r.rolcreaterole AS createrole, r.rolbypassrls AS bypassrls "
+                "r.rolcreaterole AS createrole, r.rolbypassrls AS bypassrls, "
+                "r.rolcreatedb AS createdb, r.rolreplication AS replication "
                 "FROM pg_roles r WHERE r.rolname = current_user"
             )
         )
     ).one()
     name = str(row.name)
     hint = "використайте DSN компонента (postgres_dsn_<component>), §13"
-    if row.superuser or row.createrole or row.bypassrls:
+    if row.superuser or row.createrole or row.bypassrls or row.createdb or row.replication:
         msg = (
-            f"runtime-підключення під {name!r} має атрибути superuser/createrole/bypassrls: {hint}"
+            f"runtime-підключення під {name!r} має атрибути "
+            f"superuser/createrole/bypassrls/createdb/replication: {hint}"
         )
         raise RoleLoginError(msg)
     if name not in RUNTIME_ROLES:

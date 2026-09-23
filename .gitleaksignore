@@ -1,0 +1,9 @@
+# Позначені як хибні спрацювання gitleaks, які вже в опублікованій історії.
+# Історія запушених гілок не переписується (без force-push) — рішення оркестратора, SR-1
+# spec-review WP-01A PR2 (docs/plan/reports/WP-01A/spec-review-pr2.md). Кожен рядок —
+# fingerprint `<commit>:<file>:<rule>:<line>` із поясненням вище.
+#
+# bad6a25: синтетичне значення `pw-0123456789` у unit-тесті S-5 (перевірка, що пароль не
+# потрапляє в повідомлення помилки); не секрет. У наступному коміті значення будується в
+# рантаймі й більше не матчиться.
+bad6a259ba02126bec66cfc1febbdb846d0c0e3d:tests/unit/persistence/postgres/test_role_logins.py:generic-api-key:126

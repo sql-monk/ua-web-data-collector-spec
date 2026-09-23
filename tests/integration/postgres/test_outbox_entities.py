@@ -228,3 +228,24 @@ async def test_list_entities_keyset_pagination_is_complete_and_stable(
     assert len(seen) == 25 == len(set(seen))
     assert seen == sorted(seen)
     assert other.entity_uuid not in {uuid for _, uuid in seen}
+
+
+async def test_oldest_unpublished_age_matches_backlog_scope(pg_session: AsyncSession) -> None:
+    """Gate 4, N-3: вік — лише для не опублікованих і не припаркованих рядків заданих топіків
+    (типово `domain`), так само як `count_backlog`; internal `projection.command` не публікується
+    стандартним шляхом і не має тримати алерт §14.2 вічно."""
+    await _one_domain_event(pg_session)
+    later = T0 + timedelta(hours=2)
+    async with pg_session.begin():
+        assert await outbox.oldest_unpublished_age(pg_session, now=later) == timedelta(hours=2)
+        [event] = await outbox.fetch_unpublished(pg_session, now=T0)
+        await outbox.mark_failed(
+            pg_session, event.outbox_id, error_code="poison", max_attempts=1, now=T0
+        )
+        # Домен: єдина подія припаркована → backlog і вік порожні; internal рахується лише явно.
+        assert await outbox.count_backlog(pg_session, topic="domain") == 0
+        assert await outbox.oldest_unpublished_age(pg_session, now=later) is None
+        internal_age = await outbox.oldest_unpublished_age(
+            pg_session, topics=[outbox.INTERNAL_TOPIC], now=later
+        )
+    assert internal_age == timedelta(hours=2)

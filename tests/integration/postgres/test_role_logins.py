@@ -523,3 +523,90 @@ async def test_privileged_membership_is_refused_by_apply_and_verify(
                 await conn.exec_driver_sql("DROP ROLE t_outsider_gate3")
     finally:
         await admin.dispose()
+
+
+async def test_projector_cannot_rewrite_task_identity_columns(
+    pg_session: AsyncSession, role_engine: RoleEngine
+) -> None:
+    """Gate 4, N-4: projector оновлює лише робочі колонки task-а (статус, lease, спроби,
+    помилка); `parse_key`/`projection_version`/`artifact_id` для нього незмінні."""
+    await _confirmed_entity(pg_session)
+    projector = await role_engine("collector_projector")
+    for statement in (
+        "UPDATE projection_tasks SET parse_key = repeat('0', 64)",
+        "UPDATE projection_tasks SET projection_version = projection_version + 10",
+        "UPDATE projection_tasks SET artifact_id = gen_random_uuid()",
+        "UPDATE projection_tasks SET entity_uuid = gen_random_uuid()",
+        "UPDATE projection_tasks SET parse_attempt_id = NULL",
+    ):
+        await _denied(projector, statement)
+    async with projector.begin() as conn:
+        await conn.execute(
+            text("UPDATE projection_tasks SET attempt = attempt, not_before = not_before")
+        )
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [
+        ("GRANT pg_read_all_data TO collector_parser",),
+        ("GRANT pg_maintain TO collector_parser",),
+        (
+            "CREATE ROLE t_createdb_gate4 NOLOGIN CREATEDB",
+            "GRANT t_createdb_gate4 TO collector_parser",
+        ),
+        (
+            "CREATE ROLE t_replication_gate4 NOLOGIN REPLICATION",
+            "GRANT t_replication_gate4 TO collector_parser",
+        ),
+    ],
+    ids=["pg_read_all_data", "pg_maintain", "createdb-member", "replication-member"],
+)
+async def test_gate4_privileged_memberships_are_refused(
+    logins: Logins, role_engine: RoleEngine, grant: tuple[str, ...]
+) -> None:
+    """Gate 4, N-5: `pg_read_all_data`, `pg_maintain`, членство в ролях з
+    `CREATEDB`/`REPLICATION` блокують `--with-login` і `verify_runtime_login`."""
+    admin = create_async_engine(logins.database.url, isolation_level="AUTOCOMMIT", poolclass=None)
+    try:
+        async with admin.connect() as conn:
+            for statement in grant:
+                await conn.exec_driver_sql(statement)
+        try:
+            with pytest.raises(RoleLoginError, match="привілейованих"):
+                await apply_database_roles(
+                    logins.database, logins=load_role_logins(logins.secrets_dir)
+                )
+            engine = await role_engine("collector_parser")
+            async with engine.connect() as conn:
+                with pytest.raises(RoleLoginError, match="є членом"):
+                    await verify_runtime_login(conn)
+        finally:
+            async with admin.connect() as conn:
+                await conn.exec_driver_sql(
+                    "REVOKE pg_read_all_data, pg_maintain FROM collector_parser"
+                )
+                await conn.exec_driver_sql("DROP ROLE IF EXISTS t_createdb_gate4")
+                await conn.exec_driver_sql("DROP ROLE IF EXISTS t_replication_gate4")
+    finally:
+        await admin.dispose()
+
+
+async def test_runtime_login_with_own_createdb_is_refused(
+    logins: Logins, role_engine: RoleEngine
+) -> None:
+    """Gate 4, N-5: власний атрибут `CREATEDB` runtime-ролі → `verify_runtime_login` відмовляє."""
+    admin = create_async_engine(logins.database.url, isolation_level="AUTOCOMMIT", poolclass=None)
+    try:
+        async with admin.connect() as conn:
+            await conn.exec_driver_sql("ALTER ROLE collector_fetcher CREATEDB")
+        try:
+            engine = await role_engine("collector_fetcher")
+            async with engine.connect() as conn:
+                with pytest.raises(RoleLoginError, match="createdb"):
+                    await verify_runtime_login(conn)
+        finally:
+            async with admin.connect() as conn:
+                await conn.exec_driver_sql("ALTER ROLE collector_fetcher NOCREATEDB")
+    finally:
+        await admin.dispose()

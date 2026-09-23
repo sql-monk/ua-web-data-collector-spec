@@ -165,7 +165,9 @@ async def record_parse_result(
        event_id = task_id)`.
 
     `attempt.outcome` має бути `succeeded`/`partial` (CR-10), інакше `InvalidValueError`;
-    невдалий/пропущений parse без artifact пише `record_parse_failure`.
+    невдалий/пропущений parse без artifact пише `record_parse_failure`. Lineage `attempt` і
+    `artifact_ref` мають збігатися (`fetch_id` обов'язковий, `raw_sha256`, `parser_version`,
+    `domain`; gate 4, SR-2) — інакше `parse_key` і `parse_attempts` описували б різні parse-и.
     """
     if attempt.outcome not in SUCCESS_PARSE_OUTCOMES:
         msg = (
@@ -173,6 +175,7 @@ async def record_parse_result(
             f"record_parse_failure (дозволені {sorted(SUCCESS_PARSE_OUTCOMES)})"
         )
         raise InvalidValueError(msg)
+    _require_consistent_lineage(attempt, artifact_ref)
     current = resolve_now(now)
     entity = await session.scalar(
         select(EntityIndex)
@@ -273,6 +276,36 @@ async def record_parse_result(
         outbox_event=outbox_event,
         created=True,
     )
+
+
+def _require_consistent_lineage(
+    attempt: ParseAttemptRecord, artifact_ref: NormalizedArtifactRef
+) -> None:
+    """Gate 4, SR-2: `parse_attempts` і artifact описують **один** parse-крок.
+
+    `parse_key` береться з обох об'єктів (`fetch_id` — з artifact, `raw_sha256`/
+    `parser_version` — з attempt), тож розбіжність дала б ключ, що не відповідає жодному
+    реальному parse, і lineage `parse_attempts.fetch_id = NULL`. Перевірка — до першого запису.
+    """
+    mismatched = [
+        name
+        for name, left, right in (
+            ("fetch_id", attempt.fetch_id, artifact_ref.fetch_id),
+            ("raw_sha256", attempt.raw_sha256, artifact_ref.raw_sha256),
+            ("parser_version", attempt.parser_version, artifact_ref.parser_version),
+            ("domain", attempt.domain, artifact_ref.domain.value),
+        )
+        if left != right
+    ]
+    if attempt.fetch_id is None:
+        msg = "record_parse_result: attempt.fetch_id обов'язковий для успішного parse (SR-2)"
+        raise InvalidValueError(msg)
+    if mismatched:
+        msg = (
+            "record_parse_result: attempt і artifact_ref описують різні parse-и "
+            f"(розбіжність: {', '.join(mismatched)})"
+        )
+        raise InvalidValueError(msg)
 
 
 async def record_parse_failure(
