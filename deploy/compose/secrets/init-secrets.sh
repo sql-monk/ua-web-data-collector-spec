@@ -2,6 +2,8 @@
 # Створює локальні файли секретів для docker-compose.yml, якщо їх ще немає.
 # Паролі та keyfile генеруються ВИПАДКОВО (gate 3, SEC L-3: жодних default credentials);
 # з *.example копіюється лише не-секретне ім'я користувача MinIO. Реальні файли — у .gitignore.
+# DSN: `postgres_dsn` — міграційний (superuser POSTGRES_USER, пароль = postgres_password);
+# `postgres_dsn_<component>` — сім runtime-ролей §13, кожна з власним паролем (WP-00 PR4).
 #
 # Права файлів: 0644 свідомо. Compose bind-mount-ить file-secrets у /run/secrets/<name> з правами
 # ХОСТА, а читають їх non-root uid контейнерів (postgres/mongo 999, collector 10001) — 0600 від
@@ -63,6 +65,18 @@ for example in "$here"/*.example; do
         "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}" \
         > "$target"
       echo "gen   $name (з postgres_password)" ;;
+    postgres_dsn_*)
+      # DSN runtime-ролі §13 (WP-01A PR2 `collector db roles --with-login`): користувач —
+      # `collector_<component>`, пароль — ВЛАСНИЙ випадковий hex (printable ASCII, як вимагає
+      # SCRAM verifier без SASLprep). Окремого файла пароля немає: джерело істини — сам DSN,
+      # `migrate-postgres` читає з нього пароль і ставить ролі verifier, а сервіс компонента
+      # монтує той самий файл як COLLECTOR_POSTGRES_DSN_FILE.
+      component="${name#postgres_dsn_}"
+      printf 'postgresql://collector_%s:%s@%s:%s/%s\n' \
+        "$component" "$(random_hex)" \
+        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}" \
+        > "$target"
+      echo "gen   $name (random, роль collector_$component)" ;;
     *)
       tr -d '\r' < "$example" > "$target"; echo "copy  $name (from example — non-secret)" ;;
   esac
