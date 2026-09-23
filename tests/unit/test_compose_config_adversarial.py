@@ -38,35 +38,30 @@ SECRET_CONSUMERS: dict[str, set[str]] = {
     "mongo_keyfile": {"mongo"},
     "minio_root_user": {"minio"},
     "minio_root_password": {"minio"},
-    # DSN PostgreSQL: one-shot `migrate-postgres` + runtime-процеси, яким WP-01D PR1 дав
-    # реальний claim/lease (`scheduler`, усі `*-worker`). §13 хоче окремі per-component DSN —
-    # LOGIN-ролей ще немає, запит у docs/plan/deps/WP-01D-to-WP-01A.md.
-    "postgres_dsn": {
+    # Міграційний DSN — лише one-shot `migrate-postgres` (§13: migration role не використовується
+    # runtime-процесами).
+    "postgres_dsn": {"migrate-postgres"},
+    # Per-component LOGIN-ролі §13: `migrate-postgres` монтує всі (WP-00 PR4: `db roles
+    # --with-login` бере з них паролі ролей); кожен runtime-сервіс — лише свій (WP-01D PR1b).
+    # `export-worker` → scheduler тимчасово (ризик у картці WP-01D); `api_ro`/`export_ro` поки
+    # не має жоден runtime-сервіс (api — WP-11A, read-only з'єднання експорту — його власник).
+    "postgres_dsn_scheduler": {
         "migrate-postgres",
         "scheduler",
+        "maintenance-worker",
+        "export-worker",
+    },
+    "postgres_dsn_fetcher": {
+        "migrate-postgres",
         "discovery-worker",
         "fetch-worker",
-        "parse-worker",
-        "projector-worker",
-        "translation-worker",
-        "export-worker",
-        "maintenance-worker",
         "browser-worker",
     },
-    # WP-00 PR4: per-component DSN §13. Поки що — лише `migrate-postgres` (`db roles
-    # --with-login` бере з них паролі ролей); runtime-сервіси монтують свій у WP-01D PR1b.
-    **{
-        f"postgres_dsn_{component}": {"migrate-postgres"}
-        for component in (
-            "scheduler",
-            "fetcher",
-            "parser",
-            "projector",
-            "translation",
-            "api_ro",
-            "export_ro",
-        )
-    },
+    "postgres_dsn_parser": {"migrate-postgres", "parse-worker"},
+    "postgres_dsn_projector": {"migrate-postgres", "projector-worker"},
+    "postgres_dsn_translation": {"migrate-postgres", "translation-worker"},
+    "postgres_dsn_api_ro": {"migrate-postgres"},
+    "postgres_dsn_export_ro": {"migrate-postgres"},
 }
 COMPONENT_NAMES = ("postgres", "mongo", "minio")
 ONE_SHOTS = {"migrate-postgres", "ensure-mongo"}
@@ -106,7 +101,8 @@ def test_api_has_no_secrets_and_runtime_has_only_the_dsn(
     """`api` без DB credentials (owner WP-11A); worker/scheduler — рівно один secret: DSN.
 
     WP-01D PR1 замінив placeholder-процеси на runtime, який читає чергу, тому DSN їм потрібен;
-    жодних інших credentials (Mongo/MinIO) вони не отримують — це залишається least privilege.
+    PR1b — це DSN власної LOGIN-ролі компонента (§13). Жодних інших credentials (Mongo/MinIO)
+    вони не отримують — це залишається least privilege.
     """
     for name, svc in services.items():
         env = svc.get("environment", {})
@@ -114,7 +110,8 @@ def test_api_has_no_secrets_and_runtime_has_only_the_dsn(
             assert not _secret_names(svc), f"{name}: секрети без потреби"
             assert not [k for k in env if k.endswith("_FILE")], f"{name}: *_FILE без secret"
         elif name.endswith("-worker") or name == "scheduler":
-            assert _secret_names(svc) == {"postgres_dsn"}, f"{name}: зайві секрети"
+            (secret,) = _secret_names(svc)
+            assert secret.startswith("postgres_dsn_"), f"{name}: {secret} замість per-role DSN"
             assert [k for k in env if k.endswith("_FILE")] == ["COLLECTOR_POSTGRES_DSN_FILE"], name
 
 
