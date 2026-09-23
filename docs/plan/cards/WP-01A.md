@@ -90,6 +90,21 @@ uv run pytest -m integration tests/integration/postgres
 
 ### Операції
 
+- **LOGIN-ролі per component + per-role DSN (§13, dependency `docs/plan/deps/WP-01D-to-WP-01A.md`,
+  рантайм-доказ у `docs/plan/reports/WP-01D/testing-pr1.md` F1 — блокер pilot):** ролі §13 у PR1
+  створені `NOLOGIN`, тому всі 8 runtime-процесів WP-01D ходять у PostgreSQL під superuser-роллю
+  `collector`, яка ще й виконує міграції. PR2 має: зробити `collector_scheduler`, `collector_fetcher`,
+  `collector_parser`, `collector_projector`, `collector_translation`, `collector_api_ro`,
+  `collector_export_ro` LOGIN-ролями з паролями з Docker secrets (генерація — `init-secrets.sh`,
+  dependency-запит до WP-00, якщо потрібні нові secret-файли); додати `collector db roles --with-login`
+  або окрему команду, ідемпотентну до повторного запуску; дати кожному сервісу власний DSN
+  (`COLLECTOR_POSTGRES_DSN_FILE` per service); тест — кожна роль може рівно те, що їй потрібно
+  (`collector_fetcher` не читає `news_*`, `collector_api_ro` не пише), і жоден runtime-сервіс не
+  використовує `collector_migrate`. Після цього тест-вартовий WP-01D (`xfail` на появу LOGIN-ролі)
+  має стати зеленим — узгодь з owner WP-01D одним dependency-повідомленням.
+- **`queue.release(job_id, owner)` (dependency WP-01D, F2):** повернення lease без інкременту
+  `attempt` і без переходу в `quarantined` — для планового drain. Поточний обхід WP-01D покладається
+  на `recover_expired_leases`, що затримує повторний claim на TTL.
 - **Транзакційний audit для control plane (§13, знахідка S-2 пострев'ю PR1):** операції, для
   яких у PR1 audit лишився обов'язком викликача, отримують `append_audit` усередині репозиторію,
   у тій самій транзакції (патерн `request_scale`): `set_source_state`, `add_policy_version`,
