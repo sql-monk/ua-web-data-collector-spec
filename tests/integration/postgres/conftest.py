@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from sqlalchemy import text
@@ -31,10 +32,20 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from collector.contracts import (
+    AppliedProjectionReceipt,
+    DomainChangedEvent,
+    NormalizedArtifactRef,
+    encode_event,
+    new_entity_id,
+)
+from collector.contracts.enums import DataDomain, EntityKind
 from collector.persistence.postgres.config import PostgresSettings
 from collector.persistence.postgres.engine import create_engine, create_session_factory
 from collector.persistence.postgres.migrations import upgrade_to_head
+from collector.persistence.postgres.models import EntityIndex
 from collector.persistence.postgres.partitions import ensure_month_partitions
+from collector.persistence.postgres.repositories import entities, projection
 from collector.persistence.postgres.roles import apply_roles
 
 pytestmark = pytest.mark.integration
@@ -188,3 +199,114 @@ def pg_sessions(pg_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 async def pg_session(pg_sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncSession]:
     async with pg_sessions() as session:
         yield session
+
+
+# --- PR2 builders (контракти → аргументи репозиторіїв projection/ack/outbox) -------------
+
+COLLECTION = "catalog_items"
+RAW_SHA = "0" * 64
+
+
+def state_hash(n: int) -> str:
+    return f"v1:{n:064x}"
+
+
+def artifact_ref(entity_uuid: UUID, n: int) -> NormalizedArtifactRef:
+    sha = f"{n:064x}"
+    return NormalizedArtifactRef(
+        uri=f"s3://normalized/{sha}.json",
+        sha256=sha,
+        size_bytes=100 + n,
+        media_type="application/json",
+        schema_version="1.0",
+        entity_uuid=entity_uuid,
+        domain=DataDomain.CATALOG,
+        parser_version="parser-1.0",
+        fetch_id=new_entity_id(),
+        raw_sha256=RAW_SHA,
+        raw_uri="s3://raw/" + RAW_SHA,
+        produced_at=FIXED_NOW,
+    )
+
+
+def attempt_record() -> projection.ParseAttemptRecord:
+    return projection.ParseAttemptRecord(
+        raw_sha256=RAW_SHA, parser_version="parser-1.0", outcome="succeeded", domain="catalog"
+    )
+
+
+async def make_entity(session: AsyncSession, item: str = "item-1") -> EntityIndex:
+    async with session.begin():
+        return await entities.upsert_entity(
+            session,
+            entities.EntityIdentity(
+                source_id="catalog_ua_example",
+                source_item_id=item,
+                domain=DataDomain.CATALOG,
+                entity_kind=EntityKind.CATALOG_ITEM,
+            ),
+            now=FIXED_NOW,
+        )
+
+
+async def record(session: AsyncSession, entity_uuid: UUID, n: int) -> projection.ParseResult:
+    async with session.begin():
+        return await projection.record_parse_result(
+            session,
+            attempt=attempt_record(),
+            artifact_ref=artifact_ref(entity_uuid, n),
+            object_key=f"normalized/{n:064x}.json",
+            target_collection=COLLECTION,
+            target_schema_version="1.0",
+            now=FIXED_NOW,
+        )
+
+
+def receipt(
+    task_id: UUID,
+    entity_uuid: UUID,
+    version: int,
+    *,
+    applied: bool,
+    changed: bool,
+    current_version: int | None = None,
+    document_id: UUID | None = None,
+) -> AppliedProjectionReceipt:
+    """Receipt Mongo projector-а; для `applied AND changed` — з готовими event bytes."""
+    result_version = version if applied else (current_version or version)
+    fields: dict[str, object] = {}
+    if applied and changed:
+        event = DomainChangedEvent(
+            event_id=new_entity_id(),
+            aggregate_id=entity_uuid,
+            aggregate_version=version,
+            event_type="catalog.item.changed",
+            payload_schema_version="1.0",
+            occurred_at=FIXED_NOW,
+            projection_task_id=task_id,
+            previous_state_hash=state_hash(version - 1) if version > 1 else None,
+            result_state_hash=state_hash(version),
+            payload={"version": version, "note": "укр текст"},
+        )
+        encoded = encode_event(event)
+        fields = {
+            "event_id": encoded.event_id,
+            "event_bytes": encoded.event_bytes,
+            "event_media_type": encoded.event_media_type,
+            "event_sha256": encoded.event_sha256,
+        }
+    return AppliedProjectionReceipt(
+        projection_task_id=task_id,
+        entity_uuid=entity_uuid,
+        projection_version=version,
+        target_collection=COLLECTION,
+        document_id=document_id or entity_uuid,
+        applied_to_current=applied,
+        state_changed=changed,
+        previous_hash=state_hash(version - 1) if changed and version > 1 else None,
+        result_version=result_version,
+        result_hash=state_hash(result_version),
+        committed_at=FIXED_NOW,
+        cluster_time=f"1790000000:{version}",
+        **fields,
+    )

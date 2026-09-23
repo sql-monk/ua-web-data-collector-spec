@@ -6,14 +6,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import secrets
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 from typer.testing import CliRunner
 
 from collector.cli import app
 from collector.persistence.postgres.config import PostgresSettings
 from collector.persistence.postgres.migrations import head_revision
+from collector.persistence.postgres.roles import (
+    ROLE_SECRETS_DIR_ENV,
+    RUNTIME_ROLES,
+    dsn_secret_name,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -114,3 +123,85 @@ def test_db_migrate_unreachable_server_exits_1_without_traceback() -> None:
     assert result.exit_code == 1
     assert "postgres error" in result.output
     assert "Traceback" not in result.output
+
+
+def _role_secrets(settings: PostgresSettings, directory: Path) -> dict[str, str]:
+    """DSN-секрети `postgres_dsn_<component>` з одноразовими паролями (лише loopback-БД)."""
+    passwords: dict[str, str] = {}
+    for role in RUNTIME_ROLES:
+        password = secrets.token_hex(24)
+        url = settings.url.set(username=role, password=password)
+        (directory / dsn_secret_name(role)).write_text(
+            url.render_as_string(hide_password=False) + "\n", encoding="utf-8"
+        )
+        passwords[role] = password
+    return passwords
+
+
+async def _reset_logins(settings: PostgresSettings) -> None:
+    engine = create_async_engine(settings.url, isolation_level="AUTOCOMMIT", poolclass=None)
+    try:
+        async with engine.connect() as conn:
+            for role in RUNTIME_ROLES:
+                await conn.execute(text(f'ALTER ROLE "{role}" WITH NOLOGIN PASSWORD NULL'))
+    finally:
+        await engine.dispose()
+
+
+def test_db_roles_with_login_enables_every_runtime_role_without_leaking_passwords(
+    pg_database: PostgresSettings, tmp_path: Path
+) -> None:
+    passwords = _role_secrets(pg_database, tmp_path)
+    env = {"COLLECTOR_POSTGRES_DSN": _dsn(pg_database)}
+    try:
+        first = runner.invoke(
+            app, ["db", "roles", "--with-login", "--secrets-dir", str(tmp_path)], env=env
+        )
+        assert first.exit_code == 0, first.output
+        assert f"login enabled: {', '.join(RUNTIME_ROLES)}" in first.output
+        # Ідемпотентно: повтор (типовий one-shot після кожного deploy) теж exit 0.
+        env_dir = env | {ROLE_SECRETS_DIR_ENV: str(tmp_path)}
+        again = runner.invoke(app, ["db", "roles", "--with-login"], env=env_dir)
+        assert again.exit_code == 0, again.output
+        for output in (first.output, again.output):
+            assert not any(password in output for password in passwords.values())
+
+        async def can_login() -> str:
+            url = pg_database.url.set(username="collector_projector")
+            engine = create_async_engine(
+                url.set(password=passwords["collector_projector"]), poolclass=None
+            )
+            try:
+                async with engine.connect() as conn:
+                    return str(await conn.scalar(text("SELECT current_user")))
+            finally:
+                await engine.dispose()
+
+        assert asyncio.run(can_login()) == "collector_projector"
+    finally:
+        asyncio.run(_reset_logins(pg_database))
+
+
+def test_db_roles_with_login_rejects_missing_or_foreign_secrets_before_touching_db(
+    tmp_path: Path,
+) -> None:
+    """Секрети читаються до з'єднання: сервер недоступний (порт 1), а exit — з помилки секретів."""
+    env = {"COLLECTOR_POSTGRES_DSN": "postgresql://nobody:x@127.0.0.1:1/void"}
+    missing = runner.invoke(
+        app, ["db", "roles", "--with-login", "--secrets-dir", str(tmp_path)], env=env
+    )
+    assert missing.exit_code == 1
+    assert "postgres_dsn_fetcher" in missing.output and "Traceback" not in missing.output
+
+    leaked = "must-not-be-printed-0123456789"
+    for role in RUNTIME_ROLES:
+        user = "collector" if role == "collector_fetcher" else role  # міграційний superuser
+        (tmp_path / dsn_secret_name(role)).write_text(
+            f"postgresql://{user}:{leaked}@postgres:5432/collector\n", encoding="utf-8"
+        )
+    foreign = runner.invoke(
+        app, ["db", "roles", "--with-login", "--secrets-dir", str(tmp_path)], env=env
+    )
+    assert foreign.exit_code == 1
+    assert "collector_fetcher" in foreign.output
+    assert leaked not in foreign.output and "Traceback" not in foreign.output

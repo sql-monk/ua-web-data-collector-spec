@@ -206,12 +206,11 @@ async def apply_logins(conn: AsyncConnection, logins: list[RoleLogin]) -> list[s
         verifier = scram_sha256_verifier(login.password)
         # ALTER ROLE не приймає bind-параметрів. Ім'я ролі — з фіксованого RUNTIME_ROLES
         # (перевірено вище), verifier складається лише з [A-Za-z0-9+/=:$-], лапок у ньому
-        # бути не може.
-        await conn.execute(
-            text(
-                f'ALTER ROLE "{login.role}" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
-                f"NOREPLICATION NOBYPASSRLS INHERIT PASSWORD '{verifier}'"
-            )
+        # бути не може. `exec_driver_sql`, а не `text()`: `:<base64>` у verifier `text()`
+        # сприйняв би як bind-параметр.
+        await conn.exec_driver_sql(
+            f'ALTER ROLE "{login.role}" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
+            f"NOREPLICATION NOBYPASSRLS INHERIT PASSWORD '{verifier}'"
         )
         applied.append(login.role)
     return applied
