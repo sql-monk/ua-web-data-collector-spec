@@ -14,8 +14,9 @@ Env-змінні worker-а:
 | `COLLECTOR_WORKER_POLL_SECONDS` | `1.0` | пауза claim-loop, коли черга порожня або слоти зайняті |
 | `COLLECTOR_WORKER_STOP_GRACE_SECONDS` | `90` | бюджет drain по SIGTERM (< Compose grace) |
 | `COLLECTOR_WORKER_CLAIM_BATCH` | `8` | максимум jobs за один claim (не більше вільних слотів) |
+| `COLLECTOR_WORKER_FENCE_AFTER_SECONDS` | ½ lease TTL | вікно до self-fencing |
 | `COLLECTOR_WORKER_DEPLOYMENT` | `compose` | metadata `worker_instances.deployment` |
-| `COLLECTOR_CONTAINER_ID` | — | metadata `worker_instances.container_id` |
+| `COLLECTOR_CONTAINER_ID` | `HOSTNAME` | metadata `worker_instances.container_id` |
 
 Env-змінні scheduler-а: `COLLECTOR_SCHEDULER_TICK_SECONDS` (`5`),
 `COLLECTOR_SCHEDULER_LEASE_RETRY_SECONDS` (`5`), `COLLECTOR_SCHEDULER_LEASE_NAME`
@@ -37,6 +38,8 @@ SCHEDULER_ENV_PREFIX = "COLLECTOR_SCHEDULER_"
 CONTAINER_ID_ENV = "COLLECTOR_CONTAINER_ID"
 PLACEHOLDER_ENV = "COLLECTOR_WORKER_PLACEHOLDER"
 INSTANCE_VERSION_MAX_LENGTH = 128
+FENCE_RATIO = 0.5
+"""Частка lease TTL, після якої непідтверджений heartbeat означає втрачений lease."""
 
 
 class WorkerConfigError(ValueError):
@@ -102,6 +105,10 @@ class WorkerRuntimeConfig:
     poll_seconds: float = 1.0
     stop_grace_seconds: float = 90.0
     claim_batch: int = 8
+    # Скільки жити без підтвердженого базою heartbeat, перш ніж скасувати активні tasks
+    # (self-fencing, `runtime._fence_if_lease_unconfirmed`). `None` → половина lease TTL:
+    # один пропущений heartbeat пробачається, два — вже ризик подвійного виконання.
+    fence_after_seconds: float | None = None
     deployment: str = "compose"
     hostname: str | None = field(default=None)
     container_id: str | None = None
@@ -122,6 +129,22 @@ class WorkerRuntimeConfig:
         if self.claim_batch < 1:
             msg = f"claim_batch має бути >= 1, отримано {self.claim_batch}"
             raise WorkerConfigError(msg)
+        if self.fence_after_seconds is not None and not (
+            0 < self.fence_after_seconds <= self.lease_seconds
+        ):
+            msg = (
+                f"fence_after_seconds ({self.fence_after_seconds}) має бути у (0, "
+                f"lease_seconds={self.lease_seconds}]: після нього runtime вважає lease "
+                "втраченим і скасовує активні tasks"
+            )
+            raise WorkerConfigError(msg)
+
+    @property
+    def fence_after(self) -> float:
+        """Безпечне вікно без підтвердженого heartbeat (типово половина lease TTL)."""
+        if self.fence_after_seconds is not None:
+            return self.fence_after_seconds
+        return self.lease_seconds * FENCE_RATIO
 
     @classmethod
     def from_env(
@@ -136,10 +159,18 @@ class WorkerRuntimeConfig:
             poll_seconds=_positive_float(env, f"{WORKER_ENV_PREFIX}POLL_SECONDS", 1.0),
             stop_grace_seconds=_positive_float(env, f"{WORKER_ENV_PREFIX}STOP_GRACE_SECONDS", 90.0),
             claim_batch=_positive_int(env, f"{WORKER_ENV_PREFIX}CLAIM_BATCH", 8),
+            fence_after_seconds=(
+                _positive_float(env, f"{WORKER_ENV_PREFIX}FENCE_AFTER_SECONDS", 0.0) or None
+            ),
             deployment=env.get(f"{WORKER_ENV_PREFIX}DEPLOYMENT", "compose").strip() or "compose",
             # Docker hostname — лише metadata (§7.5): за нею не приймається жодне рішення.
             hostname=socket.gethostname(),
-            container_id=env.get(CONTAINER_ID_ENV, "").strip() or None,
+            # `HOSTNAME` у контейнері Docker/Swarm — короткий id контейнера (те саме, що
+            # показує `docker ps`), тому колонка `worker_instances.container_id` заповнена без
+            # додаткової конфігурації; явний `COLLECTOR_CONTAINER_ID` має пріоритет.
+            container_id=(
+                env.get(CONTAINER_ID_ENV, "").strip() or env.get("HOSTNAME", "").strip() or None
+            ),
         )
 
 

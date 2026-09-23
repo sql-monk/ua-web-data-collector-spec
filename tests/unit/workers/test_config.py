@@ -113,3 +113,35 @@ def test_instance_version_fits_the_column() -> None:
 )
 def test_placeholder_rollback_flag(value: str, expected: bool) -> None:
     assert placeholder_requested({"COLLECTOR_WORKER_PLACEHOLDER": value}) is expected
+
+
+def test_fence_window_defaults_to_half_of_the_lease() -> None:
+    """Self-fencing (F3): один пропущений heartbeat пробачається, два — вже ризик подвійної
+    обробки, тому вікно за замовчуванням — половина lease TTL."""
+    assert WorkerRuntimeConfig(role=WorkerRole.FETCH, lease_seconds=60).fence_after == 30.0
+    explicit = WorkerRuntimeConfig(role=WorkerRole.FETCH, lease_seconds=60, fence_after_seconds=5.0)
+    assert explicit.fence_after == 5.0
+    assert (
+        WorkerRuntimeConfig.from_env(
+            WorkerRole.FETCH, {"COLLECTOR_WORKER_FENCE_AFTER_SECONDS": "7.5"}
+        ).fence_after
+        == 7.5
+    )
+
+
+def test_fence_window_longer_than_the_lease_is_rejected() -> None:
+    """Вікно більше за lease TTL робить self-fencing марним: lease спливе раніше."""
+    with pytest.raises(WorkerConfigError, match="fence_after_seconds"):
+        WorkerRuntimeConfig(role=WorkerRole.FETCH, lease_seconds=60, fence_after_seconds=61)
+
+
+def test_container_id_falls_back_to_docker_hostname() -> None:
+    """F5: у контейнері `HOSTNAME` — короткий id контейнера, тому колонка
+    `worker_instances.container_id` заповнюється без додаткової конфігурації."""
+    from_hostname = WorkerRuntimeConfig.from_env(WorkerRole.FETCH, {"HOSTNAME": "830b526f8929"})
+    assert from_hostname.container_id == "830b526f8929"
+    explicit = WorkerRuntimeConfig.from_env(
+        WorkerRole.FETCH, {"HOSTNAME": "830b526f8929", "COLLECTOR_CONTAINER_ID": "explicit-id"}
+    )
+    assert explicit.container_id == "explicit-id"
+    assert WorkerRuntimeConfig.from_env(WorkerRole.FETCH, {}).container_id is None

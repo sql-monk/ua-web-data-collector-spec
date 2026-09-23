@@ -387,6 +387,32 @@ def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
     assert "collector db roles" in COMPOSE_PATH.read_text(encoding="utf-8")
 
 
+def test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire() -> None:
+    """§13 (знахідка F1 gate 2): runtime-процеси тимчасово ходять у PG тим самим DSN, що й
+    міграції, — бо LOGIN-ролі per component ще не існують.
+
+    Це навмисно **fail-loud** тест-вартовий, а не документація: щойно у `roles.sql` зʼявиться
+    хоч одна LOGIN-роль (WP-01A PR2, dependency-запит `docs/plan/deps/WP-01D-to-WP-01A.md` §2),
+    він упаде і змусить повернути §13-інваріант — per-role DSN для `scheduler` і `*-worker`
+    замість спільного superuser-секрету `postgres_dsn`.
+    """
+    roles_sql = (
+        REPO_ROOT / "src" / "collector" / "persistence" / "postgres" / "sql" / "roles.sql"
+    ).read_text(encoding="utf-8")
+    statements = " ".join(
+        line for line in roles_sql.splitlines() if not line.lstrip().startswith("--")
+    )
+    # `LOGIN` не матчить `NOLOGIN` (одне слово) — саме цього нам і треба.
+    assert not re.search(r"LOGIN", statements), (
+        "у roles.sql зʼявилися LOGIN-ролі — поверніть §13-інваріант: worker/scheduler мають "
+        "отримати власні per-role DSN, а не спільний secret postgres_dsn "
+        "(docs/plan/deps/WP-01D-to-WP-01A.md §2)"
+    )
+    deps = REPO_ROOT / "docs" / "plan" / "deps" / "WP-01D-to-WP-01A.md"
+    assert deps.is_file(), "тимчасове відхилення від §13 має лишатись оформленим запитом"
+    assert "LOGIN" in deps.read_text(encoding="utf-8")
+
+
 def test_dockerfile_optionally_copies_alembic_and_migrations() -> None:
     """Approved dependency WP-01A: файли з'являться після merge — COPY має бути опційним."""
     text = DOCKERFILE_PATH.read_text(encoding="utf-8")

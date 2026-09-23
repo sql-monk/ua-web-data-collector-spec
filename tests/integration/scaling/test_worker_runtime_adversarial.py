@@ -40,7 +40,7 @@ from collector.persistence.postgres.repositories import queue as queue_repo
 from collector.workers.config import WorkerRuntimeConfig
 from collector.workers.handlers import PermanentTaskError
 from collector.workers.roles import WorkerRole
-from collector.workers.runtime import DRAIN_TIMEOUT_ERROR_CODE, WorkerRuntime
+from collector.workers.runtime import WorkerRuntime
 
 from .conftest import ControlledHandler, WaitFor
 
@@ -451,7 +451,7 @@ async def test_permanent_handler_error_quarantines_with_a_dead_letter(
     await asyncio.wait_for(task, timeout=15)
 
 
-async def test_drain_timeout_on_the_last_attempt_quarantines_a_job_nobody_failed(
+async def test_drain_timeout_on_the_last_attempt_never_quarantines_a_job_nobody_failed(
     pg_sessions: async_sessionmaker[AsyncSession],
     worker_config: MakeConfig,
     blocking_handler: ControlledHandler,
@@ -459,16 +459,15 @@ async def test_drain_timeout_on_the_last_attempt_quarantines_a_job_nobody_failed
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
 ) -> None:
-    """Знахідка: плановий drain-timeout на останній спробі відправляє job у карантин.
+    """Знахідка F2 (виправлена): плановий drain не «спалює» job на останній спробі.
 
-    `_release_leases` повертає lease через `queue.retry(...)`, а `retry` на
-    `attempt >= max_attempts` переводить job у `quarantined` + dead letter `max_attempts`
-    (`repositories/queue.py::retry`). Але job ніхто не «провалив» — просто зупинили контейнер,
-    і §7.6 для scale-down вимагає саме «завершують/повертають leases».
-
-    Тест закріплює **фактичну** поведінку, щоб її зміна була помітною: коли WP-01A додасть
-    `queue.release(job_id, owner)` (dependency-запит WP-01D §3), очікування тут мають стати
-    `status == "pending"`, `attempt == 1` і нуль dead letters.
+    `queue.retry` на `attempt >= max_attempts` переводить job у `quarantined` + dead letter
+    `max_attempts` (`repositories/queue.py::retry`), але job ніхто не провалив — просто
+    зупинили контейнер. Тому `_release_leases` для останньої спроби **не** викликає `retry`:
+    lease лишається за instance і повертається в чергу тим самим шляхом, що й після SIGKILL —
+    `recover_expired_leases` після експірації (§15). Жодного карантину і жодного dead letter;
+    `attempt` зберігається. Коли WP-01A додасть `queue.release(job_id, owner)`
+    (dependency-запит WP-01D §3), очікування стануть `pending` одразу, без очікування TTL.
     """
     await make_pool(concurrency=1)
     async with pg_sessions() as session, session.begin():
@@ -491,12 +490,19 @@ async def test_drain_timeout_on_the_last_attempt_quarantines_a_job_nobody_failed
 
     assert blocking_handler.cancelled == [job_id], "task скасовано по вичерпанню grace"
     job_row = await read_job(pg_sessions, job_id)
-    assert job_row.status == "quarantined", "поточна поведінка (знахідка F2), а не бажана"
-    assert job_row.last_error_code == DRAIN_TIMEOUT_ERROR_CODE
+    assert job_row.status == "leased", "job не в карантині — lease просто чекає на експірацію"
+    assert job_row.attempt == 1, "спроба не витрачена планованою зупинкою"
     async with pg_sessions() as session:
         letters = list(
             (await session.execute(select(DeadLetter).where(DeadLetter.job_id == job_id))).scalars()
         )
-    assert [letter.reason for letter in letters] == ["max_attempts"], (
-        "dead letter про вичерпані спроби, хоча спробу перервала зупинка контейнера"
-    )
+    assert letters == [], "dead letter про вичерпані спроби не пишеться: ніхто не провалив job"
+
+    # Шлях повернення в чергу — той самий, що й після SIGKILL (§15).
+    async with pg_sessions() as session, session.begin():
+        recovered = await queue_repo.recover_expired_leases(
+            session, now=utcnow() + timedelta(days=1)
+        )
+    assert recovered == [job_id]
+    job_row = await read_job(pg_sessions, job_id)
+    assert (job_row.status, job_row.attempt, job_row.lease_owner) == ("pending", 1, None)

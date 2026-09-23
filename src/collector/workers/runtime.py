@@ -140,8 +140,12 @@ class WorkerRuntime:
         self._drain_barrier = False
         self._stop = asyncio.Event()
         self._wakeup = asyncio.Event()
+        # Момент останнього ПІДТВЕРДЖЕНОГО базою heartbeat — база self-fencing (§7.6 lease).
+        self._last_heartbeat_ok = monotonic()
+        self._fenced = False
         self.heartbeats = 0
         self.lost_leases = 0
+        self.fences = 0
 
     # --- стан для тестів і логів -------------------------------------------------------------
 
@@ -169,9 +173,29 @@ class WorkerRuntime:
         return len(self._active)
 
     @property
+    def fenced(self) -> bool:
+        """Self-fencing: lease вважається втраченим, бо heartbeat не підтверджується базою.
+
+        Поки прапорець піднятий, instance не має жодної активної task і не бере нових —
+        роботу цих jobs уже міг перехопити інший instance після `recover_expired_leases`.
+        """
+        return self._fenced
+
+    @property
     def claiming(self) -> bool:
-        """Чи бере runtime нові jobs (drain барʼєр або зупинка знімають claim)."""
-        return not self._stop.is_set() and not self._drain_barrier and self._status == "ready"
+        """Чи бере runtime нові jobs (drain барʼєр, self-fencing або зупинка знімають claim).
+
+        `_drain_barrier` — це барʼєр **цього** instance (`worker_instances.drain_requested_at`).
+        Роль зупиняється, коли барʼєр поставлено кожному її instance; робить це `PoolController`
+        (PR3) — тут лише примітив, на якому він будується (R-57: рішення не залежить від того,
+        який контейнер видалить Compose/Swarm).
+        """
+        return (
+            not self._stop.is_set()
+            and not self._drain_barrier
+            and not self._fenced
+            and self._status == "ready"
+        )
 
     def request_stop(self) -> None:
         """Попросити graceful drain (те саме, що SIGTERM); безпечно з будь-якого місця loop-у."""
@@ -242,6 +266,9 @@ class WorkerRuntime:
         )
         await self._check_ready()
         await self._set_status("ready")
+        # Відлік self-fencing починається від підтвердженої реєстрації, а не від створення
+        # обʼєкта: повільний boot не має виглядати як втрачений lease.
+        self._last_heartbeat_ok = monotonic()
 
     async def _ensure_pool(self) -> PoolSnapshot:
         """Прочитати desired state ролі; на чистій БД створити pool із defaults §7.6."""
@@ -433,12 +460,55 @@ class WorkerRuntime:
             return
         except (SQLAlchemyError, OSError, PersistenceError) as exc:
             self._log.warning("worker.heartbeat_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+            self._fence_if_lease_unconfirmed()
             return
         self.heartbeats += 1
+        self._last_heartbeat_ok = monotonic()
+        self._unfence()
         self._apply_pool(snapshot)
         self._apply_drain_barrier(drain_requested)
         for job_id in lost:
             self._abandon(job_id)
+
+    # --- self-fencing ---------------------------------------------------------------------
+
+    def _fence_if_lease_unconfirmed(self) -> None:
+        """Скасувати роботу, якщо база не підтверджує lease довше за безпечне вікно.
+
+        Без цього недоступність PostgreSQL довша за `lease_seconds` означає **подвійне
+        виконання**: lease спливає, `recover_expired_leases` віддає job іншому instance, а цей
+        продовжує її робити і дізнається про втрату лише в момент звіту. Для `NoopHandler` це
+        нешкідливо, для доменних handler-ів (Mongo-запис WP-01B, зовнішній запит WP-02) — ні.
+        Тому, щойно з моменту останнього підтвердженого heartbeat минуло
+        `fence_after_seconds` (типово половина lease TTL), instance сам себе відгороджує:
+        скасовує активні tasks, не звітує за ними `complete` і не бере нових, поки база не
+        підтвердить heartbeat знову (§7.6, §9.3).
+        """
+        if self._fenced:
+            return
+        elapsed = monotonic() - self._last_heartbeat_ok
+        if elapsed < self.config.fence_after:
+            return
+        self._fenced = True
+        self.fences += 1
+        self._log.error(
+            "worker.fenced",
+            reason="lease not confirmed by database",
+            seconds_since_heartbeat=round(elapsed, 3),
+            fence_after_seconds=self.config.fence_after,
+            lease_seconds=self.config.lease_seconds,
+            cancelled_tasks=len(self._active),
+        )
+        for job_id in list(self._active):
+            self._abandon(job_id, phase="fence")
+        self._wakeup.set()
+
+    def _unfence(self) -> None:
+        if not self._fenced:
+            return
+        self._fenced = False
+        self._log.info("worker.unfenced", fences=self.fences)
+        self._wakeup.set()
 
     def _apply_pool(self, snapshot: PoolSnapshot) -> None:
         previous = self._pool
@@ -462,13 +532,18 @@ class WorkerRuntime:
         self._log.info("worker.drain_barrier", active=requested)
         self._wakeup.set()
 
-    def _abandon(self, job_id: UUID) -> None:
-        """Lease job-и більше не наш: скасувати локальний task, не чіпаючи рядок у черзі."""
+    def _abandon(self, job_id: UUID, *, phase: str = "heartbeat") -> None:
+        """Lease job-и більше не наш: скасувати локальний task, не чіпаючи рядок у черзі.
+
+        Рядок у `crawl_jobs` навмисно не змінюється: або його вже перехопив інший instance
+        (`heartbeat`), або база недоступна (`fence`) — в обох випадках писати туди нічого і
+        нічим. Скасована task не проходить через `_report`, тому тихого `complete` не буде.
+        """
         entry = self._active.pop(job_id, None)
         if entry is None:
             return
         self.lost_leases += 1
-        self._log.warning("worker.lease_lost", job_id=str(job_id), phase="heartbeat")
+        self._log.warning("worker.lease_lost", job_id=str(job_id), phase=phase)
         entry.handle.cancel()
 
     # --- drain -------------------------------------------------------------------------------
@@ -491,9 +566,31 @@ class WorkerRuntime:
         self._log.info("worker.stopped", heartbeats=self.heartbeats, lost_leases=self.lost_leases)
 
     async def _release_leases(self) -> None:
-        """Повернути lease незавершених tasks у чергу (claimable одразу, без backoff)."""
+        """Повернути lease незавершених tasks у чергу (claimable одразу, без backoff).
+
+        **Job на останній спробі lease не повертається через `retry`.** Плановий drain нікого
+        не «провалив», а `queue.retry` при `attempt >= max_attempts` переводить job у
+        `quarantined` і пише dead letter `max_attempts` — тобто звичайний scale-down знищував
+        би саме ті jobs, які й так витратили бюджет спроб. Поки в репозиторії WP-01A немає
+        `release(job_id, owner)` (запит: `docs/plan/deps/WP-01D-to-WP-01A.md` §3), такий job
+        лишається `leased` і повертається в чергу тим самим шляхом, що й після SIGKILL —
+        `recover_expired_leases` після експірації lease (§15: «replacement replica підхоплює
+        expired lease»). Ціна — очікування до `lease_seconds`; вигода — жодного хибного
+        карантину і жодного вигаданого dead letter.
+        """
         now = self._now()
         for job_id, entry in list(self._active.items()):
+            if entry.task.attempt >= entry.task.max_attempts:
+                self._log.warning(
+                    "worker.lease_left_to_expire",
+                    job_id=str(job_id),
+                    attempt=entry.task.attempt,
+                    max_attempts=entry.task.max_attempts,
+                    lease_seconds=self.config.lease_seconds,
+                    reason="retry on the last attempt would quarantine a job nobody failed",
+                )
+                self._active.pop(job_id, None)
+                continue
             try:
                 async with self._sessions() as session, session.begin():
                     await queue_repo.retry(

@@ -20,7 +20,7 @@ stateless runtime. Нічого з домену тут немає — це ка�
 
 Додатково:
 
-- **Role-wide drain barrier (R-57, підготовка PR3):** claim зупиняє не лише SIGTERM, а й
+- **Барʼєр drain — примітив для role-wide drain (R-57, PR3):** це барʼєр **одного** instance; роль зупиняється, коли його виставлено кожному живому instance (це робить `PoolController` у PR3). Claim зупиняє не лише SIGTERM, а й
   `worker_instances.drain_requested_at` власного рядка — instance сам знімає себе з claim,
   тому барʼєр не залежить від того, який контейнер вирішить видалити Compose/Swarm
   (`::test_role_wide_drain_barrier_stops_claim_without_sigterm`).
@@ -212,6 +212,69 @@ $ docker compose ... -p collector-wp01d down -v --remove-orphans
 exit=0
 ```
 
+## Виправлення після gate 2
+
+Вердикт gate 2 — `pass` із знахідками; звіт тестувальника:
+`docs/plan/reports/WP-01D/testing-pr1.md` (14 доданих тестів, коміт `9df28d2`).
+
+| # | Знахідка | Рішення | Що саме зроблено |
+|---|---|---|---|
+| F0 | `high` — flaky-тест `test_scheduler_singleton.py` (5/14 падінь): очікував, що звільнений advisory lock перебере саме резервний процес | **not applicable** (виправлено тестувальником у `9df28d2`) | Продукт був правильний — ні §7.5, ні вимога 6 не обіцяють переможця гонки. Тест уже перевіряє контракт («активний рівно один», «без lease немає планування»); я нічого не міняв, лише перевірив, що набір зелений (28/28). |
+| F1 | `high` — усі 8 runtime-процесів ходять у PG під superuser-роллю `collector` (§13) | **accepted** (owner **WP-01A PR2**, заведено 2026-09-23) | Не виправляється в цьому PR: жодної LOGIN-ролі в кластері немає, `migrations/**` і `sql/roles.sql` — forbidden. Підсилено `docs/plan/deps/WP-01D-to-WP-01A.md` §2 (пріоритет «блокер pilot», рантайм-доказ зі звіту тестувальника); ризик #1 нижче оновлено owner-ом і датою; у картку `WP-01D.md` додано розділ «Відомі ризики»; додано тест-вартовий `test_compose_config.py::test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire`, який падає, щойно в `roles.sql` зʼявиться перша LOGIN-роль, і вимагає повернути per-role DSN. |
+| F2 | `medium` — drain-timeout на останній спробі відправляв job у `quarantined` + dead letter `max_attempts` | **fixed** | `runtime.py::_release_leases` більше не викликає `retry` для `attempt >= max_attempts`: такий job лишається `leased` і повертається в чергу через `recover_expired_leases` після експірації (той самий шлях, що й після SIGKILL, §15) — без хибного карантину і без вигаданого dead letter, `attempt` збережено. Guard-тест тестувальника переписано під нову поведінку: `test_drain_timeout_on_the_last_attempt_never_quarantines_a_job_nobody_failed`. Залишкова ціна (очікування до `lease_seconds`) названа в dependency-запиті §3 як те, що прибирає `queue.release`. |
+| F3 | `medium` — немає self-fencing: при недоступності PG lease спливає, а instance продовжує виконувати task (подвійна обробка для доменних handler-ів) | **fixed** | Додано self-fencing: `_heartbeat` запамʼятовує момент останнього **підтвердженого базою** heartbeat, і якщо він старший за `fence_after` (типово ½ lease TTL, env `COLLECTOR_WORKER_FENCE_AFTER_SECONDS`), runtime піднімає явний стан `WorkerRuntime.fenced`, скасовує всі активні tasks (`worker.lease_lost phase=fence`), не звітує за ними `complete` і не бере нових, поки база не підтвердить heartbeat (`worker.unfenced`). Тест із симуляцією недоступності PG: `test_self_fencing_cancels_active_tasks_when_the_database_stops_confirming_the_lease`; unit-тести вікна — `test_fence_window_defaults_to_half_of_the_lease`, `test_fence_window_longer_than_the_lease_is_rejected`. |
+| F4 | `low` — «role-wide drain barrier» у PR1 фактично per-instance | **fixed** (уточнення, не зміна поведінки) | Докстрінг `WorkerRuntime.claiming` тепер прямо каже, що це барʼєр **цього** instance і будівельний блок для R-57, а роль зупиняє `PoolController` (PR3); у картці WP-01D вимога PR3 №2 доповнена зобовʼязанням виставити барʼєр кожному живому instance ролі й дочекатися підтвердження від усіх. Формулювання в цьому звіті нижче виправлено так само. |
+| F5 | `low` — `worker_instances.container_id` завжди `NULL` | **fixed** | `WorkerRuntimeConfig.from_env` бере `COLLECTOR_CONTAINER_ID`, а за його відсутності — `HOSTNAME`, який Docker/Swarm виставляють у контейнері в короткий id контейнера (те саме значення, що показує `docker ps`). Компоуз чіпати не довелось; перевірено на піднятому стеку (див. нижче) і unit-тестом `test_container_id_falls_back_to_docker_hostname`. |
+| F6 | `low` — локальний прогін піднімав два testcontainers-PostgreSQL | **fixed** | `tests/integration/scaling/conftest.py` тепер (а) бере **той самий обʼєкт модуля** фікстур WP-01A, який уже імпортував pytest, і (б) робить спільними сам ресурс: `_start_container` і `TemplateState` підмінені memoized-обгортками, контейнер зупиняється на `atexit`. Перевірено семплінгом `docker ps` під час спільного прогону двох каталогів: **max 1 контейнер** (було 2), 15 passed. |
+
+### Команди після виправлень
+
+```text
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src
+All checks passed!
+200 files already formatted
+Success: no issues found in 68 source files
+
+$ uv run pytest -m "not live" -q
+........................................................................ [  8%]
+...  (скорочено)  ...
+=========================== short test summary info ===========================
+SKIPPED [1] tests/unit/test_network_blocked.py:27: Windows: loopback потрібен asyncio
+822 passed, 1 skipped, 8 warnings in 527.97s (0:08:47)
+
+(817 після тестів gate 2 + 5 доданих цим фіксом: self-fencing, два unit-тести вікна
+fencing, container_id з HOSTNAME, §13-вартовий)
+
+$ uv run pytest -m integration tests/integration/scaling -q
+............................                                             [100%]
+28 passed in 32.29s
+
+$ docker compose config --quiet
+(порожній вивід, exit=0)
+
+$ COLLECTOR_IMAGE=collector:wp01d docker compose -f docker-compose.yml -f <override мереж>     -p collector-wp01d --profile core --profile workers up -d --wait --wait-timeout 420
+ Container collector-wp01d-projector-worker-1 Healthy
+ Container collector-wp01d-fetch-worker-1 Healthy
+ Container collector-wp01d-fetch-worker-2 Healthy
+exit=0
+
+$ docker compose ps -a --format json | python deploy/compose/check-healthy.py
+all 16 containers healthy or exited 0
+exit=0
+
+$ psql -c "select role, container_id, hostname from worker_instances order by role limit 3"
+   role    | container_id |   hostname   | deployment
+-----------+--------------+--------------+------------
+ discovery | 88e40a19230b | 88e40a19230b | compose
+ export    | e1a468cf8998 | e1a468cf8998 | compose
+ fetch     | fe5ce129bfa4 | fe5ce129bfa4 | compose      <- F5: більше не NULL
+
+$ docker compose ... down -v --remove-orphans
+ Network collector_wp01d_source_egress Removed
+ Network collector_wp01d_ingress Removed
+exit=0
+```
+
 ## Що не перевірено
 
 - **`docker compose up -d --no-recreate --scale fetch-worker=4`** — scale-специфічна команда
@@ -234,8 +297,13 @@ exit=0
 
 ## Ризики
 
-1. **Runtime ходить у БД з DSN міграційної ролі.** §13 вимагає per-component LOGIN-ролі, яких
-   ще немає (`roles.sql` створює group-ролі `NOLOGIN`). Тимчасово worker/scheduler монтують той
+1. **Runtime ходить у БД з DSN міграційної ролі** (знахідка F1 gate 2; owner **WP-01A PR2**,
+   заведено 2026-09-23; блокер pilot/production і live-збору, не блокер merge).
+   Рантайм-доказ — `docs/plan/reports/WP-01D/testing-pr1.md` §6 F1: усі вісім процесів
+   під'єднані як `rolsuper = t`. Тест-вартовий:
+   `test_compose_config.py::test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire`
+   (падає, щойно в `roles.sql` зʼявиться перша LOGIN-роль). §13 вимагає per-component
+   LOGIN-ролі, яких ще немає (`roles.sql` створює group-ролі `NOLOGIN`). Тимчасово worker/scheduler монтують той
    самий secret `postgres_dsn`, що й `migrate-postgres` — тобто мають більше прав, ніж їм
    потрібно. Запит: `docs/plan/deps/WP-01D-to-WP-01A.md` §2. Компенсація: жодних інших
    credentials (Mongo/MinIO) worker-и не отримують; тест
@@ -246,10 +314,11 @@ exit=0
    (`test_compose_config.py`, `test_compose_config_adversarial.py`). Вони оновлені за
    прецедентом WP-01A (commit `9ed5ed8`), а не видалені: placeholder лишився як rollback-шлях і
    далі тестується під `COLLECTOR_WORKER_PLACEHOLDER=1`.
-3. **Drain-timeout використовує `retry`, а не `release`.** Якщо job був на останній спробі,
-   повернення lease після timeout відправляє його в карантин із dead letter `max_attempts`,
-   хоча його ніхто не «провалив». Запит на `release(job_id, owner)` —
-   `docs/plan/deps/WP-01D-to-WP-01A.md` §3.
+3. **Drain-timeout на останній спробі чекає експірації lease** (після фіксу F2). Хибного
+   карантину більше немає: `retry` викликається лише при `attempt < max_attempts`, а job на
+   останній спробі повертається в чергу через `recover_expired_leases` — тобто до
+   `lease_seconds` (типово 60 с) затримки при плановому scale-down. Прибирає це
+   `queue.release(job_id, owner)` — `docs/plan/deps/WP-01D-to-WP-01A.md` §3.
 4. **Два testcontainers-контейнери у повному локальному прогоні.** `tests/integration/scaling`
    реекспортує фікстури `tests/integration/postgres` через завантаження модуля за шляхом
    (`pytest_plugins` у не-кореневому conftest заборонений з pytest 7), тому session-scope

@@ -13,9 +13,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
+from typing import cast
 from uuid import UUID
 
 import pytest
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from collector.persistence.postgres.clock import utcnow
@@ -391,3 +393,74 @@ async def test_handler_failure_becomes_a_retry_with_backoff(
 
     stop.set()
     await asyncio.wait_for(task, timeout=15)
+
+
+class FlakySessions:
+    """Проксі над `async_sessionmaker`, який на команду тесту імітує недоступність PostgreSQL.
+
+    Рівно те, що бачить runtime при падінні бази: будь-яка спроба відкрити session закінчується
+    помилкою драйвера. Детерміновано і без зупинки контейнера — тест керує «відмовою» прапорцем.
+    """
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+        self.failing = False
+        self.failures = 0
+
+    def __call__(self) -> AsyncSession:
+        if self.failing:
+            self.failures += 1
+            raise OperationalError(
+                "SELECT 1", None, ConnectionRefusedError("postgres unreachable (test)")
+            )
+        return self._sessions()
+
+
+async def test_self_fencing_cancels_active_tasks_when_the_database_stops_confirming_the_lease(
+    pg_sessions: async_sessionmaker[AsyncSession],
+    worker_config: MakeConfig,
+    blocking_handler: ControlledHandler,
+    make_pool: MakePool,
+    enqueue_jobs: EnqueueJobs,
+    wait_for: WaitFor,
+    running: list[asyncio.Task[None]],
+) -> None:
+    """F3: недоступна база довше за `fence_after` → instance сам скасовує роботу (§7.6, §9.3).
+
+    Без self-fencing lease мовчки спливає, `recover_expired_leases` віддає job іншому instance,
+    а цей продовжує її виконувати — подвійна обробка для доменних handler-ів. Після фікса
+    runtime скасовує активні tasks, не звітує за ними `complete` і не бере нових, поки база не
+    підтвердить heartbeat.
+    """
+    await make_pool(concurrency=1)
+    (job_id,) = await enqueue_jobs(1)
+    sessions = FlakySessions(pg_sessions)
+    runtime = WorkerRuntime(
+        # Тут явне вікно fencing замість половини lease TTL — щоб тест не чекав секунди.
+        worker_config(lease_seconds=4, heartbeat_seconds=0.05, fence_after_seconds=0.2),
+        cast("async_sessionmaker[AsyncSession]", sessions),
+        blocking_handler,
+    )
+    stop = asyncio.Event()
+    task = start(runtime, running, stop)
+    await wait_for(lambda: runtime.active_tasks == 1, what="task у роботі")
+    assert not runtime.fenced
+
+    sessions.failing = True
+    await wait_for(lambda: runtime.fenced, what="self-fencing після втрати підтвердження lease")
+    await wait_for(lambda: blocking_handler.cancelled == [job_id], what="активний task скасовано")
+    assert runtime.active_tasks == 0
+    assert not runtime.claiming, "поки lease не підтверджено, нові jobs не беруться"
+    assert runtime.fences == 1
+
+    job = await read_job(pg_sessions, job_id)
+    assert job.status == "leased", "жодного тихого complete — скасована task не звітує"
+    assert job.lease_owner == runtime.owner
+
+    sessions.failing = False
+    await wait_for(lambda: not runtime.fenced, what="підтверджений heartbeat знімає fencing")
+    await wait_for(lambda: runtime.claiming, what="claim відновлено")
+
+    stop.set()
+    await asyncio.wait_for(task, timeout=15)
+    assert (await read_instance(pg_sessions, runtime.instance_id)).status == "stopped"

@@ -17,12 +17,14 @@ template-БД, testcontainers і session/engine-фабрики; тут той с
 from __future__ import annotations
 
 import asyncio
+import atexit
 import importlib.util
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import pytest
@@ -38,12 +40,21 @@ pytestmark = pytest.mark.integration
 
 _FIXTURES_MODULE = "collector_tests_postgres_fixtures"
 _FIXTURES_PATH = Path(__file__).resolve().parent.parent / "postgres" / "conftest.py"
+_SHARED: dict[str, Any] = {}
 
 
-def _load_postgres_fixtures() -> object:
-    module = sys.modules.get(_FIXTURES_MODULE)
-    if module is not None:
-        return module
+def _postgres_fixtures_module() -> Any:
+    """Модуль фікстур WP-01A — по змозі **той самий обʼєкт**, який уже імпортував pytest.
+
+    Спершу шукаємо серед завантажених модулів копію з тим самим `__file__` (pytest імпортує
+    conftest каталогу `tests/integration/postgres` раніше за цей), і лише якщо її немає —
+    завантажуємо файл за шляхом. Спільний обʼєкт модуля важливий для `_share_server_and_template`:
+    патч його глобалів діє на обидва набори фікстур.
+    """
+    for module in list(sys.modules.values()):
+        path = getattr(module, "__file__", None)
+        if path and Path(path).resolve() == _FIXTURES_PATH:
+            return module
     spec = importlib.util.spec_from_file_location(_FIXTURES_MODULE, _FIXTURES_PATH)
     if spec is None or spec.loader is None:  # pragma: no cover — шлях фіксований у репозиторії
         msg = f"не вдалося завантажити фікстури PostgreSQL з {_FIXTURES_PATH}"
@@ -54,7 +65,51 @@ def _load_postgres_fixtures() -> object:
     return module
 
 
-_postgres_fixtures = _load_postgres_fixtures()
+def _share_server_and_template(module: Any) -> None:
+    """Один контейнер PostgreSQL і одна template-БД на процес, а не по одному на каталог.
+
+    Реекспорт фікстур дає два різні `fixturedef` (свій у кожному conftest), і кожен зі
+    `scope="session"` кешується окремо — інакше локальний прогін піднімав би два контейнери
+    (знахідка F6 gate 2). Тому спільним робиться не fixturedef, а сам ресурс: `_start_container`
+    і `TemplateState` у модулі фікстур підміняються на memoized-обгортки. Контейнер зупиняється
+    на виході з процесу (`atexit`), коли обидві сесійні фікстури вже завершені.
+    """
+    if _SHARED.get("patched"):
+        return
+    _SHARED["patched"] = True
+    original_start = module._start_container  # noqa: SLF001 — навмисний патч тестової фікстури
+    original_template = module.TemplateState
+
+    def shared_start_container() -> Iterator[Any]:
+        state = _SHARED.get("container")
+        if state is None:
+            generator = original_start()
+            state = {"generator": generator, "server": next(generator)}
+            _SHARED["container"] = state
+            atexit.register(_stop_shared_container)
+        yield state["server"]
+
+    def shared_template_state() -> Any:
+        state = _SHARED.get("template")
+        if state is None:
+            state = original_template()
+            _SHARED["template"] = state
+        return state
+
+    module._start_container = shared_start_container  # noqa: SLF001 — див. докстрінг
+    module.TemplateState = shared_template_state
+
+
+def _stop_shared_container() -> None:
+    state = _SHARED.pop("container", None)
+    if state is None:
+        return
+    with suppress(Exception):  # контейнер уже міг зупинити Ryuk
+        state["generator"].close()
+
+
+_postgres_fixtures = _postgres_fixtures_module()
+_share_server_and_template(_postgres_fixtures)
 
 postgres_server = _postgres_fixtures.postgres_server
 _template_state = _postgres_fixtures._template_state  # noqa: SLF001 — реекспорт фікстури WP-01A
@@ -161,6 +216,7 @@ def worker_config() -> Callable[..., WorkerRuntimeConfig]:
         poll_seconds: float = 0.02,
         stop_grace_seconds: float = 10.0,
         claim_batch: int = 8,
+        fence_after_seconds: float | None = None,
     ) -> WorkerRuntimeConfig:
         return WorkerRuntimeConfig(
             role=role,
@@ -169,6 +225,7 @@ def worker_config() -> Callable[..., WorkerRuntimeConfig]:
             poll_seconds=poll_seconds,
             stop_grace_seconds=stop_grace_seconds,
             claim_batch=claim_batch,
+            fence_after_seconds=fence_after_seconds,
             deployment="pytest",
             hostname="pytest-host",
             container_id="pytest-container",
