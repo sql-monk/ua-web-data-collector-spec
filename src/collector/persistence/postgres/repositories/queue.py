@@ -36,12 +36,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.contracts import new_entity_id
 from collector.persistence.postgres.clock import resolve_now
-from collector.persistence.postgres.errors import LeaseNotOwnedError, NotFoundError
+from collector.persistence.postgres.errors import (
+    InvalidValueError,
+    LeaseNotOwnedError,
+    NotFoundError,
+)
 from collector.persistence.postgres.models import (
     CLAIMABLE_JOB_STATUSES,
     CrawlJob,
     DeadLetter,
 )
+from collector.persistence.postgres.repositories.audit import append_audit
 
 TERMINAL_JOB_STATUSES: frozenset[str] = frozenset({"succeeded", "quarantined"})
 
@@ -282,18 +287,33 @@ async def quarantine(
     *,
     error_code: str,
     error_message: str | None = None,
+    actor: str | None = None,
+    reason: str | None = None,
+    request_id: str | None = None,
     now: datetime | None = None,
 ) -> CrawlJob:
     """Permanent failure або рішення оператора: → `quarantined` + `dead_letters(quarantine)`.
-    `owner=None` — операторський виклик для будь-якого нетермінального job (без lease-перевірки).
-    Transaction boundary: викликач."""
+
+    `owner=None` — **операторський** виклик для будь-якого нетермінального job (без
+    lease-перевірки). Саме для нього `actor` і `reason` обов'язкові, і репозиторій пише
+    `audit_log` у тій самій транзакції (§13; знахідка S-2 пострев'ю PR1): людина, яка вручну
+    знімає job із черги, не може зробити це без сліду. Виклик воркера (`owner` задано)
+    аудиту не пише — його слід це `dead_letters` + `last_error_code`, а runtime-ролі парсера
+    й фетчера свідомо не мають доступу читати журнал.
+
+    Transaction boundary: викликач.
+    """
     current = resolve_now(now)
+    if owner is None and (not actor or not reason):
+        msg = "операторський quarantine (owner=None) вимагає actor і reason для audit (§13)"
+        raise InvalidValueError(msg)
     job = (
         await _lock_owned(session, job_id, owner)
         if owner is not None
         else await _lock_any(session, job_id)
     )
-    return await _quarantine_locked(
+    before_status = job.status
+    quarantined = await _quarantine_locked(
         session,
         job,
         reason="quarantine",
@@ -301,6 +321,62 @@ async def quarantine(
         error_message=error_message,
         now=current,
     )
+    if owner is None and actor is not None:
+        await append_audit(
+            session,
+            actor=actor,
+            action="crawl_job.quarantine",
+            resource_type="crawl_job",
+            resource_id=str(job_id),
+            before={"status": before_status, "attempt": quarantined.attempt},
+            after={"status": quarantined.status, "error_code": error_code, "reason": reason},
+            request_id=request_id,
+            now=current,
+        )
+    return quarantined
+
+
+async def release(
+    session: AsyncSession, job_id: UUID, owner: str, *, now: datetime | None = None
+) -> CrawlJob:
+    """Плановий drain: `leased` → `pending` **без** інкременту `attempt` і **без** помилки.
+
+    Запит WP-01D (`docs/plan/deps/WP-01D-to-WP-01A.md` §3, §5): при scale-down контейнер
+    зупиняють, і незавершені jobs треба повернути в чергу негайно. `retry` для цього не
+    підходить двічі:
+
+    - на останній спробі (`attempt >= max_attempts`) він відправив би job у `quarantined` з
+      dead letter `max_attempts`, хоча її ніхто не провалив;
+    - він пише `last_error_code`/`last_error_message` (`drain_timeout`), що вводить в оману
+      оператора і псує статистику dead letters (уточнення §5 запиту).
+
+    Тому `release` не чіпає ні `attempt`, ні поля помилки — це той самий перехід, що робить
+    `recover_expired_leases`, але за явним викликом власника, без очікування TTL lease.
+    `not_before = now`, тож job стає claimable одразу.
+
+    Чужий/відсутній lease → `LeaseNotOwnedError`: повертати чужу job не можна, її вже виконує
+    інший instance. Transaction boundary: викликач (одна коротка транзакція на job).
+    """
+    current = resolve_now(now)
+    job = (
+        await session.execute(
+            update(CrawlJob)
+            .where(_owned(job_id, owner))
+            .values(
+                status="pending",
+                lease_owner=None,
+                lease_expires_at=None,
+                leased_at=None,
+                not_before=current,
+                updated_at=current,
+            )
+            .returning(CrawlJob)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if job is None:
+        raise LeaseNotOwnedError(_not_owned_message(job_id, owner))
+    return job
 
 
 async def recover_expired_leases(
@@ -431,5 +507,6 @@ __all__ = [
     "list_dead_letters",
     "quarantine",
     "recover_expired_leases",
+    "release",
     "retry",
 ]

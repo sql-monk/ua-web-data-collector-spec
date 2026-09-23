@@ -27,6 +27,15 @@ class ConflictError(PersistenceError):
     """Порушення бізнес-унікальності: другий повний обхід джерела, дубль ключа тощо."""
 
 
+class StaleClaimError(PersistenceError):
+    """Commit predicate upload claim не виконано (§10 п.5, R-38/R-41).
+
+    Причини: `claim_generation` застаріла (хтось зробив reacquire), lease прострочений, owner
+    інший або claim уже не `leased`. Producer має повторно взяти claim, ще раз перевірити
+    HEAD/checksum об'єкта і лише тоді commit-ити — stale generation не створює DB reference.
+    """
+
+
 class InvalidValueError(PersistenceError):
     """Аргумент операції порушує інваріант ресурсу (`desired_concurrency < 1`, replicas поза
     `min/max` тощо).
