@@ -47,6 +47,33 @@ Killed replica → lease recovery іншим instance; drain під активн
 
 ---
 
+## PR1b — `wp/01d-1b-runtime-role-dsn`: runtime на per-component LOGIN-ролях (блокер pilot §13)
+
+Закриває `docs/plan/deps/WP-01A-to-WP-01D.md` §1–§2 (і ризик I-1 `security-pr2.md`). Worktree `.worktrees/wp-01d-1b`. Паралельно з WP-00 PR4 (`wp/00-4-role-dsn-secrets`), який генерує секрети й виставляє паролі ролям у `migrate-postgres`.
+
+### Owned files
+
+Як у PR1, у `docker-compose.yml` — лише `x-worker`, `scheduler`, `*-worker` сервіси, плюс ідентичний блок top-level `secrets:` з картки WP-00 PR4 п.2 (дослівно; тільки щоб `docker compose config` був валідний у цій гілці — owner блоку WP-00). `tests/unit/test_compose_config*.py` — лише тест-вартовий і нові тести на worker/scheduler-сервіси.
+
+### Вимоги
+
+1. Кожен runtime-сервіс монтує **лише свій** `postgres_dsn_<component>` як `COLLECTOR_POSTGRES_DSN_FILE`; спільний `postgres_dsn` жоден runtime-сервіс не монтує. Мапінг: `scheduler`, `maintenance-worker` → `scheduler`; `discovery-`, `fetch-`, `browser-worker` → `fetcher`; `parse-worker` → `parser`; `projector-worker` → `projector`; `translation-worker` → `translation`.
+2. `export-worker`: рішення оркестратора — варіант (а) deps §1: runtime-черга під `collector_scheduler` (`postgres_dsn_scheduler`) як тимчасовий крок, бо доменного читання даних експортом ще немає; read-only з'єднання `collector_export_ro` додає власник експорту. Записати як відомий ризик у картці (owner — WP експорту / WP-01A PR3 за потреби окремої ролі `collector_exporter`).
+3. `verify_runtime_login(conn)` викликається при старті `WorkerRuntime` і `scheduler` до першого claim; `RoleLoginError` → процес завершується ненульовим кодом із зрозумілим повідомленням (без DSN/пароля в лозі). Rollback: `COLLECTOR_WORKER_PLACEHOLDER=1` як і раніше.
+4. Тест-вартовий `test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire` і його зонди замінити позитивним тестом §13: жоден сервіс, крім `migrate-postgres`, не монтує `postgres_dsn`; кожен runtime-сервіс монтує рівно один `postgres_dsn_<component>` згідно з мапінгом.
+5. `_release_leases` під час планового drain використовує `queue.release(job_id, owner)` замість обходу через `retry(..., IMMEDIATE_RETRY_POLICY)`; тест: drain не змінює `attempt` і не пише полів помилки.
+6. Out of scope: publisher loop outbox (deps §7, N-2) — publisher-а ще немає; вимога переходить у картку його власника (WP-01B).
+
+### Тести
+
+Unit compose (п.1, п.4); unit/integration: runtime під superuser DSN або членом `collector_migrate` не стартує (п.3), під `collector_fetcher` стартує і claim-ить; integration drain → `release` (п.5). Повний `tests/integration/scaling/**` — під LOGIN-ролями, а не під superuser, де це можливо (фікстури `tests/integration/postgres/test_role_logins.py` WP-01A — як зразок).
+
+### Acceptance
+
+Після `init-secrets.sh` + `docker compose --profile core --profile workers up -d --wait` усі runtime-процеси підключені не-superuser ролями (`SELECT usename, usesuper FROM pg_stat_activity JOIN pg_user ...` у звіті); тест-вартовий прибрано, позитивний тест §13 зелений.
+
+---
+
 ## PR2 — `wp/01d-2-limiter-runtime`: global origin permits у runtime
 
 ### Вимоги (R-53, FR-033)
