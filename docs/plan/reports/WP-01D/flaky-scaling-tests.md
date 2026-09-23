@@ -140,6 +140,10 @@ full run 3: 875 passed, 23 skipped, 8 warnings in 194.30s
 
 Для порівняння: baseline — 4 червоні прогони з 6 за тих самих умов (§1).
 
+Після rebase на `main` `2f79774` (змерджений WP-01A PR2): повний `pytest -m "not live"` —
+`991 passed, 23 skipped`; `tests/integration/scaling` під навантаженням — 2 з 2 зелені
+(`35 passed`). Права ролей воркерів (`UPDATE ON worker_instances`) покривають `FOR SHARE`.
+
 ## 6. Контракт команд
 
 ```text
