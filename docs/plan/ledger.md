@@ -19,7 +19,7 @@
 |---|---|---|
 | WP-01A | PR1 merged 758c68c (PR #3); PR2 pending | CI green (python, integration PostgreSQL 18, docker); ADR-0005, `docs/persistence/postgres.md` |
 | WP-01B | pending | після WP-01A |
-| WP-01D | testing pass → fix (PR1) | 817 + 27 integration; F1 high (superuser у runtime, §13) → блокер pilot, owner WP-01A PR2 |
+| WP-01D | spec_review (PR1) | код-рев'ю changes_requested → закрито (H-1 fencing лише на виняток → часовий watchdog); 836 + 32 integration |
 | WP-02 | pending | після WP-01A |
 | WP-04 | pending | після WP-01A |
 
