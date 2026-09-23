@@ -173,6 +173,14 @@ def _bash() -> str:
 
 def _run_init_secrets(target: Path, extra_env: dict[str, str] | None = None) -> str:
     """Копія скрипту + *.example у `target` і запуск; повертає stdout (без секретів)."""
+    proc = _run_init_secrets_raw(target, extra_env)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def _run_init_secrets_raw(
+    target: Path, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     target.mkdir(parents=True, exist_ok=True)
     shutil.copy2(SECRETS_DIR / "init-secrets.sh", target / "init-secrets.sh")
     for example in SECRETS_DIR.glob("*.example"):
@@ -187,8 +195,7 @@ def _run_init_secrets(target: Path, extra_env: dict[str, str] | None = None) -> 
         check=False,
         timeout=60,
     )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout
+    return proc
 
 
 def _dsn_files(directory: Path) -> dict[str, str]:
@@ -279,3 +286,43 @@ def test_ci_docker_job_checks_role_logins_revoke_public_and_leaks() -> None:
     assert "docker inspect" in script and "docker compose logs" in script
     # DSN іде через env без значення в argv (`-e PGDSN`), не через `-e PGDSN=...`.
     assert "-e PGDSN " in script and "-e PGDSN=" not in script
+
+
+# --- gate 2 F-1: каталог / порожній файл на місці секрету ------------------------------------
+
+
+def test_init_secrets_replaces_empty_directory_left_by_docker(tmp_path: Path) -> None:
+    """Docker Desktop створює порожній каталог на місці відсутнього file-secret (F-1).
+
+    Скрипт не має вважати його «наявним секретом»: каталог прибирається, секрет генерується.
+    """
+    (tmp_path / "postgres_dsn_fetcher").mkdir(parents=True)
+    (tmp_path / "postgres_password").mkdir()
+    stdout = _run_init_secrets(tmp_path)
+    assert "skip  postgres_dsn_fetcher" not in stdout
+    assert "fix   postgres_dsn_fetcher" in stdout
+    assert (tmp_path / "postgres_dsn_fetcher").is_file()
+    assert (tmp_path / "postgres_password").is_file()
+    load_role_logins(tmp_path)
+    dsn = urlsplit((tmp_path / "postgres_dsn").read_text(encoding="ascii").strip())
+    assert dsn.password == (tmp_path / "postgres_password").read_text(encoding="ascii").strip()
+
+
+def test_init_secrets_stops_on_non_empty_directory_with_hint(tmp_path: Path) -> None:
+    """Непорожній каталог — не вгадуємо, що в ньому: exit ≠ 0, підказка, вміст не зачеплено."""
+    blocker = tmp_path / "postgres_dsn_parser"
+    blocker.mkdir(parents=True)
+    (blocker / "keep.txt").write_text("user data", encoding="utf-8")
+    proc = _run_init_secrets_raw(tmp_path)
+    assert proc.returncode != 0
+    assert "postgres_dsn_parser" in proc.stderr and "rm -r" in proc.stderr
+    assert (blocker / "keep.txt").read_text(encoding="utf-8") == "user data"
+
+
+def test_init_secrets_regenerates_empty_file(tmp_path: Path) -> None:
+    """Порожній файл секрету не містить (нема чого губити) — генерується заново, а не skip."""
+    _run_init_secrets(tmp_path)
+    (tmp_path / "postgres_dsn_translation").write_bytes(b"")
+    stdout = _run_init_secrets(tmp_path)
+    assert "gen   postgres_dsn_translation" in stdout
+    load_role_logins(tmp_path)

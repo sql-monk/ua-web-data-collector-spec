@@ -220,3 +220,31 @@ $ docker compose down -v --remove-orphans                  → down exit=0; то
 Нових немає. `docs/plan/deps/WP-01A-to-WP-00.md` §4 п.1–2 і §6 цим PR виконано; статус у
 самому файлі не оновлено (не owned file WP-00 PR4 — оновлює оркестратор). §4 п.3 (runtime на
 власних DSN) — WP-01D PR1b.
+
+## Fixes after gate 2
+
+Відповідь на `docs/plan/reports/WP-00/testing-pr4.md`. Коміти тестувальника `ba09483`,
+`a1ae4ca` не змінювались.
+
+| Знахідка | Статус | Що зроблено |
+|---|---|---|
+| F-1 (medium) каталог на місці секрету вважався секретом | **fixed** | `init-secrets.sh`: замість `[ -e ]` функція `secret_present`. Порожній каталог (так Docker Desktop підміняє відсутній file-secret) прибирається через `rmdir`, секрет генерується, у stdout з'являється `fix   <name> (…прибрано)`. Непорожній каталог або інший не-файл → `error: … rm -r …` у stderr і exit 1, вміст не чіпається. Порожній файл вважається відсутнім і генерується заново. Та сама перевірка діє і для `postgres_password` у гілці `postgres_dsn`. Чому так: у порожньому каталозі чи порожньому файлі немає даних, тож автоматичне виправлення нічого не губить і робить рецепт із runbook робочим без ручного `rmdir`. Непорожній каталог — це вже щось незрозуміле, тому вгадувати не беремось, зупиняємось голосно. Тести: `test_init_secrets_replaces_empty_directory_left_by_docker`, `test_init_secrets_stops_on_non_empty_directory_with_hint`, `test_init_secrets_regenerates_empty_file` (`tests/unit/test_secrets_role_dsn.py`) |
+| F-2 (low) runbook описував не ту помилку | **fixed** | `docs/runbooks/clean-host-start.md`: новий рядок про каталоги-заглушки після `git pull` без `init-secrets.sh` (що робить скрипт і що робити, якщо він зупинився). Рядок «бракує DSN-секретів» тепер описує реальну причину: частину `postgres_dsn_<component>` не змонтовано в контейнер (наприклад, власний override) |
+| F-3 (info) CRLF у `02-revoke-public.sql` на Windows | **fixed** | `deploy/compose/postgres/init/.gitattributes`: `*.sql text eol=lf` (кореневий `.gitattributes` не входить в owned files). `git ls-files --eol`: обидва `.sql` тепер `i/lf w/lf`. Entrypoint Postgres файли без `.sql`/`.sh` ігнорує. Вартовий init-скриптів зелений |
+| F-4 (info) скрипт bash-only | **accepted** | Shebang `#!/usr/bin/env bash`; CI (`bash ./deploy/compose/secrets/init-secrets.sh`) і документація викликають його через bash (`./…` або `bash …`); unit-тести запускають справжній bash. Переписувати на POSIX `sh` без потреби — зайвий ризик регресії (`BASH_SOURCE` для запуску з будь-якого cwd) |
+
+Залишковий ризик F-1: якщо `postgres_password` порожній, а `postgres_dsn` уже не порожній,
+пароль згенерується заново і перестане збігатися з DSN. Раніше в такому стані стек теж не
+працював (Postgres не ініціалізується з порожнім паролем), тож нового ризику немає; вихід —
+видалити обидва файли разом із томом (`down -v`).
+
+```text
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run pytest -m "not live"
+All checks passed!
+254 files already formatted
+Success: no issues found in 77 source files
+1027 passed, 23 skipped in 316.24s (0:05:16)
+exit=0
+```
+
+Усі 23 skip — ті самі, що й до gate 2 (e2e без стека, Windows-специфіка).

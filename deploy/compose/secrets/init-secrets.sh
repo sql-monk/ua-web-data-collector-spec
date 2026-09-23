@@ -40,10 +40,34 @@ random_keyfile() {  # MongoDB keyFile: base64 із 756 байтів ентроп
   fi | tr -d ' \r\n'
 }
 
+# Чи є на місці секрету готовий файл (gate 2 WP-00 PR4, F-1). Compose bind-mount-ить
+# file-secret, і якщо файла немає, Docker Desktop створює на його місці ПОРОЖНІЙ КАТАЛОГ —
+# колишній `[ -e ]` вважав його секретом («skip»), і секрет не генерувався ніколи.
+#   непорожній файл   → 0 (секрет є, не чіпаємо — ідемпотентність);
+#   порожній файл     → 1 (секрету в ньому немає, губити нічого; генеруємо заново);
+#   порожній каталог  → прибираємо (артефакт Docker, даних у ньому немає) → 1;
+#   непорожній каталог чи інший тип → зупинка з підказкою: вгадувати, що там, не беремось.
+secret_present() {
+  if [ -d "$1" ]; then
+    if rmdir "$1" 2>/dev/null; then
+      echo "fix   $(basename "$1") (порожній каталог на місці секрету — прибрано)"
+      return 1
+    fi
+    echo "error: $1 — каталог, а не файл секрету (Docker створює його, якщо запустити" \
+      "compose до init-secrets.sh). Видаліть його (rm -r) і запустіть скрипт знову." >&2
+    exit 1
+  fi
+  if [ -e "$1" ] && [ ! -f "$1" ]; then
+    echo "error: $1 існує, але не є звичайним файлом; видаліть його і запустіть скрипт знову." >&2
+    exit 1
+  fi
+  [ -s "$1" ]
+}
+
 for example in "$here"/*.example; do
   name="$(basename "$example" .example)"
   target="$here/$name"
-  if [ -e "$target" ]; then
+  if secret_present "$target"; then
     echo "skip  $name (exists)"
     continue
   fi
@@ -55,7 +79,7 @@ for example in "$here"/*.example; do
     postgres_dsn)
       # DSN міграційної ролі будується з уже згенерованого postgres_password (той самий
       # пароль, що його читає Postgres із POSTGRES_PASSWORD_FILE).
-      if [ ! -e "$here/postgres_password" ]; then
+      if ! secret_present "$here/postgres_password"; then
         random_hex > "$here/postgres_password"
         chmod 0644 "$here/postgres_password"
         echo "gen   postgres_password (random, для DSN)"
