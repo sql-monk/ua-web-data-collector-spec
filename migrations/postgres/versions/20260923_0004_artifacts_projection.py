@@ -214,8 +214,21 @@ def upgrade() -> None:
     # DEFAULT-партиція (аргумент — `0003`): пропущене обслуговування не повинно знищувати
     # lineage вже виконаних HTTP-запитів. DDL заморожений у ревізії і не імпортує runtime-хелпер
     # `partitions` (S-4 пострев'ю PR1) — збіг імен перевіряє тест у `test_migrations.py`.
+    # Downgrade лише від'єднує DEFAULT (дані не губляться), тож повторний upgrade приєднує ту
+    # саму таблицю назад, а не мовчки лишає `fetches` без DEFAULT (`CREATE … IF NOT EXISTS`
+    # пропустив би створення через однойменну від'єднану таблицю).
     op.execute(
-        f"CREATE TABLE IF NOT EXISTS {FETCHES_DEFAULT_PARTITION} PARTITION OF fetches DEFAULT"
+        f"""
+        DO $$
+        BEGIN
+            IF to_regclass('public.{FETCHES_DEFAULT_PARTITION}') IS NULL THEN
+                CREATE TABLE {FETCHES_DEFAULT_PARTITION} PARTITION OF fetches DEFAULT;
+            ELSE
+                ALTER TABLE fetches ATTACH PARTITION {FETCHES_DEFAULT_PARTITION} DEFAULT;
+            END IF;
+        END
+        $$;
+        """
     )
     op.create_index("ix_fetches_job_id", "fetches", ["job_id"], unique=False)
     op.create_index("ix_fetches_raw_sha256", "fetches", ["raw_sha256"], unique=False)

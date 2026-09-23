@@ -310,3 +310,35 @@ async def test_default_partition_from_bare_upgrade_matches_runtime_helper(
         ]
     finally:
         await engine.dispose()
+
+
+async def test_fetches_default_partition_survives_downgrade_and_is_reattached(
+    pg_empty_database: PostgresSettings,
+) -> None:
+    """Downgrade `0004` від'єднує `fetches_default` (рядки лишаються), повторний upgrade приєднує
+    її назад: `fetches` не лишається без DEFAULT, а lineage-рядок знову видно через parent."""
+    engine = create_async_engine(pg_empty_database.url, poolclass=None)
+    insert = text(
+        "INSERT INTO fetches (fetch_id, fetched_at, requested_url, outcome) "
+        "VALUES (gen_random_uuid(), '2031-01-01T00:00:00+00', 'https://x.test/', 'success')"
+    )
+    is_default_partition = text(
+        "SELECT c.relispartition FROM pg_class c WHERE c.relname = 'fetches_default'"
+    )
+    try:
+        async with engine.begin() as conn:
+            await upgrade_to_head(conn)
+            await conn.execute(insert)  # партицій місяців немає → рядок у DEFAULT
+        async with engine.begin() as conn:
+            await downgrade_to_base(conn)
+        async with engine.connect() as conn:
+            assert await conn.scalar(is_default_partition) is False
+            assert await conn.scalar(text("SELECT count(*) FROM fetches_default")) == 1
+        async with engine.begin() as conn:
+            await upgrade_to_head(conn)
+        async with engine.connect() as conn:
+            assert await conn.scalar(is_default_partition) is True
+            assert await conn.scalar(text("SELECT count(*) FROM fetches")) == 1
+            assert await check_no_drift(conn) == []
+    finally:
+        await engine.dispose()

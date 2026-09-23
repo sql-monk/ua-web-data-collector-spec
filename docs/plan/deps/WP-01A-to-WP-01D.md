@@ -98,3 +98,21 @@ Mutating-операції control plane тепер пишуть `audit_log` ус
 WP-01D викликає лише `upsert_pool` (з `actor`/`reason`, сумісно) і `quarantine` з `owner`
 (аудиту не пише, сигнатура сумісна) — повний `pytest -m "not live"` включно з
 `tests/integration/scaling/**` зелений.
+
+## 5. Для інформації: нестабільні тести `tests/integration/scaling/**` (не блокер WP-01A)
+
+Під час прогонів PR2 на Windows-хості (PostgreSQL 18 у Docker, паралельно працюють сторонні
+контейнери) у трьох повних `pytest -m "not live"` по одному разу впали **різні** тести WP-01D, кожен
+зелений в ізольованому повторі (5/5):
+
+- `test_worker_runtime_adversarial.py::test_drain_barrier_must_be_set_on_every_instance_of_the_role`
+  і `::test_instance_marked_stopped_claims_nothing_and_exits` — у логах `worker.drain_barrier
+  active=True` і одразу `worker.claimed`: claim-транзакція, що стартувала **до** барʼєра, бачить
+  job, яку тест ставить у чергу вже після `not runtime.claiming` (TOCTOU між перевіркою
+  `claiming` у `_claim_loop` і SELECT у `queue.claim`);
+- `test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising` —
+  `sessions.hangs == 0`.
+
+Контрольний прогін `tests/integration/scaling` на **базовому** коміті `88323ab` (до змін PR2 у
+`src/`) дав той самий клас збою (1 з 3 прогонів, `test_self_fencing_…`), тобто нестабільність
+не внесена PR2. Деталі й дослівний вивід — `docs/plan/reports/WP-01A/implementation-pr2.md`.
