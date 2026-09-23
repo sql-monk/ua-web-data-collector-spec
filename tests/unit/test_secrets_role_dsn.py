@@ -190,7 +190,7 @@ def _run_init_secrets_raw(
     proc = subprocess.run(  # noqa: S603 — фіксований argv, без shell
         [_bash(), (target / "init-secrets.sh").as_posix()],
         capture_output=True,
-        text=True,
+        encoding="utf-8",  # скрипт пише UTF-8; locale-кодування Windows його зіпсувало б
         env=env,
         check=False,
         timeout=60,
@@ -326,3 +326,94 @@ def test_init_secrets_regenerates_empty_file(tmp_path: Path) -> None:
     stdout = _run_init_secrets(tmp_path)
     assert "gen   postgres_dsn_translation" in stdout
     load_role_logins(tmp_path)
+
+
+# --- gate 3: збій генератора, атомарний запис, lock, узгодженість postgres_dsn ----------------
+
+
+def _failing_openssl_env(tmp_path: Path) -> dict[str, str]:
+    """`openssl`, що падає без виводу (CR-1/L-1), — функцією через `BASH_ENV`.
+
+    Не PATH-shim: Git Bash (`bin/bash.exe`) на Windows сам ставить `/mingw64/bin` першим у PATH
+    і знайшов би справжній openssl. Функція має пріоритет над PATH на всіх платформах, а
+    `command -v openssl` у скрипті її бачить.
+    """
+    rc = tmp_path / "failing-openssl.bash"
+    rc.write_bytes(b"openssl() { return 1; }\n")
+    return {"BASH_ENV": rc.as_posix()}
+
+
+def _leftovers(directory: Path) -> list[str]:
+    """Тимчасові файли `write_secret` і lock-каталог, що могли лишитися після запуску."""
+    return sorted(p.name for p in directory.iterdir() if p.name.startswith("."))
+
+
+def test_init_secrets_fails_loudly_when_generator_fails(tmp_path: Path) -> None:
+    """Збій `openssl rand` → exit ≠ 0 і жодного файла з порожнім паролем (раніше exit 0)."""
+    secrets = tmp_path / "secrets"
+    proc = _run_init_secrets_raw(secrets, _failing_openssl_env(tmp_path))
+    assert proc.returncode != 0
+    assert "генератор" in proc.stderr
+    generated = [p.name for p in secrets.iterdir() if p.is_file()]
+    for name in ("postgres_password", "postgres_dsn", *ROLE_DSN_SECRETS, "mongo_keyfile"):
+        assert name not in generated, f"{name} записано попри збій генератора"
+    assert _leftovers(secrets) == [], "tmp-файли/lock не прибрано"
+
+
+def test_init_secrets_fails_on_generator_failure_for_role_dsn_only(tmp_path: Path) -> None:
+    """Хост до PR4: наявні секрети є, бракує лише per-role DSN — збій не дає DSN без пароля."""
+    secrets = tmp_path / "secrets"
+    _run_init_secrets(secrets)
+    for name in ROLE_DSN_SECRETS:
+        (secrets / name).unlink()
+    proc = _run_init_secrets_raw(secrets, _failing_openssl_env(tmp_path))
+    assert proc.returncode != 0
+    for name in ROLE_DSN_SECRETS:
+        assert not (secrets / name).exists(), name
+    # Після відновлення генератора звичайний запуск лікує стан.
+    _run_init_secrets(secrets)
+    load_role_logins(secrets)
+
+
+def test_init_secrets_leaves_no_temp_files_or_lock(tmp_path: Path) -> None:
+    _run_init_secrets(tmp_path)
+    assert _leftovers(tmp_path) == []
+    script = (SECRETS_DIR / "init-secrets.sh").read_text(encoding="utf-8")
+    # Атомарність: tmp у тому ж каталозі + mv (перейменування в межах однієї FS).
+    assert 'mktemp "$here/.' in script and 'mv -f "$tmp" "$1"' in script
+
+
+def test_init_secrets_waits_for_lock_and_gives_up_with_hint(tmp_path: Path) -> None:
+    """Зайнятий lock (паралельний запуск) → чекає, потім exit ≠ 0 без жодних записів."""
+    _run_init_secrets_raw(tmp_path)  # створює каталог і копіює скрипт
+    for name in ("postgres_dsn", *ROLE_DSN_SECRETS):
+        (tmp_path / name).unlink()
+    (tmp_path / ".init-secrets.lock").mkdir()
+    proc = _run_init_secrets_raw(tmp_path, {"INIT_SECRETS_LOCK_TIMEOUT": "1"})
+    assert proc.returncode != 0
+    assert ".init-secrets.lock" in proc.stderr and "rmdir" in proc.stderr
+    assert not (tmp_path / "postgres_dsn").exists()
+    # Чужий lock не видаляється.
+    assert (tmp_path / ".init-secrets.lock").is_dir()
+
+
+def test_init_secrets_refuses_new_postgres_password_when_dsn_exists(tmp_path: Path) -> None:
+    """CR-2: DSN уже несе пароль Postgres — мовчки генерувати інший не можна."""
+    _run_init_secrets(tmp_path)
+    dsn_before = (tmp_path / "postgres_dsn").read_bytes()
+    (tmp_path / "postgres_password").write_bytes(b"")
+    proc = _run_init_secrets_raw(tmp_path)
+    assert proc.returncode != 0
+    assert "postgres_dsn" in proc.stderr and "down -v" in proc.stderr
+    assert (tmp_path / "postgres_password").read_bytes() == b""
+    assert (tmp_path / "postgres_dsn").read_bytes() == dsn_before
+
+
+def test_init_secrets_warns_when_existing_dsn_and_password_diverge(tmp_path: Path) -> None:
+    _run_init_secrets(tmp_path)
+    (tmp_path / "postgres_password").write_bytes(b"0" * 48 + b"\n")
+    proc = _run_init_secrets_raw(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "warn:" in proc.stderr and "postgres_dsn" in proc.stderr
+    clean = _run_init_secrets_raw(tmp_path / "fresh")
+    assert "warn:" not in clean.stderr

@@ -248,3 +248,36 @@ exit=0
 ```
 
 Усі 23 skip — ті самі, що й до gate 2 (e2e без стека, Windows-специфіка).
+
+## Fixes after gate 3
+
+Відповідь на `docs/plan/reports/WP-00/code-review-pr4.md` і `security-pr4.md`. Коміти
+рев'юерів `033dbf9`, `8775f7e` не змінювались. Docker-стек не піднімався (на прохання
+координатора): усі зміни — у `init-secrets.sh` і документації, compose і SQL не зачеплені.
+
+| Знахідка | Статус | Що зроблено |
+|---|---|---|
+| CR-1 / L-1 збій генератора ковтався (DSN з порожнім паролем, exit 0) | **fixed** | Значення тепер отримують `new_hex`/`new_keyfile` у змінну в основному shell і перевіряють формат: `^[0-9a-f]{48}$`, для keyfile — base64 довжиною від 1000 символів. Якщо формат не той — `error: генератор …` і exit 1, файл не створюється. Діє для всіх згенерованих значень: `*_password`, `postgres_password` у гілці DSN, `postgres_dsn_*`, `mongo_keyfile`. Тести `test_init_secrets_fails_loudly_when_generator_fails` (чистий хост: жодного секрету, tmp і lock прибрано) та `…_fails_on_generator_failure_for_role_dsn_only` (хост до PR4: DSN без пароля не з'являється; після відновлення генератора звичайний запуск лікує стан). `openssl`, що падає, підставляється функцією через `BASH_ENV`, а не PATH-shim: `bin/bash.exe` з Git for Windows сам ставить `/mingw64/bin` першим у PATH і знайшов би справжній openssl |
+| CR-3 неатомарний запис / паралельні запуски | **fixed** | `write_secret`: `mktemp` у тому ж каталозі (прихований `.<name>.tmp.XXXXXX`), `chmod 0644`, `mv -f`. EXIT-trap прибирає tmp після збою; вміст передається аргументом, не через pipe, тож функція працює в основному shell і trap бачить `tmp`. Lock — каталог `.init-secrets.lock` через `mkdir`: він атомарний і працює однаково в Git Bash, Linux і macOS, тоді як `flock(1)` є не скрізь. Без lock атомарний `mv` не рятує від гонки «перевірив, що файла немає → записав»: два процеси згенерували б різні `postgres_password`/`postgres_dsn`. Скрипт чекає до `INIT_SECRETS_LOCK_TIMEOUT` (типово 30 с), потім exit 1 з підказкою `rmdir`; чужий lock не видаляє. Тести `test_init_secrets_leaves_no_temp_files_or_lock`, `test_init_secrets_waits_for_lock_and_gives_up_with_hint` |
+| CR-2 `postgres_dsn` є, а `postgres_password` відсутній чи порожній → мовчки новий пароль | **fixed** | Обрано зупинку як безпечніший варіант: `error: … postgres_dsn уже є і містить пароль …` з двома варіантами (відновити файл або `down -v` і видалити обидва), exit 1, жоден файл не змінюється. Відновлювати пароль із DSN автоматично не стали: DSN міг бути відредагований вручну або URL-encoded, і скрипт видав би неперевірений пароль за «правильний». Якщо обидва файли є, але паролі різні, скрипт лише попереджає (`warn:` у stderr, exit 0): він нічого не записує, а розбіжність може бути наслідком URL-encoding. Тести `test_init_secrets_refuses_new_postgres_password_when_dsn_exists`, `test_init_secrets_warns_when_existing_dsn_and_password_diverge` |
+| L-2 REVOKE PUBLIC лише при першому initdb | **accepted** (owner WP-00 / оператор, 2026-09-24) | Задокументовано в `docs/runbooks/clean-host-start.md` (розділ про секрети) і в `deploy/compose/postgres/init/README.md` («Кластер, створений до WP-00 PR4» — ручна команда). Автоматичну перевірку (tripwire у `db roles --with-login` за `datacl`) рев'ю пропонує як побажання; вона вимагає змін у `src/**` (WP-01A) і лишається поза scope PR4 |
+
+Текстові перевірки `test_init_secrets_generates_random_passwords_not_examples`
+(`test_compose_config.py`) оновлено під нову структуру (`new_hex`/`write_secret`). Інваріант
+«паролі генеруються, а не копіюються з прикладів» не змінився.
+
+```text
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run pytest -m "not live"
+All checks passed!
+256 files already formatted
+Success: no issues found in 77 source files
+1033 passed, 23 skipped in 927.23s (0:15:27)
+exit=0
+```
+
+Усі 23 skip ті самі, що й раніше. Спостереження: в одному проміжному прогоні трьох
+secrets-модулів на завантаженій машині (Docker використовував інший агент)
+`test_crlf_examples_do_not_leak_carriage_returns_into_secrets` (тест gate 2) упав один раз.
+Три окремі повтори, прогін обох secrets-модулів і повний прогін вище — зелені. Ймовірна
+причина — повільний fork у Git Bash під навантаженням; на Linux CI це не очікується. Щоб
+зменшити кількість процесів, `write_secret` не викликає `basename`.

@@ -700,11 +700,13 @@ def test_init_secrets_generates_random_passwords_not_examples() -> None:
     """SEC L-3: жодних default credentials — паролі генеруються, приклади не копіюються."""
     script = (SECRETS_DIR / "init-secrets.sh").read_text(encoding="utf-8")
     assert "openssl rand -hex" in script and "*_password)" in script
-    assert "random_hex > " in script
+    # Gate 3 WP-00 PR4 (CR-1): значення генерує `new_hex` (з перевіркою формату) і пише
+    # атомарно `write_secret`; поведінку перевіряє tests/unit/test_secrets_role_dsn.py.
+    assert 'new_hex "$name"' in script and 'write_secret "$target" "$value"' in script
     for example in SECRETS_DIR.glob("*_password.example"):
         assert "GENERATED" in example.read_text(encoding="utf-8"), example.name
     # DSN будується з того самого згенерованого пароля, не копіюється з прикладу.
-    assert "postgres_dsn)" in script and 'cat "$here/postgres_password"' in script
+    assert "postgres_dsn)" in script and '< "$here/postgres_password"' in script
     dsn_example = (SECRETS_DIR / "postgres_dsn.example").read_text(encoding="utf-8")
     assert "GENERATED" in dsn_example
     assert (

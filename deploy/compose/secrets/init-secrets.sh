@@ -13,13 +13,19 @@
 # Формат: один рядок + LF, без CR (Windows openssl друкує CRLF; entrypoint-и образів обрізають
 # лише `\n`, тож `\r` у паролі ламає автентифікацію).
 #
+# Надійність (gate 3 WP-00 PR4, CR-1..CR-3): кожне згенероване значення перевіряється до запису
+# (збій генератора → exit 1 без файла); файл пишеться атомарно (tmp у тому ж каталозі + mv),
+# а паралельні запуски серіалізуються lock-каталогом `.init-secrets.lock`.
+#
 # Використання: ./deploy/compose/secrets/init-secrets.sh   (з кореня репозиторію або будь-де)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 umask 022
 
-random_hex() {  # 24 байти → 48 hex-символів
+die() { echo "error: $*" >&2; exit 1; }
+
+random_hex() {  # 24 байти → 48 hex-символів (без перевірки — див. new_hex)
   {
     if command -v openssl >/dev/null 2>&1; then
       openssl rand -hex 24
@@ -39,6 +45,52 @@ random_keyfile() {  # MongoDB keyFile: base64 із 756 байтів ентроп
     head -c 756 /dev/urandom | base64
   fi | tr -d ' \r\n'
 }
+
+# CR-1/L-1: у `$(…)` bash не успадковує errexit, а збій `openssl rand` дає порожній рядок —
+# раніше це ставало DSN з порожнім паролем і exit 0. Тепер значення отримується в змінну в
+# основному shell і перевіряється за форматом; інакше — exit 1, файл не створюється.
+# Результат — у глобальній змінній `value` (без subshell, щоб `die` завершував скрипт).
+new_hex() {
+  value="$(random_hex)"
+  [[ "$value" =~ ^[0-9a-f]{48}$ ]] || die "генератор випадкових чисел не дав 48 hex-символів" \
+    "для $1 (openssl/python3//dev/urandom); файл не створено"
+}
+
+new_keyfile() {
+  value="$(random_keyfile)"
+  [[ ${#value} -ge 1000 && "$value" =~ ^[A-Za-z0-9+/=]+$ ]] || die "генератор не дав base64 keyfile для $1;" \
+    "файл не створено"
+}
+
+# CR-3: атомарний запис — tmp у тому ж каталозі (той самий FS) + `mv`. Перерваний запуск не
+# лишає напівзаписаного файла, який наступний запуск прийняв би за наявний секрет.
+tmp=""
+# Вміст передається аргументом (не через pipe): так функція виконується в основному shell, і
+# EXIT-trap бачить `tmp`, щоб прибрати його після збою.
+write_secret() {  # $1 — шлях, $2 — вміст (із завершальним LF, де потрібно)
+  tmp="$(mktemp "$here/.${1##*/}.tmp.XXXXXX")"
+  printf '%s' "$2" > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$1"
+  tmp=""
+}
+
+# CR-3: lock проти паралельних запусків (перевірка «файла немає» і запис мають бути атомарні
+# разом, інакше два процеси згенерують різні postgres_password/postgres_dsn). `mkdir` —
+# атомарний і переносний (Git Bash, Linux, macOS), на відміну від flock(1). Чекаємо до
+# INIT_SECRETS_LOCK_TIMEOUT с (типово 30); lock, що лишився після kill -9, оператор видаляє
+# вручну (підказка в помилці).
+lock="$here/.init-secrets.lock"
+lock_timeout="${INIT_SECRETS_LOCK_TIMEOUT:-30}"
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+  [ "$waited" -lt "$lock_timeout" ] || die "інший init-secrets.sh тримає $lock понад" \
+    "$lock_timeout с; якщо жодного" \
+    "запуску немає — видаліть каталог (rmdir) і повторіть"
+  sleep 1
+  waited=$((waited + 1))
+done
+trap 'rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true' EXIT
 
 # Чи є на місці секрету готовий файл (gate 2 WP-00 PR4, F-1). Compose bind-mount-ить
 # file-secret, і якщо файла немає, Docker Desktop створює на його місці ПОРОЖНІЙ КАТАЛОГ —
@@ -73,21 +125,30 @@ for example in "$here"/*.example; do
   fi
   case "$name" in
     mongo_keyfile)
-      random_keyfile > "$target"; echo "gen   $name (random keyfile)" ;;
+      new_keyfile "$name"
+      write_secret "$target" "$value"; echo "gen   $name (random keyfile)" ;;
     *_password)
-      random_hex > "$target"; echo "gen   $name (random)" ;;
+      # CR-2: наявний postgres_dsn уже містить пароль міграційної ролі. Новий postgres_password
+      # мовчки розійшовся б із ним (auth failure `migrate-postgres`), тому зупинка.
+      if [ "$name" = postgres_password ] && secret_present "$here/postgres_dsn"; then
+        die "$target відсутній або порожній, а $here/postgres_dsn уже є і містить пароль" \
+          "Postgres. Відновіть postgres_password (той самий пароль, що в DSN) або видаліть" \
+          "обидва файли разом із томом (docker compose down -v) і повторіть"
+      fi
+      new_hex "$name"
+      write_secret "$target" "$value"$'\n'; echo "gen   $name (random)" ;;
     postgres_dsn)
       # DSN міграційної ролі будується з уже згенерованого postgres_password (той самий
       # пароль, що його читає Postgres із POSTGRES_PASSWORD_FILE).
       if ! secret_present "$here/postgres_password"; then
-        random_hex > "$here/postgres_password"
-        chmod 0644 "$here/postgres_password"
+        new_hex postgres_password
+        write_secret "$here/postgres_password" "$value"$'\n'
         echo "gen   postgres_password (random, для DSN)"
       fi
-      printf 'postgresql://%s:%s@%s:%s/%s\n' \
-        "${POSTGRES_USER:-collector}" "$(cat "$here/postgres_password")" \
-        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}" \
-        > "$target"
+      password="$(tr -d '\r\n' < "$here/postgres_password")"
+      write_secret "$target" "$(printf 'postgresql://%s:%s@%s:%s/%s' \
+        "${POSTGRES_USER:-collector}" "$password" \
+        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}")"$'\n'
       echo "gen   $name (з postgres_password)" ;;
     postgres_dsn_*)
       # DSN runtime-ролі §13 (WP-01A PR2 `collector db roles --with-login`): користувач —
@@ -96,13 +157,21 @@ for example in "$here"/*.example; do
       # `migrate-postgres` читає з нього пароль і ставить ролі verifier, а сервіс компонента
       # монтує той самий файл як COLLECTOR_POSTGRES_DSN_FILE.
       component="${name#postgres_dsn_}"
-      printf 'postgresql://collector_%s:%s@%s:%s/%s\n' \
-        "$component" "$(random_hex)" \
-        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}" \
-        > "$target"
+      new_hex "$name"
+      write_secret "$target" "$(printf 'postgresql://collector_%s:%s@%s:%s/%s' \
+        "$component" "$value" \
+        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}")"$'\n'
       echo "gen   $name (random, роль collector_$component)" ;;
     *)
-      tr -d '\r' < "$example" > "$target"; echo "copy  $name (from example — non-secret)" ;;
+      write_secret "$target" "$(tr -d '\r' < "$example")"$'\n'
+      echo "copy  $name (from example — non-secret)" ;;
   esac
-  chmod 0644 "$target"
 done
+
+# CR-2: обидва файли вже були — звіряємо пароль. Скрипт тут нічого не змінює, тому лише
+# попередження (пароль у DSN міг бути URL-encoded вручну); розбіжність означатиме auth failure.
+dsn_password="$(sed -E 's#^[^:]+://[^:@/]*:([^@]*)@.*#\1#' "$here/postgres_dsn" | tr -d '\r\n')"
+if [ "$dsn_password" != "$(tr -d '\r\n' < "$here/postgres_password")" ]; then
+  echo "warn: пароль у postgres_dsn не збігається з postgres_password —" \
+    "migrate-postgres не автентифікується; узгодьте файли" >&2
+fi

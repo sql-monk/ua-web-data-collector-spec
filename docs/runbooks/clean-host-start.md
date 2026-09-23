@@ -76,6 +76,13 @@ docker compose exec -T postgres sh -c 'PGPASSWORD="$(cat /run/secrets/postgres_p
 # 7 рядків: collector_api_ro … collector_translation (collector_migrate — NOLOGIN)
 ```
 
+`REVOKE … FROM PUBLIC` на БД кластера (`deploy/compose/postgres/init/02-revoke-public.sql`)
+виконується **лише при першому initdb** — на порожньому томі `postgres-data`. На кластері,
+створеному до WP-00 PR4, PUBLIC і далі має CONNECT/TEMP, доки оператор один раз не виконає
+команду з `deploy/compose/postgres/init/README.md` («Кластер, створений до WP-00 PR4») або
+`docker compose down -v`. Автоматичної перевірки немає — прийнятий ризик (security-pr4 L-2,
+owner WP-00 / оператор, 2026-09-24).
+
 Секрети, створені до WP-00 PR4, лишаються (скрипт не перезаписує наявні файли) — повторний
 запуск `init-secrets.sh` лише додасть сім нових DSN.
 
