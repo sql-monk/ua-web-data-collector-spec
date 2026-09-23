@@ -40,6 +40,10 @@ MakePool = Callable[..., Awaitable[int]]
 EnqueueJobs = Callable[..., Awaitable[list[UUID]]]
 MakeConfig = Callable[..., WorkerRuntimeConfig]
 
+FENCE_WINDOW = 1.5
+"""Вікно self-fencing у fencing-тестах: коротке для швидкого тесту, але помітно довше за паузу
+event loop-у на завантаженій машині — інакше fence спрацьовує на здоровій базі."""
+
 
 def start(
     runtime: WorkerRuntime, running: list[asyncio.Task[None]], stop: asyncio.Event
@@ -354,10 +358,10 @@ async def test_role_wide_drain_barrier_stops_claim_without_sigterm(
         await pools_repo.mark_draining(session, runtime.instance_id)
     await wait_for(lambda: not runtime.claiming, what="барʼєр drain зупинив claim")
 
-    # Барʼєр зупиняє ПОЧАТОК нових claim; claim, який уже пішов у базу до того, як instance
-    # побачив барʼєр, може ще повернути job — контролер PR3 саме тому чекає на
-    # `active_leases = 0` у heartbeat, а не лише на факт барʼєра. Щоб тест перевіряв контракт,
-    # а не гонку, кладемо job у чергу після того, як цикл claim гарантовано став на паузу.
+    # Claim, що вже був у базі в момент барʼєра, job-и, покладеної ПІСЛЯ коміту барʼєра, не
+    # бачить (`FOR SHARE` на рядку instance — окремий тест
+    # `test_claim_in_flight_never_takes_a_job_enqueued_after_the_drain_barrier`). Контролер
+    # PR3 однаково чекає на `active_leases = 0`: jobs, узяті ДО барʼєра, дороблюються.
     beats = runtime.heartbeats
     await wait_for(lambda: runtime.heartbeats >= beats + 2, what="цикл claim стоїть під барʼєром")
     assert runtime.active_tasks == 0
@@ -447,8 +451,11 @@ async def test_self_fencing_cancels_active_tasks_when_the_database_stops_confirm
     (job_id,) = await enqueue_jobs(1)
     sessions = FlakySessions(pg_sessions)
     runtime = WorkerRuntime(
-        # Тут явне вікно fencing замість половини lease TTL — щоб тест не чекав секунди.
-        worker_config(lease_seconds=4, heartbeat_seconds=0.05, fence_after_seconds=0.2),
+        # Явне вікно fencing замість половини lease TTL — щоб тест не чекав десятки секунд.
+        # Воно має з запасом перекривати паузу event loop-у на завантаженій машині (під
+        # CPU-навантаженням спостерігались паузи ~0.85 с): 0.2 с давало хибний fence ще до
+        # «відмови» бази і флейк `assert not runtime.fenced` (звіт flaky-scaling-tests).
+        worker_config(lease_seconds=6, heartbeat_seconds=0.05, fence_after_seconds=FENCE_WINDOW),
         cast("async_sessionmaker[AsyncSession]", sessions),
         blocking_handler,
     )
@@ -524,7 +531,9 @@ async def test_self_fencing_fires_when_the_database_hangs_without_raising(
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
     sessions = HangingSessions(pg_sessions)
-    config = worker_config(lease_seconds=6, heartbeat_seconds=0.05, fence_after_seconds=0.3)
+    config = worker_config(
+        lease_seconds=9, heartbeat_seconds=0.05, fence_after_seconds=FENCE_WINDOW
+    )
     runtime = WorkerRuntime(
         config, cast("async_sessionmaker[AsyncSession]", sessions), blocking_handler
     )
@@ -544,7 +553,9 @@ async def test_self_fencing_fires_when_the_database_hangs_without_raising(
     # добігати тік, який відкрив свою session ДО перемикання прапорця.
     await wait_for(lambda: sessions.hangs >= 2, what="другий тік теж зависає")
     frozen = runtime.heartbeats
-    await wait_for(lambda: sessions.hangs >= 4, what="ще два тіки зависають")
+    # Кожен завислий тік живе `heartbeat_tick_budget` (2 × fence_after), тож ще один тік — це
+    # вже секунди без підтвердження; більше не додає доказовості, лише часу.
+    await wait_for(lambda: sessions.hangs >= 3, what="ще один тік зависає")
     assert runtime.heartbeats == frozen, "поки база висить, підтверджених heartbeat немає"
 
     await wait_for(lambda: blocking_handler.cancelled == [job_id], what="активний task скасовано")
@@ -557,6 +568,112 @@ async def test_self_fencing_fires_when_the_database_hangs_without_raising(
     await wait_for(lambda: not runtime.fenced, what="після підтвердженого heartbeat fence знято")
     stop.set()
     await asyncio.wait_for(task, timeout=20)
+
+
+async def test_claim_in_flight_never_takes_a_job_enqueued_after_the_drain_barrier(
+    pg_sessions: async_sessionmaker[AsyncSession],
+    worker_config: MakeConfig,
+    handler: ControlledHandler,
+    make_pool: MakePool,
+    enqueue_jobs: EnqueueJobs,
+    wait_for: WaitFor,
+    running: list[asyncio.Task[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-57: коміт `mark_draining` = жодного claim цього instance, який барʼєра не бачив.
+
+    Детермінована форма флейку під навантаженням: claim-loop вирішив claim-ити (барʼєра ще
+    немає), і поки його транзакція в базі, контролер ставить барʼєр, а в чергу падає job.
+    До фікса claim брав цю job; тепер `FOR SHARE` на рядку instance змушує `mark_draining`
+    чекати коміту claim, тож job, покладена після барʼєра, claim-у вже не видно.
+    """
+    await make_pool(concurrency=1)
+    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    stop = asyncio.Event()
+    task = start(runtime, running, stop)
+    await wait_for(lambda: runtime.status == "ready", what="ready")
+
+    original_claim = queue_repo.claim
+    side: list[asyncio.Task[UUID]] = []
+
+    async def barrier_then_enqueue() -> UUID:
+        async with pg_sessions() as session, session.begin():
+            await pools_repo.mark_draining(session, runtime.instance_id)
+        (job_id,) = await enqueue_jobs(1, prefix="after-barrier")
+        return job_id
+
+    async def claim_racing_with_the_barrier(*args: object, **kwargs: object) -> object:
+        if not side:
+            side.append(asyncio.create_task(barrier_then_enqueue()))
+            # Без фікса барʼєр і job комітяться тут-таки; з фіксом `mark_draining` чекає на
+            # рядку instance до коміту цього claim — таймаут і є очікуваний шлях.
+            await asyncio.wait(side, timeout=1.0)
+        return await original_claim(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(queue_repo, "claim", claim_racing_with_the_barrier)
+    await wait_for(lambda: bool(side) and side[0].done(), what="барʼєр і job закомічено")
+    job_id = side[0].result()
+    await wait_for(lambda: not runtime.claiming, what="барʼєр застосовано")
+    beats = runtime.heartbeats
+    await wait_for(lambda: runtime.heartbeats >= beats + 3, what="кілька heartbeat-ів під барʼєром")
+
+    assert handler.started == [], "claim, що був у базі під час барʼєра, не взяв нову job"
+    assert (await read_job(pg_sessions, job_id)).status == "pending"
+    stop.set()
+    await asyncio.wait_for(task, timeout=15)
+
+
+async def test_jobs_claimed_while_the_fence_went_up_are_not_started(
+    pg_sessions: async_sessionmaker[AsyncSession],
+    worker_config: MakeConfig,
+    handler: ControlledHandler,
+    make_pool: MakePool,
+    enqueue_jobs: EnqueueJobs,
+    wait_for: WaitFor,
+    running: list[asyncio.Task[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claim, що повернувся вже під fence, не запускає tasks (сторож їх більше не скасує)."""
+    await make_pool(concurrency=1)
+    sessions = FlakySessions(pg_sessions)
+    runtime = WorkerRuntime(
+        worker_config(lease_seconds=6, heartbeat_seconds=0.05, fence_after_seconds=FENCE_WINDOW),
+        cast("async_sessionmaker[AsyncSession]", sessions),
+        handler,
+    )
+    stop = asyncio.Event()
+    task = start(runtime, running, stop)
+    await wait_for(lambda: runtime.status == "ready", what="ready")
+
+    original_claim = queue_repo.claim
+    claimed: list[UUID] = []
+
+    async def claim_then_lose_the_database(*args: object, **kwargs: object) -> object:
+        jobs = await original_claim(*args, **kwargs)  # type: ignore[arg-type]
+        if jobs and not claimed:
+            claimed.extend(job.job_id for job in jobs)
+            # Session цього claim уже відкрита; heartbeat-и відтепер падають, і claim
+            # повертається лише після того, як сторож підняв fence.
+            sessions.failing = True
+            await wait_for(lambda: runtime.fenced, what="fence під час claim")
+        return jobs
+
+    monkeypatch.setattr(queue_repo, "claim", claim_then_lose_the_database)
+    (job_id,) = await enqueue_jobs(1)
+    await wait_for(lambda: claimed == [job_id], what="claim повернув job")
+    await wait_for(lambda: runtime.lost_leases >= 1, what="claimed-під-fence job відкладено")
+
+    assert handler.started == [], "task без підтвердженого lease не стартує"
+    assert runtime.active_tasks == 0
+    job = await read_job(pg_sessions, job_id)
+    assert (job.status, job.lease_owner) == ("leased", runtime.owner), (
+        "lease лишається спливати; job поверне recover_expired_leases"
+    )
+
+    sessions.failing = False
+    await wait_for(lambda: not runtime.fenced, what="fence знято")
+    stop.set()
+    await asyncio.wait_for(task, timeout=15)
 
 
 async def test_hot_change_above_the_connection_ceiling_is_clamped(

@@ -24,7 +24,8 @@ boot → register(starting) → readiness → ready ⇄ claim/handle/heartbeat
   більше не claim-ляться після завершення активних tasks (§7.6);
 - **drain не покладається на вибір контейнера orchestrator-ом** (R-57): крім SIGTERM, claim
   зупиняє і `drain_requested_at` у власному рядку `worker_instances`, який ставить
-  role-wide барʼєр контролера (PR3);
+  role-wide барʼєр контролера (PR3). Барʼєр перевіряється і в самій транзакції claim під
+  `FOR SHARE`, тож після коміту `mark_draining` жоден claim цього instance нової job не візьме;
 - **SIGKILL — fault case**: при скасуванні (`asyncio.CancelledError`) runtime не повертає
   leases і не пише `stopped` — саме так поводиться вбитий контейнер; lease підбирає
   `recover_expired_leases` іншого instance після експірації.
@@ -45,7 +46,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from collector.contracts import new_entity_id
@@ -57,6 +58,7 @@ from collector.persistence.postgres.errors import (
     LeaseNotOwnedError,
     PersistenceError,
 )
+from collector.persistence.postgres.models import WorkerInstance
 from collector.persistence.postgres.repositories import pools as pools_repo
 from collector.persistence.postgres.repositories import queue as queue_repo
 from collector.workers.config import WorkerRuntimeConfig
@@ -394,6 +396,8 @@ class WorkerRuntime:
     async def _claim(self, limit: int) -> int:
         try:
             async with self._transaction() as session:
+                if not await self._claim_allowed(session):
+                    return 0
                 jobs = await queue_repo.claim(
                     session,
                     self.handler.job_types,
@@ -417,11 +421,48 @@ class WorkerRuntime:
             return 0
         self._claim_failures = 0
         self._claim_backoff = 0.0
+        if self._fenced:
+            # Fence піднявся, поки claim був у базі. Запуск цих tasks означав би роботу без
+            # підтвердженого lease, яку сторож уже не скасує (він спрацьовує раз на fence):
+            # lease лишається спливати і job повертає `recover_expired_leases`.
+            for task in tasks:
+                self.lost_leases += 1
+                self._log.warning(
+                    "worker.lease_left_to_expire",
+                    job_id=str(task.job_id),
+                    reason="claimed while fenced",
+                    lease_seconds=self.config.lease_seconds,
+                )
+            return 0
         for task in tasks:
             self._start(task)
         if tasks:
             self._log.info("worker.claimed", count=len(tasks), active_tasks=len(self._active))
         return len(tasks)
+
+    async def _claim_allowed(self, session: AsyncSession) -> bool:
+        """Перевірити барʼєр drain у власному рядку instance **в тій самій транзакції**, що й claim.
+
+        Локальний `claiming` читається до claim, а барʼєр runtime дізнається лише з heartbeat.
+        Без цієї перевірки claim, що вже пішов у базу, міг узяти job, покладену в чергу ПІСЛЯ
+        того, як `mark_draining`/`mark_stopped` закомітився і heartbeat його застосував
+        (флейки scaling-тестів під навантаженням). `FOR SHARE` конфліктує з `FOR UPDATE`, яким
+        `set_instance_status` блокує рядок, тож перехід у `draining`/`stopped` чекає, доки
+        claim цього instance закомітиться: коміт барʼєра = жодного claim, який його не бачив.
+        """
+        row = (
+            await session.execute(
+                select(WorkerInstance.status, WorkerInstance.drain_requested_at)
+                .where(WorkerInstance.instance_id == self.instance_id)
+                .with_for_update(read=True)
+            )
+        ).one_or_none()
+        if row is None:
+            return False
+        if row.drain_requested_at is not None:
+            self._apply_drain_barrier(True)
+            return False
+        return bool(row.status == "ready")
 
     def _start(self, task: Task) -> None:
         handle = asyncio.create_task(self._execute(task), name=f"worker-task-{task.job_id}")
