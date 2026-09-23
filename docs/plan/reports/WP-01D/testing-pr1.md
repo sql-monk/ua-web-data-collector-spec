@@ -258,13 +258,13 @@ Edit лише в `tests/**`. Три нові файли (14 тестів) і о�
 
 `tests/integration/scaling/test_scheduler_singleton_adversarial.py` (4):
 
-11. `test_standby_scheduler_does_no_maintenance_while_the_active_one_does` — резервний процес не
+1. `test_standby_scheduler_does_no_maintenance_while_the_active_one_does` — резервний процес не
     робить жодного `run_maintenance`; прострочений lease повернуто рівно один раз;
-12. `test_named_leases_are_isolated_from_each_other` — `scheduler` і `controller` не блокують
+2. `test_named_leases_are_isolated_from_each_other` — `scheduler` і `controller` не блокують
     один одного (важливо для PR3);
-13. `test_graceful_stop_hands_the_lease_over_without_waiting_for_a_ttl` — після SIGTERM
+3. `test_graceful_stop_hands_the_lease_over_without_waiting_for_a_ttl` — після SIGTERM
     активного lease вільний одразу, зупинений процес більше не тікає;
-14. `test_active_scheduler_ticks_only_while_the_server_confirms_the_lease` —
+4. `test_active_scheduler_ticks_only_while_the_server_confirms_the_lease` —
     `pg_terminate_backend` → `is_active=False`, планування зупинено до нового `try_acquire`,
     новий backend pid.
 

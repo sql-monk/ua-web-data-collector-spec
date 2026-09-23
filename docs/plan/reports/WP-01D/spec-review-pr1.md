@@ -147,8 +147,8 @@ owner/датою.
 |---|---|---|---|
 | **R-52** — «незалежні pools, drain, lease recovery» | вісім pools, desired/current state, heartbeats, drain, lease recovery | 8 ролей з власними defaults (`roles.py:56-70`), кожна роль — свій pool-рядок і свої instances; drain (`_drain`, `_release_leases`) і recovery (`test_killed_replica_...`, `scheduler.run_maintenance`) доведені тестами; current state виводиться з heartbeat, локального стану немає | evidenced (у межах PR1: pools/drain/recovery; scale-команди — PR3) |
 | **R-57** — «role-wide drain barrier, не покладатися на вибір контейнера orchestrator-ом» | барʼєр має зупиняти claim незалежно від того, який контейнер видалить Compose/Swarm | PR1 дає **примітив**: claim зупиняє не лише SIGTERM, а й `worker_instances.drain_requested_at` **власного** рядка — тобто рішення приймає сам instance, а не оркестратор. Це **чесно** названо per-instance у трьох місцях (`runtime.py:204-218`, картка PR3 вимога 2, `implementation-pr1.md` F4) і **доведено тестом межі** `test_drain_barrier_must_be_set_on_every_instance_of_the_role` (барʼєр на одному instance роль не зупиняє). Мутація M2 тестувальника робить 3 тести червоними. За role-wide відповідає `PoolController` PR3 | **partial, але за видане не видано** — формулювання «Role-wide drain barrier (R-57)» у ранній версії звіту виправлене після F4; претензій немає |
-| R-53 — aggregate rate не залежить від replicas | — | not applicable (PR2) |
-| R-55 — GUI/API без socket; Swarm controller ізольований | `test_no_docker_socket_mount_anywhere` лишився зеленим; controller — PR3 | evidenced (частина «без socket»), not applicable (controller — PR3) |
+| R-53 — aggregate rate не залежить від replicas | — | — | not applicable (PR2) |
+| R-55 — GUI/API без socket; Swarm controller ізольований | `test_no_docker_socket_mount_anywhere` лишився зеленим; controller — PR3 | — | evidenced (частина «без socket»), not applicable (controller — PR3) |
 
 ---
 

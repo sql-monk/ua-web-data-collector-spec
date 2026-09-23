@@ -386,7 +386,7 @@ Docker-стек не піднімався (не обов'язково за за�
 - **Scheduler singleton, `pg_try_advisory_lock` на pool-і**: з'єднання **навмисно** тримається поза
   pool-ом на весь час володіння (`advisory.py:75-96`, `AUTOCOMMIT`), тому «повернули в pool і
   втратили lock» у штатному шляху не відбувається; перевірка володіння — сервер-сайд по `pg_locks`
-  + `pg_backend_pid()`, а не локальний прапорець, тож reconnect детектується. Єдина щілина —
+  - `pg_backend_pid()`, а не локальний прапорець, тож reconnect детектується. Єдина щілина —
   L-6 (unlock без перевірки результату).
 - **Maintenance-tick ідемпотентний**: `recover_expired_leases` (`UPDATE ... WHERE status='leased'
   AND lease_expires_at <= now`, `SKIP LOCKED`) і `mark_stale_instances` (`UPDATE ... WHERE
