@@ -193,3 +193,157 @@ translation-worker ['postgres_dsn_translation'] /run/secrets/postgres_dsn_transl
 знадобились: `verify_runtime_login`, `RoleLoginError`, `queue.release`, `apply_database_roles` і
 `load_role_logins` WP-01A використано як є. Out of scope п.6 (publisher loop) лишається в картці
 WP-01B.
+
+## After rebase on WP-00 PR4
+
+Гілку перебазовано на `wp/00-4-role-dsn-secrets` (спершу на `1eb3e27`, потім на docs-only tip
+`8775f7e` — дві нові WP-00 зміни стосуються лише `docs/plan/reports/WP-00/*-pr4.md`). Гілку
+WP-00 не змінено. Нові хеші PR1b:
+
+```text
+9d93e62 docs(wp-01d): implementation report PR1b
+a52ac0b fix(wp-01d): keep collector_migrate out of runtime code (role_connections guard)
+343759d docs(wp-01d): per-component DB roles in workers.md/runbook; close §13 and drain risks in card
+5968d34 feat(wp-01d): per-component postgres_dsn_<component> for scheduler and workers (§13)
+8c65e33 feat(wp-01d): runtime verifies its own LOGIN role and releases leases via queue.release
+```
+
+Як розвʼязано конфлікти:
+
+- `docker-compose.yml`, блок top-level `secrets:` — злився автоматично (hunk ідентичний), лишилась
+  версія WP-00.
+- `tests/unit/test_compose_config_adversarial.py::SECRET_CONSUMERS` — об'єднання: `postgres_dsn`
+  → лише `migrate-postgres`; кожен `postgres_dsn_<component>` → `migrate-postgres` + runtime-сервіси
+  за мапінгом PR1b (`api_ro`/`export_ro` → лише `migrate-postgres`).
+- `tests/unit/test_compose_config.py`: assertions WP-00 про секрети `migrate-postgres` взяті як є, моя
+  частина — `allowed = {"migrate-postgres"}`. Я видалив хелпер `_strip_sql_comments` разом із
+  вартовим, а нові тести WP-00 PR4 (`test_postgres_init_scripts_are_mounted_read_only_for_wp_01a`,
+  `test_postgres_init_revokes_public_on_app_and_service_databases`) його використовують, тож його
+  повернуто без змін. Тести WP-00 не змінено й не послаблено.
+
+### Команди та вивід (tip `a47ad99` до docs-only rebase; код ідентичний поточному)
+
+`uv run ruff check . && uv run ruff format --check . && uv run mypy src`:
+
+```text
+All checks passed!
+258 files already formatted
+Success: no issues found in 78 source files
+```
+
+`uv run pytest -m "not live"`:
+
+```text
+1034 passed, 23 skipped, 8 warnings in 1283.01s (0:21:23)
+```
+
+(23 skipped — GUI e2e без стека `gui` і `test_network_blocked` на Windows, як на `main`.)
+
+`uv run pytest -m integration tests/integration/scaling`:
+
+```text
+44 passed in 232.89s (0:03:52)
+```
+
+`./deploy/compose/secrets/init-secrets.sh` (у worktree; файли в `.gitignore`, після перевірки
+видалені, не комітились):
+
+```text
+gen   postgres_dsn (з postgres_password)
+gen   postgres_dsn_api_ro (random, роль collector_api_ro)
+gen   postgres_dsn_export_ro (random, роль collector_export_ro)
+gen   postgres_dsn_fetcher (random, роль collector_fetcher)
+gen   postgres_dsn_parser (random, роль collector_parser)
+gen   postgres_dsn_projector (random, роль collector_projector)
+gen   postgres_dsn_scheduler (random, роль collector_scheduler)
+gen   postgres_dsn_translation (random, роль collector_translation)
+```
+
+`docker compose --profile core --profile workers build` (образ `collector:dev` зібрано з цього
+worktree, щоб у стеку був код PR1b), потім `docker compose --profile core --profile workers up -d --wait`:
+
+```text
+ Container collector-migrate-postgres-1 Exited
+ Container collector-ensure-mongo-1 Exited
+ Container collector-fetch-worker-1 Healthy
+ Container collector-fetch-worker-2 Healthy
+ Container collector-maintenance-worker-1 Healthy
+ Container collector-export-worker-1 Healthy
+ Container collector-projector-worker-1 Healthy
+ Container collector-minio-1 Healthy
+ Container collector-scheduler-1 Healthy
+ Container collector-parse-worker-2 Healthy
+ Container collector-parse-worker-1 Healthy
+ Container collector-translation-worker-1 Healthy
+ Container collector-discovery-worker-1 Healthy
+```
+
+`migrate-postgres` (exit 0):
+
+```text
+login enabled: collector_scheduler, collector_fetcher, collector_parser, collector_projector, collector_translation, collector_api_ro, collector_export_ro
+```
+
+Acceptance: `pg_stat_activity` × `pg_roles` у БД `collector` (запит від адмін-`psql`, тому
+рядок `psql | collector | t` — це сам запит, а не runtime):
+
+```text
+       application_name       |        usename        | rolsuper | conns
+------------------------------+-----------------------+----------+-------
+ collector-sch                | collector_scheduler   | f        |     2
+ collector-worker-discovery   | collector_fetcher     | f        |     1
+ collector-worker-export      | collector_scheduler   | f        |     1
+ collector-worker-fetch       | collector_fetcher     | f        |     2
+ collector-worker-maintenance | collector_scheduler   | f        |     1
+ collector-worker-parse       | collector_parser      | f        |     2
+ collector-worker-projector   | collector_projector   | f        |     1
+ collector-worker-translation | collector_translation | f        |     1
+ psql                         | collector             | t        |     1
+(9 rows)
+```
+
+Логи старту (фрагмент): `"role": "fetch", "db_role": "collector_fetcher", "event": "worker.db_login"`,
+`"role": "export", "db_role": "collector_scheduler", "event": "worker.db_login"`,
+`"lease": "scheduler", "db_role": "collector_scheduler", "event": "scheduler.db_login"`.
+
+`docker compose --profile core --profile workers up -d --no-recreate --scale fetch-worker=4 --wait`:
+
+```text
+ Container collector-fetch-worker-3 Healthy
+ Container collector-fetch-worker-4 Healthy
+ Container collector-fetch-worker-1 Healthy
+ Container collector-fetch-worker-2 Healthy
+```
+
+```text
+    role     | status | count
+-------------+--------+-------
+ discovery   | ready  |     1
+ export      | ready  |     1
+ fetch       | ready  |     4
+ maintenance | ready  |     1
+ parse       | ready  |     2
+ projector   | ready  |     1
+ translation | ready  |     1
+
+    application_name    |      usename      | rolsuper | count
+------------------------+-------------------+----------+-------
+ collector-worker-fetch | collector_fetcher | f        |     4
+```
+
+Пароль `collector_fetcher` з DSN-секрету не знайдено ні в `docker inspect` усіх контейнерів стека,
+ні в `docker compose logs` (`grep -c` → `0`, `0`).
+
+`docker compose --profile core --profile workers down -v`: усі мережі, контейнери й volumes стека
+видалено (після нього `collector-*` контейнерів — `0`, `collector_*` volumes — `0`); стек
+`puluj-g-*` не чіпався.
+
+### Що змінилось у висновках вище
+
+- Ризик 1 (порядок merge) і очікуване падіння `test_secrets_are_files_with_examples_and_gitignored`
+  знято: після rebase тест зелений; PR1b тепер стоїть поверх WP-00 PR4, тож зливати його треба після
+  (або разом з) `wp/00-4-role-dsn-secrets`.
+- Ризик 2 (конфлікти) розвʼязано, як описано вище.
+- «Acceptance на стеку» з розділу «Що не перевірено» виконано: усі runtime-процеси підключені
+  не-superuser ролями згідно з мапінгом. CI job `integration (PostgreSQL 18)` як і раніше не
+  запускався (push — за оркестратором).
