@@ -52,6 +52,8 @@ from collector.persistence.postgres.repositories import queue as queue_repo
 from collector.workers.advisory import AdvisoryLease
 from collector.workers.config import SchedulerRuntimeConfig
 from collector.workers.liveness import LivenessMarker
+from collector.workers.login import verify_component_login
+from collector.workers.roles import SCHEDULER_DB_ROLE
 from collector.workers.session import bounded_transaction
 from collector.workers.signals import StopSignalHandlers, install_stop_signal_handlers
 
@@ -144,9 +146,16 @@ class SchedulerRuntime:
 
         `install_signals=False` — вбудований запуск (тести, кілька runtime в одному процесі):
         глобальні handlers сигналів не чіпаються.
+
+        Першим кроком — перевірка LOGIN-ролі (§13): scheduler працює лише під
+        `collector_scheduler`; інакше `RoleLoginError` ще до спроби взяти lease.
         """
         if stop is not None:
             self._stop = stop
+        db_role = await verify_component_login(
+            self._sessions, SCHEDULER_DB_ROLE, statement_timeout_ms=self.config.statement_timeout_ms
+        )
+        self._log.info("scheduler.db_login", db_role=db_role)
         signals = (
             install_stop_signal_handlers(self._on_signal)
             if install_signals

@@ -468,6 +468,22 @@ async def _run_scheduler(settings: PostgresSettings, config: SchedulerRuntimeCon
         await engine.dispose()
 
 
+def _run_runtime(coro: Coroutine[Any, Any, None]) -> None:
+    """`_run_async` для worker/scheduler: чужа LOGIN-роль БД → exit 1 зі зрозумілим stderr (§13).
+
+    `RoleLoginError` піднімає `collector.workers.login` при старті, ще до першого claim; її
+    повідомлення містять лише імена ролей, без DSN і пароля. Rollback без перебудови image —
+    `COLLECTOR_WORKER_PLACEHOLDER=1` (перевірка до БД не доходить).
+    """
+    from collector.persistence.postgres.roles import RoleLoginError
+
+    try:
+        _run_async(coro)
+    except RoleLoginError as exc:
+        typer.echo(f"role login: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 def _is_postgres_error(exc: BaseException) -> bool:
     """Помилка з'єднання/запиту PostgreSQL.
 
@@ -576,7 +592,7 @@ def worker(
     configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
     settings = _postgres_settings()
     config = _worker_config(role)
-    _run_async(_run_worker(settings, config))
+    _run_runtime(_run_worker(settings, config))
 
 
 @app.command()
@@ -619,7 +635,7 @@ def scheduler() -> None:
     configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
     settings = _postgres_settings()
     config = _scheduler_config()
-    _run_async(_run_scheduler(settings, config))
+    _run_runtime(_run_scheduler(settings, config))
 
 
 @app.command()

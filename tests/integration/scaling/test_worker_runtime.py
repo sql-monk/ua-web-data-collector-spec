@@ -32,7 +32,7 @@ from collector.workers.config import WorkerRuntimeConfig
 from collector.workers.roles import WorkerRole
 from collector.workers.runtime import WorkerRuntime
 
-from .conftest import T0, ControlledHandler, WaitFor
+from .conftest import T0, ControlledHandler, RoleSessions, WaitFor
 
 pytestmark = pytest.mark.integration
 
@@ -81,9 +81,10 @@ async def test_instance_registers_becomes_ready_and_stops_on_drain(
     make_pool: MakePool,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     revision = await make_pool(concurrency=2)
-    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
 
@@ -115,9 +116,12 @@ async def test_bootstraps_missing_pool_from_spec_defaults(
     handler: ControlledHandler,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    role_sessions: RoleSessions,
 ) -> None:
     """На чистій БД pool ролі створюється з defaults §7.6 (інакше FK instance → pool впаде)."""
-    runtime = WorkerRuntime(worker_config(role=WorkerRole.EXPORT), pg_sessions, handler)
+    runtime = WorkerRuntime(
+        worker_config(role=WorkerRole.EXPORT), role_sessions(WorkerRole.EXPORT), handler
+    )
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.status == "ready", what="ready на чистій БД")
@@ -140,12 +144,13 @@ async def test_killed_replica_lease_is_recovered_and_finished_by_another_instanc
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """SIGKILL — fault case: lease не повертається сам, його підбирає recover_expired_leases."""
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
 
-    killed = WorkerRuntime(worker_config(), pg_sessions, blocking_handler)
+    killed = WorkerRuntime(worker_config(), runtime_sessions, blocking_handler)
     killed_task = start(killed, running, asyncio.Event())
     await wait_for(lambda: bool(blocking_handler.started), what="перший instance узяв job")
 
@@ -162,7 +167,7 @@ async def test_killed_replica_lease_is_recovered_and_finished_by_another_instanc
         recovered = await queue_repo.recover_expired_leases(session, now=far_future())
     assert recovered == [job_id]
 
-    survivor = WorkerRuntime(worker_config(), pg_sessions, handler)
+    survivor = WorkerRuntime(worker_config(), runtime_sessions, handler)
     stop = asyncio.Event()
     survivor_task = start(survivor, running, stop)
     await wait_for(lambda: job_id in handler.finished, what="job підхопив інший instance")
@@ -183,10 +188,11 @@ async def test_drain_finishes_active_task_and_takes_no_new_jobs(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     await make_pool(concurrency=1)
     job_ids = await enqueue_jobs(2)
-    runtime = WorkerRuntime(worker_config(), pg_sessions, blocking_handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, blocking_handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.active_tasks == 1, what="task у роботі")
@@ -219,23 +225,35 @@ async def test_drain_timeout_returns_the_lease_to_the_queue(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Task, що не вклався у stop_grace_period, скасовується, а його lease повертається."""
+    """Task, що не вклався у stop_grace_period, скасовується, а його lease повертається.
+
+    PR1b п.5: через `queue.release`, а не `retry` — плановий drain нікого не провалив, тож
+    `attempt` повертається до значення до claim, а полів помилки немає (deps WP-01A §2, §6).
+    """
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
-    runtime = WorkerRuntime(worker_config(stop_grace_seconds=0.2), pg_sessions, blocking_handler)
+    before = (await read_job(pg_sessions, job_id)).attempt
+    runtime = WorkerRuntime(
+        worker_config(stop_grace_seconds=0.2), runtime_sessions, blocking_handler
+    )
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.active_tasks == 1, what="task у роботі")
+    assert (await read_job(pg_sessions, job_id)).attempt == before + 1, "claim рахує спробу"
 
     stop.set()
     await asyncio.wait_for(task, timeout=15)
 
     assert blocking_handler.cancelled == [job_id]
     job = await read_job(pg_sessions, job_id)
-    assert job.status == "retry"
+    assert job.status == "pending"
     assert job.lease_owner is None
-    assert job.last_error_code == "drain_timeout"
+    assert job.lease_expires_at is None
+    assert job.attempt == before, "drain не змінює attempt (release компенсує claim)"
+    assert job.last_error_code is None, "drain не пише полів помилки"
+    assert job.last_error_message is None
     assert job.not_before <= utcnow(), "job claimable одразу, без штрафного backoff"
 
     async with pg_sessions() as session, session.begin():
@@ -251,10 +269,11 @@ async def test_concurrency_hot_change_opens_and_closes_slots_without_restart(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     revision = await make_pool(concurrency=1, max_replicas=4)
     await enqueue_jobs(6)
-    runtime = WorkerRuntime(worker_config(), pg_sessions, blocking_handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, blocking_handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.active_tasks == 1, what="один слот за desired_concurrency=1")
@@ -306,11 +325,12 @@ async def test_heartbeat_does_not_extend_a_foreign_lease(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Після recovery+claim іншим owner-ом heartbeat старого власника нічого не продовжує."""
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
-    runtime = WorkerRuntime(worker_config(), pg_sessions, blocking_handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, blocking_handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.active_tasks == 1, what="job у роботі першого instance")
@@ -346,10 +366,11 @@ async def test_role_wide_drain_barrier_stops_claim_without_sigterm(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """R-57: claim зупиняє `drain_requested_at` у рядку instance, а не вибір контейнера."""
     await make_pool(concurrency=2)
-    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.status == "ready", what="ready")
@@ -388,11 +409,12 @@ async def test_handler_failure_becomes_a_retry_with_backoff(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
     handler.raise_error = RuntimeError("джерело віддало сміття")
-    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
 
@@ -439,6 +461,7 @@ async def test_self_fencing_cancels_active_tasks_when_the_database_stops_confirm
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """F3: недоступна база довше за `fence_after` → instance сам скасовує роботу (§7.6, §9.3).
 
@@ -449,7 +472,7 @@ async def test_self_fencing_cancels_active_tasks_when_the_database_stops_confirm
     """
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
-    sessions = FlakySessions(pg_sessions)
+    sessions = FlakySessions(runtime_sessions)
     runtime = WorkerRuntime(
         # Явне вікно fencing замість половини lease TTL — щоб тест не чекав десятки секунд.
         # Воно має з запасом перекривати паузу event loop-у на завантаженій машині (під
@@ -521,6 +544,7 @@ async def test_self_fencing_fires_when_the_database_hangs_without_raising(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """H-1: fencing керується ЧАСОМ від останнього підтвердженого heartbeat, а не винятком.
 
@@ -530,7 +554,7 @@ async def test_self_fencing_fires_when_the_database_hangs_without_raising(
     """
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
-    sessions = HangingSessions(pg_sessions)
+    sessions = HangingSessions(runtime_sessions)
     config = worker_config(
         lease_seconds=9, heartbeat_seconds=0.05, fence_after_seconds=FENCE_WINDOW
     )
@@ -579,6 +603,7 @@ async def test_claim_in_flight_never_takes_a_job_enqueued_after_the_drain_barrie
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
     monkeypatch: pytest.MonkeyPatch,
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """R-57: коміт `mark_draining` = жодного claim цього instance, який барʼєра не бачив.
 
@@ -588,7 +613,7 @@ async def test_claim_in_flight_never_takes_a_job_enqueued_after_the_drain_barrie
     чекати коміту claim, тож job, покладена після барʼєра, claim-у вже не видно.
     """
     await make_pool(concurrency=1)
-    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.status == "ready", what="ready")
@@ -632,10 +657,11 @@ async def test_jobs_claimed_while_the_fence_went_up_are_not_started(
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
     monkeypatch: pytest.MonkeyPatch,
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Claim, що повернувся вже під fence, не запускає tasks (сторож їх більше не скасує)."""
     await make_pool(concurrency=1)
-    sessions = FlakySessions(pg_sessions)
+    sessions = FlakySessions(runtime_sessions)
     runtime = WorkerRuntime(
         worker_config(lease_seconds=6, heartbeat_seconds=0.05, fence_after_seconds=FENCE_WINDOW),
         cast("async_sessionmaker[AsyncSession]", sessions),
@@ -684,11 +710,12 @@ async def test_hot_change_above_the_connection_ceiling_is_clamped(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """M-3: `desired_concurrency` понад стелю процесу обрізається, а не топить pool з'єднань."""
     revision = await make_pool(concurrency=1, max_replicas=4)
     await enqueue_jobs(6)
-    runtime = WorkerRuntime(worker_config(max_concurrency=2), pg_sessions, blocking_handler)
+    runtime = WorkerRuntime(worker_config(max_concurrency=2), runtime_sessions, blocking_handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.active_tasks == 1, what="один слот")
@@ -723,13 +750,14 @@ async def test_boot_fails_loudly_when_the_ready_transition_cannot_be_written(
     worker_config: MakeConfig,
     handler: ControlledHandler,
     make_pool: MakePool,
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """M-1: worker не лишається «живим, але німим» — boot падає, і оркестратор перезапускає."""
     from collector.persistence.postgres.errors import NotFoundError
     from collector.workers import runtime as runtime_module
 
     await make_pool(concurrency=1)
-    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
     attempts = 0
 
     async def failing_status(*_args: object, **_kwargs: object) -> None:
@@ -759,11 +787,12 @@ async def test_liveness_marker_is_refreshed_by_the_loop_and_removed_on_stop(
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
     tmp_path: Path,
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Вимога 7 картки: healthcheck читає mtime маркера, який оновлює живий цикл процесу."""
     await make_pool(concurrency=1)
     marker = tmp_path / "runtime.alive"
-    runtime = WorkerRuntime(worker_config(liveness_path=marker), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(liveness_path=marker), runtime_sessions, handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
 

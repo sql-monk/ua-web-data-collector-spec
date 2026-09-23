@@ -97,14 +97,15 @@ async def test_two_runtimes_claiming_one_job_exactly_one_wins(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """`FOR UPDATE SKIP LOCKED`: одну job виконує рівно один instance, `attempt` рівно 1."""
     await make_pool(concurrency=4)
     (job_id,) = await enqueue_jobs(1)
     first_handler = ControlledHandler()
     second_handler = ControlledHandler()
-    first = WorkerRuntime(worker_config(), pg_sessions, first_handler)
-    second = WorkerRuntime(worker_config(), pg_sessions, second_handler)
+    first = WorkerRuntime(worker_config(), runtime_sessions, first_handler)
+    second = WorkerRuntime(worker_config(), runtime_sessions, second_handler)
     stop = asyncio.Event()
     tasks = [start(first, running, stop), start(second, running, stop)]
 
@@ -134,6 +135,7 @@ async def test_hanging_task_does_not_extend_its_lease_and_never_reports_a_silent
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Без heartbeat lease не продовжується; після recovery звіт власника відхиляється."""
     await make_pool(concurrency=1)
@@ -141,7 +143,7 @@ async def test_hanging_task_does_not_extend_its_lease_and_never_reports_a_silent
     # heartbeat навмисно не встигне спрацювати за час тесту: lease тримається лише claim-ом.
     # (heartbeat ≤ ⅓ lease — межа після L-1 код-рев'ю; 40 с так само не спрацює за час тесту.)
     runtime = WorkerRuntime(
-        worker_config(lease_seconds=120, heartbeat_seconds=40.0), pg_sessions, blocking_handler
+        worker_config(lease_seconds=120, heartbeat_seconds=40.0), runtime_sessions, blocking_handler
     )
     stop = asyncio.Event()
     task = start(runtime, running, stop)
@@ -183,12 +185,13 @@ async def test_recover_expired_leases_spares_a_live_heartbeating_task(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Maintenance-прохід під активним heartbeat не забирає job у живого instance."""
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
     runtime = WorkerRuntime(
-        worker_config(lease_seconds=60, heartbeat_seconds=0.05), pg_sessions, blocking_handler
+        worker_config(lease_seconds=60, heartbeat_seconds=0.05), runtime_sessions, blocking_handler
     )
     stop = asyncio.Event()
     task = start(runtime, running, stop)
@@ -226,6 +229,7 @@ async def test_drain_barrier_must_be_set_on_every_instance_of_the_role(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """R-57: барʼєр діє per-instance, тож зупинка ролі = барʼєр на КОЖНОМУ instance.
 
@@ -236,8 +240,8 @@ async def test_drain_barrier_must_be_set_on_every_instance_of_the_role(
     await make_pool(concurrency=1)
     first_handler = ControlledHandler()
     second_handler = ControlledHandler()
-    first = WorkerRuntime(worker_config(), pg_sessions, first_handler)
-    second = WorkerRuntime(worker_config(), pg_sessions, second_handler)
+    first = WorkerRuntime(worker_config(), runtime_sessions, first_handler)
+    second = WorkerRuntime(worker_config(), runtime_sessions, second_handler)
     stop = asyncio.Event()
     tasks = [start(first, running, stop), start(second, running, stop)]
     await wait_for(
@@ -276,11 +280,14 @@ async def test_repeated_stop_requests_under_an_active_task_are_idempotent(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Другий SIGTERM у межах grace не скасовує активний task і не змінює результат drain."""
     await make_pool(concurrency=1)
     job_ids = await enqueue_jobs(2)
-    runtime = WorkerRuntime(worker_config(stop_grace_seconds=10.0), pg_sessions, blocking_handler)
+    runtime = WorkerRuntime(
+        worker_config(stop_grace_seconds=10.0), runtime_sessions, blocking_handler
+    )
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.active_tasks == 1, what="task у роботі")
@@ -310,10 +317,11 @@ async def test_instance_marked_stopped_claims_nothing_and_exits(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """`worker_instances.status = stopped` → heartbeat відхилено, процес завершується без claim."""
     await make_pool(concurrency=1)
-    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.status == "ready", what="ready")
@@ -339,18 +347,19 @@ async def test_second_boot_of_the_same_container_creates_a_new_instance(
     make_pool: MakePool,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """§7.5/§15: `worker_instance_id` — boot UUIDv7, hostname/container_id лише metadata."""
     await make_pool(concurrency=1)
     config = worker_config()
-    first = WorkerRuntime(config, pg_sessions, ControlledHandler())
+    first = WorkerRuntime(config, runtime_sessions, ControlledHandler())
     first_stop = asyncio.Event()
     first_task = start(first, running, first_stop)
     await wait_for(lambda: first.status == "ready", what="перший boot ready")
     first_stop.set()
     await asyncio.wait_for(first_task, timeout=15)
 
-    second = WorkerRuntime(config, pg_sessions, ControlledHandler())
+    second = WorkerRuntime(config, runtime_sessions, ControlledHandler())
     second_stop = asyncio.Event()
     second_task = start(second, running, second_stop)
     await wait_for(lambda: second.status == "ready", what="другий boot ready")
@@ -385,10 +394,11 @@ async def test_stale_marking_spares_an_instance_with_a_fresh_heartbeat(
     make_pool: MakePool,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """`stale` визначається віком heartbeat: живий instance лишається `ready`."""
     await make_pool(concurrency=1)
-    runtime = WorkerRuntime(worker_config(heartbeat_seconds=0.05), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(heartbeat_seconds=0.05), runtime_sessions, handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.status == "ready", what="ready")
@@ -425,12 +435,13 @@ async def test_permanent_handler_error_quarantines_with_a_dead_letter(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """`PermanentTaskError` → `quarantined` + dead letter, а не нескінченний retry."""
     await make_pool(concurrency=1)
     (job_id,) = await enqueue_jobs(1)
     handler.raise_error = PermanentTaskError("схема джерела змінилась", error_code="schema_drift")
-    runtime = WorkerRuntime(worker_config(), pg_sessions, handler)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
     stop = asyncio.Event()
     task = start(runtime, running, stop)
 
@@ -459,16 +470,15 @@ async def test_drain_timeout_on_the_last_attempt_never_quarantines_a_job_nobody_
     make_pool: MakePool,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    runtime_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Знахідка F2 (виправлена): плановий drain не «спалює» job на останній спробі.
+    """Знахідка F2 (закрита PR1b п.5): плановий drain не «спалює» job на останній спробі.
 
     `queue.retry` на `attempt >= max_attempts` переводить job у `quarantined` + dead letter
-    `max_attempts` (`repositories/queue.py::retry`), але job ніхто не провалив — просто
-    зупинили контейнер. Тому `_release_leases` для останньої спроби **не** викликає `retry`:
-    lease лишається за instance і повертається в чергу тим самим шляхом, що й після SIGKILL —
-    `recover_expired_leases` після експірації (§15). Жодного карантину і жодного dead letter;
-    `attempt` зберігається. Коли WP-01A додасть `queue.release(job_id, owner)`
-    (dependency-запит WP-01D §3), очікування стануть `pending` одразу, без очікування TTL.
+    `max_attempts`, але job ніхто не провалив — просто зупинили контейнер. Тепер
+    `_release_leases` викликає `queue.release` (WP-01A PR2): job одразу `pending` (без
+    очікування експірації lease), `attempt` повертається до значення до claim, жодного
+    карантину, dead letter чи полів помилки.
     """
     await make_pool(concurrency=1)
     async with pg_sessions() as session, session.begin():
@@ -480,7 +490,9 @@ async def test_drain_timeout_on_the_last_attempt_never_quarantines_a_job_nobody_
         )
         job_id = job.job_id
 
-    runtime = WorkerRuntime(worker_config(stop_grace_seconds=0.2), pg_sessions, blocking_handler)
+    runtime = WorkerRuntime(
+        worker_config(stop_grace_seconds=0.2), runtime_sessions, blocking_handler
+    )
     stop = asyncio.Event()
     task = start(runtime, running, stop)
     await wait_for(lambda: runtime.active_tasks == 1, what="остання спроба у роботі")
@@ -491,19 +503,16 @@ async def test_drain_timeout_on_the_last_attempt_never_quarantines_a_job_nobody_
 
     assert blocking_handler.cancelled == [job_id], "task скасовано по вичерпанню grace"
     job_row = await read_job(pg_sessions, job_id)
-    assert job_row.status == "leased", "job не в карантині — lease просто чекає на експірацію"
-    assert job_row.attempt == 1, "спроба не витрачена планованою зупинкою"
+    assert (job_row.status, job_row.lease_owner) == ("pending", None), "повернуто одразу"
+    assert job_row.attempt == 0, "спроба не витрачена планованою зупинкою"
+    assert (job_row.last_error_code, job_row.last_error_message) == (None, None)
     async with pg_sessions() as session:
         letters = list(
             (await session.execute(select(DeadLetter).where(DeadLetter.job_id == job_id))).scalars()
         )
     assert letters == [], "dead letter про вичерпані спроби не пишеться: ніхто не провалив job"
 
-    # Шлях повернення в чергу — той самий, що й після SIGKILL (§15).
+    # Job знову claimable і має повний бюджет спроб.
     async with pg_sessions() as session, session.begin():
-        recovered = await queue_repo.recover_expired_leases(
-            session, now=utcnow() + timedelta(days=1)
-        )
-    assert recovered == [job_id]
-    job_row = await read_job(pg_sessions, job_id)
-    assert (job_row.status, job_row.attempt, job_row.lease_owner) == ("pending", 1, None)
+        claimed = await queue_repo.claim(session, ["fetch"], "next-instance", 60, limit=1)
+    assert [(job.job_id, job.attempt) for job in claimed] == [(job_id, 1)]
