@@ -39,7 +39,7 @@ collector db roles --with-login --secrets-dir /run/secrets   # або $COLLECTOR
 `postgres_dsn_<component>` як `COLLECTOR_POSTGRES_DSN_FILE` (генерація секретів і compose —
 dependency-запит `docs/plan/deps/WP-01A-to-WP-00.md` §4). `collector_migrate` LOGIN не отримує.
 
-### Кластер, створений до WP-00 PR4
+## Кластер, створений до WP-00 PR4
 
 Init-скрипти не виконуються на наявному data directory, тож `02-revoke-public.sql` треба
 застосувати один раз вручну (або `docker compose down -v`, якщо дані не потрібні):
