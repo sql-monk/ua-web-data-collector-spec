@@ -36,7 +36,7 @@ Forbidden: `src/collector/contracts/**`, `schemas/**`, `docker-compose.yml` (PR2
 - Repository API: типізовані async-функції над `AsyncSession`, без ORM-магії у викликачів; кожна операція документує transaction boundary. Жодних SQL-рядків у інших WP — лише через ці репозиторії.
 - Ролі БД (§13): `collector_migrate` (owner, лише міграції), `collector_scheduler`, `collector_fetcher`, `collector_parser`, `collector_projector`, `collector_translation`, `collector_api_ro`, `collector_export_ro` з мінімальними GRANT на таблиці/послідовності; тест, що `collector_parser` не може писати у `news_translations`, а `collector_api_ro` не може `INSERT`.
 - Integration-тести: маркер `integration`, loopback дозволений; PostgreSQL 18 у Docker (compose service `postgres` з PR2 або `testcontainers`); кожен тест — на чистій схемі (`alembic upgrade head` у template DB + `CREATE DATABASE ... TEMPLATE`), без мережі за межі loopback.
-- Великі таблиці (`fetches`, `raw_objects`, `change_events`, `outbox_events`, `audit_log`) — declarative partitioning по місяцях (`fetched_at`/`created_at`) + helper для створення наступних партицій (maintenance WP-12 викликає).
+- Великі таблиці (`fetches`, `audit_log`) — declarative partitioning по місяцях (`fetched_at`/`created_at`) + helper для створення наступних партицій (maintenance WP-12 викликає). `raw_objects`, `change_events`, `outbox_events` — свідомо непартиціоновані заради глобального unique (`sha256`/`event_id`), за умовами ADR-0007 (`docs/decisions/0007-event-tables-global-unique-over-partitioning.md`).
 
 ---
 
@@ -121,10 +121,10 @@ uv run pytest -m integration tests/integration/postgres
 ### Тести
 
 - upload claim: stale generation не може commit; expired lease → reacquire іншим owner → старий commit падає; concurrent 2 producers одного key → рівно один reference;
-- projection version: 3 паралельні `record_parse_result` для однієї сутності → версії 1,2,3 без дірок/дублів; повторний виклик для того самого artifact → той самий task;
+- projection version: 3 паралельні `record_parse_result` для однієї сутності → версії 1,2,3 без дірок/дублів; ідемпотентність — за `parse_key` (ідентичність parse-кроку: `fetch_id`, `raw_sha256`, `parser_version`, `entity_uuid`, `target_collection`), не за вмістом artifact (ADR-0007, D-2): повторний виклик для того самого parse-кроку → той самий task; той самий artifact, отриманий у новому fetch (новий `fetch_id`), → нова версія, той самий рядок `normalized_artifacts` (дедуп за `object_key`/`sha256` окремо від `parse_key`);
 - ack: доставка версій у порядку `3,1,2` (receipts з відповідними `applied_to_current`) → `confirmed_projection_version = 3` увесь час не зменшується; повторний ack ідемпотентний; `domain.changed` лише для `applied_to_current AND state_changed`; bytes у `outbox_events` побайтово дорівнюють receipt bytes;
 - crash-вікно: ack «між кроками» (симуляція: транзакція відкочена після insert ack) → жодних часткових записів;
-- partitioning: insert у `fetches` з датою наступного місяця без партиції → зрозуміла помилка або авто-створення (обрати, задокументувати); helper створює партиції на N місяців наперед.
+- partitioning: insert у `fetches` з датою наступного місяця без партиції — обрано: рядок приймає DEFAULT-партицію (`fetches_default`), а не помилка й не авто-створення; сигнал «партиції відстають» — `default_partition_row_count` (метрика WP-12); helper (`ensure_month_partitions`) створює партиції на N місяців наперед і ідемпотентний.
 
 ### Acceptance PR2
 
@@ -147,6 +147,8 @@ uv run pytest -m integration tests/integration/postgres
 - **Retention (§9.7):** `retention_pins` з owner/reason/scope/expiry; `compaction_runs` стани `marked → dry_run → archived → verified → deleted → rolled_back`; `version_archive_index` locator `(entity_uuid, projection_version) → part URI/row-group/hash` — insert у тій самій транзакції, що переводить run у `verified`.
 - **Capacity (§15.1):** `capacity_snapshots` append-only з класами/actual/forecast/unit cost/confidence/owner.
 - **Quality/exports:** мінімальні таблиці зі статусами; `quality_results` пов'язані з `crawl_runs`.
+- **Outbox retention (ADR-0007):** `purge_published(older_than)` — видаляє з `outbox_events` опубліковані рядки старіші за поріг (виклик — maintenance-цикл WP-12).
+- **Reconciler §7.3 крок 5 (spec-review PR2, SR-4):** PG-запити, які потребує reconciler WP-01B — «незавершені `projection_tasks`» (claimable/leased довше порогу) і «повнота cursor» (найстаріший непідтверджений task/outbox row за entity або джерело).
 
 ### Тести
 

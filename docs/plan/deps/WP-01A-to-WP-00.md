@@ -130,3 +130,19 @@ cwd/пакета. Image має або `COPY alembic.ini migrations/ /app/` (з `
 `.gitleaksignore` з fingerprint саме цього finding і коментарем-поясненням; сам тест
 переписано, щоб значення будувалося в рантаймі. Від WP-00 дій не потрібно. **Resolved by
 orchestrator.**
+
+## 6. `REVOKE CONNECT, TEMP ON DATABASE … FROM PUBLIC` — open (security-pr2.md I-2)
+
+`security-pr2.md` I-2: усі PostgreSQL-ролі за замовчуванням мають `CONNECT`/`TEMP` на будь-яку
+БД кластера через членство в `PUBLIC` (кластерний default, не рішення WP-01A). Ролі WP-01A
+(`collector_*`) призначені для однієї БД (`COLLECTOR_POSTGRES_DSN`/`postgres_dsn_<component>`),
+і сама схема прав (GRANT per table) це не звужує — `CONNECT` лишається доступним ширше, ніж
+потрібно.
+
+`sql/roles.sql`/`collector db roles` (owned WP-01A) виконується **після** `collector db
+migrate` на вже створеній БД `collector` і не має прав ні створювати інші БД кластера, ні
+безпечно виконувати `REVOKE ... FROM PUBLIC` на рівні кластера (це `ALTER DEFAULT PRIVILEGES`
+чи `REVOKE` на `pg_database`, зона init-скрипту WP-00, не міграцій WP-01A). Прохання: у
+`deploy/compose/postgres/init/**` (WP-00) додати `REVOKE CONNECT, TEMP ON DATABASE <інші БД
+кластера, якщо є> FROM PUBLIC` для БД `collector` при першому старті кластера. Не блокує PR2
+(severity `info`, `security-pr2.md`).

@@ -1,9 +1,10 @@
 # Runbook: PostgreSQL міграції (WP-01A)
 
 Операційні дії з Alembic-міграціями PostgreSQL-схеми (§9.1, §14.2 ТЗ). Стосується таблиць,
-описаних у [`docs/persistence/postgres.md`](../persistence/postgres.md) — наразі лише PR1
-(control plane, job queue, limiter, worker pools, audit log); команди й контракт нижче не
-зміняться з появою таблиць PR2/PR3, лише зросте кількість ревізій.
+описаних у [`docs/persistence/postgres.md`](../persistence/postgres.md) — PR1 (control plane,
+job queue, limiter, worker pools, audit log) і PR2 (fetch/raw lineage, upload claims,
+projection tasks/acks, outbox, entity index); команди й контракт нижче не зміняться з появою
+таблиць PR3, лише зросте кількість ревізій.
 
 Схема forward-only (картка WP-01A, «Rollback/disable»): у production відкат — це нова
 forward-fix міграція, не `downgrade`. `downgrade` реалізований лише там, де це безпечно
@@ -20,9 +21,15 @@ forward-fix міграція, не `downgrade`. `downgrade` реалізован
 export COLLECTOR_POSTGRES_DSN=postgresql://collector:<password>@127.0.0.1:5432/collector
 # або: export COLLECTOR_POSTGRES_DSN_FILE=/run/secrets/postgres_dsn (пріоритетний, Docker secret)
 
-uv run collector db migrate      # alembic upgrade head + місячні партиції на 3 місяці наперед
+uv run collector db migrate      # alembic upgrade head + місячні партиції (audit_log, fetches) на 3 місяці наперед
 uv run collector db roles        # ідемпотентно застосовує sql/roles.sql (ПІСЛЯ migrate)
+uv run collector db roles --with-login [--secrets-dir DIR]   # PR2: вмикає LOGIN + SCRAM-пароль для 7 runtime-ролей з DSN-секретів
 ```
+
+`--with-login` — окрема, необов'язкова дія: без неї `db roles` поводиться як у PR1 (лише
+GRANT, ролі лишаються `NOLOGIN`). Усі сім секретів `postgres_dsn_<component>` обов'язкові —
+без будь-якого з них команда завершується exit 1 без жодної зміни в БД. Деталі механізму —
+[`docs/persistence/postgres.md` §7.2](../persistence/postgres.md#72-login-scram-verifier-db-roles---with-login).
 
 `db migrate` виконує `alembic upgrade head` і `ensure_month_partitions` **в одній транзакції**
 (DDL PostgreSQL транзакційний) — обидва або застосовуються разом, або жодне. Вивід:
@@ -162,20 +169,22 @@ docker compose down -v   # видаляє stateful volume postgres; наступ
 
 ## 7. Відсутня партиція
 
-- `audit_log` має DEFAULT-партицію (`audit_log_default`, міграція `0003`) — INSERT у місяць
-  без явної партиції **не падає**, рядок осідає в DEFAULT. Ненульова кількість рядків там —
-  сигнал, що maintenance (`ensure_month_partitions`, за замовчуванням горизонт 3 місяці)
-  відстає; перевірити: `partitions.default_partition_row_count(conn, "audit_log")`
-  (метрика заплановано для §14.1, `TODO(WP-12)`). Виправлення — запустити `collector db
-  migrate` (створює відсутні місячні партиції) і потім перенести рядки з DEFAULT у щойно
-  створену партицію окремою maintenance-транзакцією (`BEGIN; CREATE TABLE tmp (LIKE
-  audit_log); INSERT INTO tmp SELECT * FROM audit_log_default WHERE created_at >= … AND
-  created_at < …; DELETE FROM audit_log_default WHERE …; ALTER TABLE audit_log ATTACH
-  PARTITION …; COMMIT` — WP-12 реалізує як окремий job).
-- Таблиці **без** DEFAULT-партиції (усі майбутні партиційовані таблиці, поки для них не
-  прийнято те саме рішення, що для `audit_log`) — INSERT у місяць без партиції дає зрозумілу
-  помилку PostgreSQL `no partition of relation "…" found for row`; виправлення — те саме
-  `collector db migrate --partitions-ahead N` з достатнім горизонтом наперед.
+- `audit_log` і `fetches` мають DEFAULT-партицію (`audit_log_default` — міграція `0003`;
+  `fetches_default` — міграція `0004`) — INSERT у місяць без явної партиції **не падає**,
+  рядок осідає в DEFAULT. Ненульова кількість рядків там — сигнал, що maintenance
+  (`ensure_month_partitions`, за замовчуванням горизонт 3 місяці) відстає; перевірити:
+  `partitions.default_partition_row_count(conn, "audit_log" | "fetches")` (метрика заплановано
+  для §14.1/§14.2, `TODO(WP-12)`). Виправлення — запустити `collector db migrate` (створює
+  відсутні місячні партиції) і потім перенести рядки з DEFAULT у щойно створену партицію
+  окремою maintenance-транзакцією (`BEGIN; CREATE TABLE tmp (LIKE <table>); INSERT INTO tmp
+  SELECT * FROM <table>_default WHERE <col> >= … AND <col> < …; DELETE FROM <table>_default
+  WHERE …; ALTER TABLE <table> ATTACH PARTITION …; COMMIT` — WP-12 реалізує як окремий job).
+- `raw_objects`, `change_events`, `outbox_events` — свідомо непартиційовані (ADR-0007), тому цей
+  розділ до них не застосовується.
+- Таблиці **без** DEFAULT-партиції (гіпотетичні майбутні партиційовані таблиці, поки для них не
+  прийнято те саме рішення, що для `audit_log`/`fetches`) — INSERT у місяць без партиції дає
+  зрозумілу помилку PostgreSQL `no partition of relation "…" found for row`; виправлення — те
+  саме `collector db migrate --partitions-ahead N` з достатнім горизонтом наперед.
 
 ## Команди — короткий довідник
 
@@ -184,6 +193,7 @@ docker compose down -v   # видаляє stateful volume postgres; наступ
 | Застосувати міграції + партиції | `uv run collector db migrate [--partitions-ahead N]` |
 | Перевірити drift без змін (потребує прав міграції) | `uv run collector db migrate --check` |
 | Застосувати ролі/GRANT (після migrate) | `uv run collector db roles [--sql PATH]` |
+| Увімкнути LOGIN для 7 runtime-ролей (PR2) | `uv run collector db roles --with-login [--secrets-dir DIR]` |
 | Пряме `alembic` (той самий контракт, що в CI) | `uv run alembic upgrade head && uv run alembic check` |
 | Повний цикл dev-перевірки нової ревізії | `uv run alembic upgrade head && uv run alembic check` → `uv run alembic downgrade base && uv run alembic upgrade head` (де `downgrade` реалізовано) → `uv run pytest -m integration tests/integration/postgres` |
 | Відкат схеми в dev (не production) | `uv run alembic downgrade base` або `docker compose down -v` |
@@ -193,6 +203,10 @@ docker compose down -v   # видаляє stateful volume postgres; наступ
 - `src/collector/cli.py` (`db migrate`, `db roles`), `src/collector/persistence/postgres/
   {migrations.py,ops.py,partitions.py,roles.py}`.
 - `.github/workflows/ci.yml` (job `integration-postgres` — той самий контракт `--check`).
-- `docs/plan/deps/WP-01A-to-WP-00.md` (стан one-shot `migrate-postgres`, пункт 2 — open).
-- `docs/persistence/postgres.md` (схема, партиціонування, ролі).
+- `docs/plan/deps/WP-01A-to-WP-00.md` (стан one-shot `migrate-postgres`; §4 PR2 — DSN-секрети
+  per component для `--with-login`, open).
+- `docs/plan/deps/WP-01A-to-WP-01D.md` (перехід runtime-сервісів на per-role DSN, open).
+- `docs/persistence/postgres.md` (схема, партиціонування, ролі, LOGIN, RLS).
+- `docs/decisions/0007-event-tables-global-unique-over-partitioning.md` (чому `fetches` має
+  DEFAULT-партицію, а `raw_objects`/`change_events`/`outbox_events` — ні).
 - `docs/plan/cards/WP-01A.md` («Rollback/disable»).
