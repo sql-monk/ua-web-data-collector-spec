@@ -126,6 +126,11 @@ jobs:
       - name: pytest -m integration tests/integration/postgres
         run: uv run pytest -m integration tests/integration/postgres
 
+      # WP-01D: worker runtime і singleton scheduler проти того самого сервера (окремий крок,
+      # щоб у логах було видно, який набір упав; фікстури БД спільні з postgres-набором).
+      - name: pytest -m integration tests/integration/scaling
+        run: uv run pytest -m integration tests/integration/scaling
+
   pre-commit:
     name: pre-commit (ruff, markdownlint, hygiene)
     runs-on: ubuntu-latest

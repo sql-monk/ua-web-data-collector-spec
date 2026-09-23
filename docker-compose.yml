@@ -84,11 +84,8 @@ x-collector-runtime: &collector-runtime
 # `start_interval` (Docker Engine 25+, API 1.44+; тут 29.8/1.56) вирішує обидві проблеми:
 # під час `start_period` Docker пробує кожні 5 с, тому контейнер стає healthy одразу після
 # першого успіху — `up --wait` не лише надійніший, а й ШВИДШИЙ, ніж із 30-секундним кроком.
-# TODO(WP-01D PR1, вимога 7): коли з'явиться довгоживучий worker runtime, він має віддавати
-# liveness без старту нового інтерпретатора і без звертання до БД (heartbeat-файл у tmpfs або
-# endpoint у самому процесі) — тоді цей бюджет повертається до секундних значень. Розділити
-# liveness/readiness у WP-00 не можна: §7.5 вимагає «process + критична dependency», і це
-# закріплено tests/unit/test_compose_config_adversarial.py.
+# Цей бюджет лишається для проб, які СПРАВДІ ходять у залежності (`api`, `gui`): вони
+# стартують інтерпретатор/HTTP-клієнт і чекають на відповідь компонента.
 x-healthcheck-budget: &healthcheck-budget
   interval: 30s
   timeout: 15s
@@ -96,14 +93,56 @@ x-healthcheck-budget: &healthcheck-budget
   start_interval: 5s
   retries: 5
 
+# WP-01D PR1, вимога 7 картки: довгоживучий runtime (worker/scheduler) сам оновлює mtime
+# маркера в tmpfs, а проба читає лише mtime — без старту Python і без запиту в БД (~5 мс
+# проти 2.9–6.0 с у `python -m collector.api.health`). Тому бюджет повертається до секундних
+# значень. Семантика §7.5 «process + критична dependency» розкладається так:
+#   liveness   — цей healthcheck: процес живий і його event loop не заблокований (маркер
+#                оновлює сторож lease, тож синхронний handler/дедлок роблять контейнер
+#                unhealthy без жодного запиту в БД);
+#   readiness  — `depends_on` (postgres `service_healthy`, migrate-postgres/ensure-mongo
+#                `service_completed_successfully`) + `worker_instances.status`/`last_heartbeat_at`,
+#                які бачить оператор; недоступна БД не має рестартувати worker-и — рестарт цього
+#                не лікує, а self-fencing уже зупиняє claim і скасовує активні tasks.
+# Поріг свіжості 30 с > 4 інтервалів сторожа при дефолтному lease TTL 60 с.
+x-liveness-budget: &liveness-budget
+  interval: 10s
+  timeout: 3s
+  start_period: 20s
+  start_interval: 2s
+  retries: 3
+
+x-liveness-probe: &liveness-probe
+  test:
+    - CMD-SHELL
+    - >-
+      f="$${COLLECTOR_WORKER_LIVENESS_FILE:-$${TMPDIR:-/tmp}/collector-runtime.alive}"
+      && test -f "$$f"
+      && test "$$(( $$(date +%s) - $$(stat -c %Y "$$f") ))" -lt 30
+  <<: *liveness-budget
+
 # Worker pool (§7.5/§7.6): масштабується `--scale`, тому без container_name/ports/volumes;
 # stop_grace_period ≥ 90 с — довший за bounded task shutdown (drain по SIGTERM).
+#
+# WP-01D PR1: команда `collector worker <role>` — реальний runtime (claim/lease/heartbeat/drain),
+# тому worker-у потрібен DSN. Тимчасово це той самий secret `postgres_dsn`, що й у
+# `migrate-postgres`: окремих LOGIN-ролей на компонент ще немає (§13 описує їх як group-ролі
+# NOLOGIN) — запит на них у docs/plan/deps/WP-01D-to-WP-01A.md. Rollback до placeholder-процесу
+# WP-00 без перебудови image: COLLECTOR_WORKER_PLACEHOLDER=1.
 x-worker: &worker
   <<: *collector-runtime
   profiles: [workers]
   restart: unless-stopped
   stop_grace_period: 120s
   stop_signal: SIGTERM
+  environment:
+    <<: *collector-env
+    COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn
+    # Drain має вміститись у stop_grace_period контейнера (120 с) із запасом на SIGKILL.
+    COLLECTOR_WORKER_STOP_GRACE_SECONDS: "90"
+    COLLECTOR_WORKER_PLACEHOLDER: ${COLLECTOR_WORKER_PLACEHOLDER:-0}
+  secrets:
+    - postgres_dsn
   networks:
     - backend
   labels:
@@ -113,9 +152,7 @@ x-worker: &worker
       condition: service_healthy
     migrate-postgres:
       condition: service_completed_successfully
-  healthcheck:
-    test: ["CMD", "python", "-m", "collector.api.health", "postgres"]
-    <<: *healthcheck-budget
+  healthcheck: *liveness-probe
 
 # Ліміти ресурсів (FR-030). `pids` — захист від fork-exhaustion (gate 3, SEC L-1): application
 # 256 (parse у WP-03 запускає сторонні парсери), stateful 1024. Окремі anchors для stateful, бо
@@ -390,13 +427,20 @@ services:
     deploy: *limits-medium
 
   scheduler:
-    # Singleton (§7.5): 1 replica, не масштабується (label collector.scalable=false);
-    # advisory lease — WP-01D. У WP-00 placeholder-процес.
+    # Singleton (§7.5): 1 replica, не масштабується (label collector.scalable=false).
+    # WP-01D PR1: singleton забезпечує PostgreSQL advisory lease у самому процесі, тому навіть
+    # при тимчасових двох контейнерах (recreate) планує рівно один.
     <<: *collector-runtime
     profiles: [core]
     restart: unless-stopped
     command: ["collector", "scheduler"]
     stop_grace_period: 90s
+    environment:
+      <<: *collector-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn
+      COLLECTOR_WORKER_PLACEHOLDER: ${COLLECTOR_WORKER_PLACEHOLDER:-0}
+    secrets:
+      - postgres_dsn
     networks:
       - backend
     labels:
@@ -406,9 +450,7 @@ services:
         condition: service_healthy
       migrate-postgres:
         condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "python", "-m", "collector.api.health", "postgres"]
-      <<: *healthcheck-budget
+    healthcheck: *liveness-probe
     deploy:
       <<: *limits-small
       replicas: 1
@@ -440,9 +482,6 @@ services:
         condition: service_healthy
       migrate-postgres:
         condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "python", "-m", "collector.api.health", "postgres", "minio"]
-      <<: *healthcheck-budget
     deploy:
       <<: *limits-medium
       replicas: 2
@@ -458,9 +497,6 @@ services:
         condition: service_healthy
       migrate-postgres:
         condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "python", "-m", "collector.api.health", "postgres", "minio"]
-      <<: *healthcheck-budget
     deploy:
       <<: *limits-large
       replicas: 2
@@ -477,9 +513,6 @@ services:
         condition: service_completed_successfully
       ensure-mongo:
         condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "python", "-m", "collector.api.health", "postgres", "mongo"]
-      <<: *healthcheck-budget
     deploy:
       <<: *limits-medium
       replicas: 1
@@ -508,9 +541,6 @@ services:
         condition: service_completed_successfully
       ensure-mongo:
         condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "python", "-m", "collector.api.health", "postgres", "mongo", "minio"]
-      <<: *healthcheck-budget
     deploy:
       <<: *limits-medium
       replicas: 1

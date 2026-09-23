@@ -4,7 +4,10 @@
   сервер → 1 без stdout (помилка драйвера підставляється, socket не створюється);
 - `db ensure-mongo`: ідемпотентна ініціалізація single-member replica set (фейковий клієнт);
   `--validators/--indexes` після ініціалізації — стаб WP-01B (код 2);
-- `worker <role>`/`scheduler`: placeholder-процес живий до stop/SIGTERM, код 0, стаб-рядок у stderr;
+- `worker <role>`/`scheduler`: після WP-01D PR1 це справжній runtime, а placeholder-процес
+  лишається rollback-шляхом за `COLLECTOR_WORKER_PLACEHOLDER=1` (живий до stop/SIGTERM, код 0,
+  стаб-рядок у stderr); поведінку runtime перевіряє tests/unit/workers і
+  tests/integration/scaling;
 - `api`: запускає uvicorn з factory `collector.api.health:create_app` (uvicorn — фейк).
 """
 
@@ -266,18 +269,23 @@ def test_placeholder_process_runs_until_stopped(capsys: pytest.CaptureFixture[st
 
 
 @pytest.mark.parametrize("role", [role.value for role in WorkerRole])
-def test_worker_command_is_placeholder_that_stays_alive(
+def test_worker_command_falls_back_to_placeholder_under_rollback_flag(
     role: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """WP-01D PR1: placeholder лишається rollback-шляхом за `COLLECTOR_WORKER_PLACEHOLDER=1`."""
     calls: list[tuple[str, str]] = []
+    monkeypatch.setenv("COLLECTOR_WORKER_PLACEHOLDER", "1")
     monkeypatch.setattr(cli, "placeholder_process", lambda n, o: calls.append((n, o)))
     result = runner.invoke(app, ["worker", role])
     assert result.exit_code == 0, result.output
     assert calls == [(f"worker.{role}", "WP-01D")]
 
 
-def test_scheduler_command_is_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scheduler_command_falls_back_to_placeholder_under_rollback_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, str]] = []
+    monkeypatch.setenv("COLLECTOR_WORKER_PLACEHOLDER", "1")
     monkeypatch.setattr(cli, "placeholder_process", lambda n, o: calls.append((n, o)))
     result = runner.invoke(app, ["scheduler"])
     assert result.exit_code == 0, result.output

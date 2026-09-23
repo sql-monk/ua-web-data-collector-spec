@@ -28,14 +28,25 @@ def create_engine(
     pool_size: int = 5,
     max_overflow: int = 5,
     application_name: str = "collector",
+    command_timeout: float | None = None,
 ) -> AsyncEngine:
-    """Async engine (asyncpg). `application_name` видно в `pg_stat_activity` для діагностики."""
+    """Async engine (asyncpg). `application_name` видно в `pg_stat_activity` для діагностики.
+
+    `command_timeout` (секунди) — верхня межа для **кожного** запиту на рівні драйвера. Без неї
+    запит у «чорну діру» TCP (мережевий поділ, failover) чекає до RTO ядра — десятки хвилин, —
+    і жоден таймаут у застосунку не має нижньої межі. Довгоживучі runtime-процеси (worker,
+    scheduler) задають її від свого вікна self-fencing; one-shot міграції лишають `None`, бо
+    `alembic upgrade` легально буває довгим.
+    """
+    connect_args: dict[str, object] = {"server_settings": {"application_name": application_name}}
+    if command_timeout is not None:
+        connect_args["command_timeout"] = command_timeout
     return create_async_engine(
         settings.url,
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_pre_ping=True,
-        connect_args={"server_settings": {"application_name": application_name}},
+        connect_args=connect_args,
     )
 
 

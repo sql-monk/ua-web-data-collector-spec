@@ -8,6 +8,7 @@
 - [docs/research/source-registry.yaml](docs/research/source-registry.yaml) — канонічні `source_id`, display names, домени та рейтинги всіх 70 джерел.
 - [docs/contracts.md](docs/contracts.md) — shared data contracts (WP-01C): identity/temporal/canonical serialization, `state_hash`, resolution/release, версіонування схем і ownership.
 - [docs/persistence/postgres.md](docs/persistence/postgres.md) — PostgreSQL-схема control plane (WP-01A): таблиці, transaction boundaries, партиціонування, ролі БД.
+- [docs/workers.md](docs/workers.md) — worker runtime (WP-01D): ролі й pools §7.6, lease/self-fencing/drain, liveness vs readiness, контракт `TaskHandler`, singleton scheduler, env-змінні.
 - [REVIEW.md](REVIEW.md) — результати критичного рев’ю ТЗ і виправлення.
 - [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) — план реалізації субагентами: конвеєр work packages, картки, gate-и.
 - [docs/plan/ledger.md](docs/plan/ledger.md) — стан кожного work package/під-PR у конвеєрі.

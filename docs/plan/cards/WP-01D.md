@@ -64,7 +64,7 @@ Killed replica → lease recovery іншим instance; drain під активн
 ### Вимоги (§7.5, §7.6, R-55, R-57)
 
 1. `PoolController`: звіряє desired (`worker_pools`) і current (heartbeat-derived) стан; формує `scale_commands` із idempotency key і expected revision.
-2. **Role-wide drain barrier** перед зменшенням replicas: усі instances ролі припиняють claim, повертають lease, orchestrator зменшує replicas, survivors відновлюють claim після підтвердження нової revision. Не покладатися на те, який контейнер видалить Compose/Swarm (R-57) — тест, що після `4→1` жоден task не втрачено і не дубльовано.
+2. **Role-wide drain barrier** перед зменшенням replicas (PR1 дає лише per-instance примітив — `worker_instances.drain_requested_at` зупиняє claim того instance, у якого він виставлений; «role-wide» означає, що `PoolController` зобовʼязаний виставити барʼєр **кожному** живому instance ролі й дочекатися підтвердження від усіх, перш ніж зменшувати replicas): усі instances ролі припиняють claim, повертають lease, orchestrator зменшує replicas, survivors відновлюють claim після підтвердження нової revision. Не покладатися на те, який контейнер видалить Compose/Swarm (R-57) — тест, що після `4→1` жоден task не втрачено і не дубльовано.
 3. **Compose adapter:** не має Docker socket; переводить команду в `awaiting_manual_apply` з точним CLI-рядком; `applied` лише коли heartbeat-derived replicas збігаються з desired revision.
 4. **Swarm adapter:** окремий процес `collector controller` (запускається лише на manager node); allowlist за label `collector.scalable=true`; дозволений diff — **лише** `replicas` у межах min/max; заборонено змінювати images/mounts/networks/secrets/stateful services (тест, що спроба відхиляється); читає лише committed `scale_commands` з audit link.
 5. Autoscale вимкнений за замовчуванням (Q-014); політика (queue oldest age + pending/running ratio, 3 вікна, 5-хв cooldown, min/max, окремий бюджет browser/translation) реалізована, але активується прапорцем; manual override має пріоритет.
@@ -90,6 +90,16 @@ docker compose down -v
 ## Acceptance (§17.2)
 
 «role commands, pool/instance/scale contracts, PostgreSQL origin limiter, heartbeat/drain, Compose command adapter і Swarm replica adapter; scale/rate/fault tests green».
+
+## Відомі ризики (перенесені з PR1)
+
+| Ризик | Статус | Owner | Дата |
+|---|---|---|---|
+| §13: усі 8 runtime-процесів ходять у PostgreSQL під тим самим DSN, що й міграції (роль `collector`, superuser), бо всі `collector_*` ролі — `NOLOGIN`. Радіус ураження — увесь worker pool; **блокер pilot/production і live-збору**, не блокер merge PR1 (знахідка F1 gate 2, доказ у `docs/plan/reports/WP-01D/testing-pr1.md`) | open | **WP-01A PR2** (LOGIN-ролі + per-role DSN), потім WP-01D повертає §13-інваріант у `tests/unit/test_compose_config*.py` | заведено 2026-09-23 |
+| Плановий drain на останній спробі не повертає lease одразу, а чекає експірації (немає `queue.release`) | mitigated (карантину більше немає) | WP-01A PR2 — `queue.release(job_id, owner)` | заведено 2026-09-23 |
+| Залишковий TOCTOU singleton-тіку scheduler-а: перевірка lease і сам тік ідуть різними зʼєднаннями, тому два тіки теоретично можуть перекритися. Закрито **контрактом** «тік мусить бути ідемпотентним» (докстрінги `scheduler.py`, `docs/workers.md` §6) і вартовим `test_maintenance_tick_is_safe_when_two_schedulers_overlap`, а не конструкцією — зобовʼязання лягає на майбутні доменні тіки (насамперед WP-03 `enqueue` discovery-jobs: потрібен власний ключ ідемпотентності §9.3 п.3) | mitigated (контракт + тест-вартовий) | WP-01D PR3 (fencing-токен у тіку, якщо зʼявиться неідемпотентне планування) / доменні WP | заведено 2026-09-23 |
+
+Тест-вартовий: `tests/unit/test_compose_config.py::test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire` падає, щойно в будь-якому SQL-файлі ролей зʼявиться LOGIN-роль (`CREATE ROLE … LOGIN`, `ALTER … WITH LOGIN`, `CREATE USER`; case-insensitive, коментарі ігноруються) — сам вартовий накритий зондами `::test_login_tripwire_detects_every_way_to_create_a_login_role` і `::test_login_tripwire_is_quiet_on_nologin_and_comments`.
 
 ## Rollback/disable
 

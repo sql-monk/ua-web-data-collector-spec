@@ -38,9 +38,21 @@ SECRET_CONSUMERS: dict[str, set[str]] = {
     "mongo_keyfile": {"mongo"},
     "minio_root_user": {"minio"},
     "minio_root_password": {"minio"},
-    # DSN міграційної ролі — лише one-shot `migrate-postgres` (approved dependency WP-01A;
-    # §13: migration role не використовується runtime-процесами).
-    "postgres_dsn": {"migrate-postgres"},
+    # DSN PostgreSQL: one-shot `migrate-postgres` + runtime-процеси, яким WP-01D PR1 дав
+    # реальний claim/lease (`scheduler`, усі `*-worker`). §13 хоче окремі per-component DSN —
+    # LOGIN-ролей ще немає, запит у docs/plan/deps/WP-01D-to-WP-01A.md.
+    "postgres_dsn": {
+        "migrate-postgres",
+        "scheduler",
+        "discovery-worker",
+        "fetch-worker",
+        "parse-worker",
+        "projector-worker",
+        "translation-worker",
+        "export-worker",
+        "maintenance-worker",
+        "browser-worker",
+    },
 }
 COMPONENT_NAMES = ("postgres", "mongo", "minio")
 ONE_SHOTS = {"migrate-postgres", "ensure-mongo"}
@@ -74,13 +86,22 @@ def test_each_secret_has_exactly_documented_consumers(services: dict[str, dict[s
     assert consumers == SECRET_CONSUMERS
 
 
-def test_api_and_workers_have_no_secrets_in_wp00(services: dict[str, dict[str, Any]]) -> None:
-    """У WP-00 api/workers не мають DB credentials (§13: ролі per-component додають WP-01A/B)."""
+def test_api_has_no_secrets_and_runtime_has_only_the_dsn(
+    services: dict[str, dict[str, Any]],
+) -> None:
+    """`api` без DB credentials (owner WP-11A); worker/scheduler — рівно один secret: DSN.
+
+    WP-01D PR1 замінив placeholder-процеси на runtime, який читає чергу, тому DSN їм потрібен;
+    жодних інших credentials (Mongo/MinIO) вони не отримують — це залишається least privilege.
+    """
     for name, svc in services.items():
-        if name == "api" or name.endswith("-worker") or name == "scheduler":
+        env = svc.get("environment", {})
+        if name == "api":
             assert not _secret_names(svc), f"{name}: секрети без потреби"
-            env = svc.get("environment", {})
             assert not [k for k in env if k.endswith("_FILE")], f"{name}: *_FILE без secret"
+        elif name.endswith("-worker") or name == "scheduler":
+            assert _secret_names(svc) == {"postgres_dsn"}, f"{name}: зайві секрети"
+            assert [k for k in env if k.endswith("_FILE")] == ["COLLECTOR_POSTGRES_DSN_FILE"], name
 
 
 def test_secret_file_env_points_to_mounted_secret(services: dict[str, dict[str, Any]]) -> None:
@@ -100,12 +121,33 @@ def test_secret_file_env_points_to_mounted_secret(services: dict[str, dict[str, 
 def test_application_healthchecks_name_a_critical_dependency(
     services: dict[str, dict[str, Any]],
 ) -> None:
+    """§7.5 «process + критична dependency» після WP-01D PR1 (вимога 7 картки).
+
+    Вимога ТЗ не змінилась, змінився спосіб її виконання для **довгоживучих runtime-процесів**,
+    і саме цей тест картка називає місцем, де зміну семантики треба зафіксувати. Два класи:
+
+    - `api`/`gui` — процес короткий на кожну пробу (стартує інтерпретатор/HTTP-клієнт), і сама
+      проба ходить у критичну dependency: лишається як було;
+    - worker-и і `scheduler` — довгоживучий процес, який сам оновлює mtime маркера в tmpfs.
+      Проба читає лише mtime: **liveness** (процес живий і його event loop не заблокований —
+      маркер оновлює сторож lease, тож синхронний handler чи дедлок роблять контейнер
+      unhealthy). **Readiness** для них лишається обов'язковою, але доводиться не пробою, а
+      `depends_on` (`postgres: service_healthy`, one-shots `service_completed_successfully`) —
+      контейнер узагалі не стартує, доки критична dependency не готова, — і станом
+      `worker_instances` (`status`/`last_heartbeat_at`), який бачить оператор.
+
+    Навмисний наслідок: падіння PostgreSQL більше не робить worker-контейнери unhealthy.
+    Рестарт цього не лікує (черга все одно недоступна), а self-fencing уже зупиняє claim і
+    скасовує активні tasks — див. `collector.workers.liveness`.
+    """
     for name, svc in services.items():
         if name in STATEFUL | ONE_SHOTS:
             continue
-        test = svc["healthcheck"]["test"]
+        healthcheck = svc["healthcheck"]
+        test = healthcheck["test"]
         joined = " ".join(map(str, test))
-        assert test[0] == "CMD", f"{name}: healthcheck має бути exec-формою CMD"
+        assert test[0] in {"CMD", "CMD-SHELL"}, f"{name}: healthcheck має бути exec-формою"
+        assert healthcheck["retries"] >= 3 and healthcheck["timeout"], name
         if name == "api":
             # api: HTTP до власного health endpoint, який перевіряє всі три компоненти
             # і віддає 200 лише за ready (503 інакше) — залежність перевіряється через нього.
@@ -115,24 +157,38 @@ def test_application_healthchecks_name_a_critical_dependency(
             # gui (WP-00 PR3): критична dependency — api через same-origin proxy; БД і
             # object store gui не бачить узагалі (мережі ingress+frontend, §13).
             assert "/api/v1/health/components" in joined, name
-            assert svc["healthcheck"]["retries"] >= 3 and svc["healthcheck"]["timeout"], name
             continue
-        assert any(component in joined for component in COMPONENT_NAMES), (
-            f"{name}: healthcheck не перевіряє критичну dependency (§7.5)"
+        assert name.endswith("-worker") or name == "scheduler", f"{name}: новий клас сервісу?"
+        assert "alive" in joined and "stat" in joined, (
+            f"{name}: liveness-проба має читати mtime маркера процесу, а не стартувати Python"
         )
-        if name.endswith("-worker") or name == "scheduler":
-            assert "postgres" in joined, f"{name}: черга/lease живуть у PostgreSQL"
-        assert svc["healthcheck"]["retries"] >= 3 and svc["healthcheck"]["timeout"], name
+        assert "python" not in joined.lower(), f"{name}: проба не має стартувати інтерпретатор"
+        assert not any(component in joined for component in COMPONENT_NAMES), (
+            f"{name}: liveness-проба не має ходити в залежності — це робить depends_on"
+        )
+        # Readiness довгоживучого runtime: критична dependency — у depends_on, не в пробі.
+        conditions = {dep: cfg["condition"] for dep, cfg in svc["depends_on"].items()}
+        assert conditions.get("postgres") == "service_healthy", f"{name}: черга живе в PG"
+        assert conditions.get("migrate-postgres") == "service_completed_successfully", name
 
 
-def test_projector_export_check_mongo_fetch_parse_export_check_minio(
+def test_worker_readiness_dependencies_are_declared_in_depends_on(
     services: dict[str, dict[str, Any]],
 ) -> None:
-    """§7.6: projector/export пишуть у Mongo; fetch/parse/export працюють з raw bucket."""
+    """§7.6: projector/export пишуть у Mongo; fetch/parse/export працюють з raw bucket.
+
+    Раніше це доводила healthcheck-проба кожного worker-а; після WP-01D PR1 (вимога 7) проба
+    стала liveness-only, тому та сама вимога перевіряється там, де вона тепер живе, — у
+    `depends_on`: контейнер не стартує, поки залежність не healthy, а one-shot ініціалізації
+    не завершився успішно.
+    """
     for name in ("projector-worker", "export-worker"):
-        assert "mongo" in services[name]["healthcheck"]["test"], name
+        conditions = {dep: cfg["condition"] for dep, cfg in services[name]["depends_on"].items()}
+        assert conditions.get("mongo") == "service_healthy", name
+        assert conditions.get("ensure-mongo") == "service_completed_successfully", name
     for name in ("fetch-worker", "parse-worker", "export-worker"):
-        assert "minio" in services[name]["healthcheck"]["test"], name
+        conditions = {dep: cfg["condition"] for dep, cfg in services[name]["depends_on"].items()}
+        assert conditions.get("minio") == "service_healthy", name
 
 
 # --- drain-контракт workers (§7.5) -----------------------------------------------------------
