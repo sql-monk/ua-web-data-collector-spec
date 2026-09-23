@@ -890,3 +890,59 @@ def test_ci_runs_gui_runtime_tests_against_live_stack() -> None:
     build_at = next(i for i, r in enumerate(web_runs) if "npm run build" in r)
     test_build_at = next(i for i, r in enumerate(web_runs) if "npm run test:build" in r)
     assert build_at < test_build_at
+
+
+# --- бюджет healthcheck (CI PR #4) -----------------------------------------------------------
+
+# Мінімуми, виведені з виміру вартості проби на CPU-обмеженому runner-і (див. коментар до
+# anchor `x-healthcheck-budget` у docker-compose.yml): проба піднімає повний Python і йде в
+# БД, на 0.25 CPU це ~6 с. Значення нижчі за ці знову зроблять job `docker` флакі.
+MIN_HEALTHCHECK_TIMEOUT_S = 15
+MIN_HEALTHCHECK_START_PERIOD_S = 60
+MIN_HEALTHCHECK_RETRIES = 5
+MAX_HEALTHCHECK_START_INTERVAL_S = 10
+
+
+def test_application_healthcheck_budget_survives_parallel_start(
+    services: dict[str, dict[str, Any]],
+) -> None:
+    """CI PR #4: job `docker` падав відтворювано, щоразу на іншому контейнері.
+
+    Причина — не конкретний сервіс, а спільний бюджет: `timeout: 5s` на пробу, яка коштує
+    ~6 с при 0.25 CPU, і `start_period: 15s` при `interval: 30s` (перша проба виконувалась
+    уже ПІСЛЯ grace-періоду, тож її невдача одразу йшла в залік `retries`).
+    """
+    application = {name for name, svc in services.items() if name not in STATEFUL} - ONE_SHOTS
+    assert application, "немає application-сервісів"
+    for name in sorted(application):
+        healthcheck = services[name]["healthcheck"]
+        assert _seconds(healthcheck["timeout"]) >= MIN_HEALTHCHECK_TIMEOUT_S, name
+        assert _seconds(healthcheck["start_period"]) >= MIN_HEALTHCHECK_START_PERIOD_S, name
+        assert healthcheck["retries"] >= MIN_HEALTHCHECK_RETRIES, name
+        # `start_interval` (Docker 25+/API 1.44+): без нього перша проба чекала б цілий
+        # `interval`, і `start_period` не давав би нічого.
+        assert "start_interval" in healthcheck, f"{name}: немає start_interval"
+        assert _seconds(healthcheck["start_interval"]) <= MAX_HEALTHCHECK_START_INTERVAL_S, name
+        assert _seconds(healthcheck["start_interval"]) < _seconds(healthcheck["interval"]), name
+
+
+def test_healthcheck_budget_is_defined_once(compose: dict[str, Any]) -> None:
+    """Бюджет задається одним anchor — інакше він розійдеться між сервісами при правці."""
+    text = COMPOSE_PATH.read_text(encoding="utf-8")
+    assert "x-healthcheck-budget: &healthcheck-budget" in text
+    # Реальна властивість «задано один раз» — це не кількість входжень `<<:` (частина
+    # worker-ів успадковує бюджет транзитивно через anchor `x-worker`), а те, що ЖОДЕН
+    # application-сервіс не має власних чисел: усі таймінги збігаються побайтово.
+    services = compose["services"]
+    application = {n for n in services if n not in STATEFUL} - ONE_SHOTS
+    budgets = {
+        name: tuple(
+            str(services[name]["healthcheck"].get(key))
+            for key in ("interval", "timeout", "start_period", "start_interval", "retries")
+        )
+        for name in application
+    }
+    assert len(set(budgets.values())) == 1, f"бюджет розійшовся між сервісами: {budgets}"
+    # Вимір, на якому тримаються числа, лишається у файлі: без нього наступний рев'юер
+    # побачить «магічні» 15/90 і поверне їх назад.
+    assert "0.25 CPU" in text and "start_interval" in text

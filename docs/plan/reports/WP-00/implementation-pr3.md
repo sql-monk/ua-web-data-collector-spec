@@ -810,3 +810,142 @@ $ docker compose down -v                                      exit=0
 - `apk upgrade` робить збірку образу невідтворюваною побайтово у часі — свідомий обмін
   (§13); якщо це стане проблемою для release-пайплайну, альтернатива — власний base image з
   періодичним оновленням digest (owner WP-14).
+
+---
+
+## Виправлення після CI PR #4
+
+Симптом: job `docker` падав **відтворювано** (2 з 2 прогонів), щоразу на іншому контейнері —
+`collector-scheduler-1 is unhealthy`, потім `collector-maintenance-worker-1 is unhealthy`.
+Решта job-ів (`web`, `python`, `integration`, `pre-commit`, `gitleaks`) — зелені. Те, що
+«винуватець» щоразу інший, одразу виключає дефект конкретного сервісу: спільним у них є
+лише бюджет healthcheck.
+
+### Підтвердження діагнозу виміром
+
+Кожна проба application-сервісу — це `python -m collector.api.health <deps>`, тобто **повний
+старт інтерпретатора** і лише потім з'єднання з БД. Вартість заміряна на `collector:dev`
+(`docker run --cpus=N`, 3 прогони, середнє; включно з ~1.9 с накладних самого `docker run`,
+які на CI не виникають, але дають запас):
+
+| CPU-квота | `python -c pass` (лише інтерпретатор) | повна проба `health postgres` |
+|---|---|---|
+| 1.00 | 2.03 с | **2.93 с** |
+| 0.50 | 1.67 с | **4.06 с** |
+| 0.25 | 1.96 с | **6.02 с** |
+
+На 2-ядерному GitHub-runner-і 17 контейнерів стартують одночасно, тож фактична частка CPU на
+контейнер помітно менша за 0.25 — колишній `timeout: 5s` проба не вкладалась **у принципі**,
+а не через випадковий сплеск.
+
+Друга, окрема пастка старих значень: `start_period: 15s` при `interval: 30s` не давав
+**нічого**. Docker виконує першу пробу приблизно через `interval` після старту, тобто на
+~30-й секунді — уже після кінця grace-періоду, тому її невдача одразу йшла в залік `retries`.
+Фактично контейнери працювали зовсім без стартової пільги.
+
+### Що змінено
+
+Один спільний anchor `x-healthcheck-budget` у `docker-compose.yml` замість шести копій чисел:
+
+| Параметр | Було | Стало | Чому |
+|---|---|---|---|
+| `timeout` | 5s | **15s** | найдовша реальна проба під навантаженням — 8.61 с (вимір нижче); 15 с дає ~43% запасу |
+| `start_period` | 15s | **90s** | старт 17 контейнерів на 2 ядрах; має перекривати кілька проб, а не закінчуватись до першої |
+| `retries` | 3 | **5** | одна невдала проба під сплеском навантаження не має валити стек |
+| `start_interval` | — | **5s** | Docker 25+/API 1.44+ (тут 29.8/1.56): під час `start_period` пробувати кожні 5 с |
+| `interval` | 30s | 30s | без змін — у сталому режимі часті проби лише палили б CPU |
+
+`start_interval` — ключова частина: він одночасно робить старт **надійнішим і швидшим**,
+бо контейнер стає healthy одразу після першого успіху, а не чекає повного 30-секундного
+кроку. Це видно у вимірі циклів нижче (~30 с проти ~40–60 с раніше).
+
+Бюджет застосовано до всіх 11 application-сервісів (7 workers + `browser-worker` +
+`scheduler` + `api` + `gui`). `api` теж отримав його, бо його проба — це так само
+`python -c` зі стартом інтерпретатора; `gui` — бо його проба є **readiness** і ходить до
+`api` через `auth_request`. Stateful (`postgres`/`mongo`/`minio`) не чіпав: їхні проби
+дешеві (`pg_isready`, `curl`, `mongosh`), а таймінги вже відкалібровані у PR2 і в падіннях
+CI не фігурували.
+
+### Дешевша проба — свідомо НЕ в цьому PR
+
+Спокуса зробити `--liveness`-режим без звертання до БД велика (це зняло б ~4 с з 6 с при
+0.25 CPU), але це **зміна семантики**, а не оптимізація: §7.5 прямо вимагає, щоб healthcheck
+перевіряв «process + критичну dependency», і вимога закріплена тестом
+`tests/unit/test_compose_config_adversarial.py::test_application_healthchecks_name_a_critical_dependency`.
+Крім того, дешевий liveness має сенс лише для **довгоживучого** процесу, який може віддати
+heartbeat без старту інтерпретатора, — а такого runtime у WP-00 ще немає (зараз worker-и це
+placeholder-процеси).
+
+Тому: TODO-коментар над anchor у `docker-compose.yml` і нова **вимога 7 у
+`docs/plan/cards/WP-01D.md`, розділ PR1** — з цим самим виміром, щоб власник runtime знав
+і числа, і причину, і що бюджет можна повернути до секундних значень після реалізації.
+
+### Регресійний тест
+
+`tests/unit/test_compose_config.py`:
+
+- `test_application_healthcheck_budget_survives_parallel_start` — мінімуми `timeout ≥ 15s`,
+  `start_period ≥ 60s`, `retries ≥ 5`, наявність `start_interval ≤ 10s` і `start_interval <
+  interval` для кожного application-сервісу;
+- `test_healthcheck_budget_is_defined_once` — усі application-сервіси мають **побайтово
+  однаковий** набір таймінгів (перевіряється саме ця властивість, а не кількість входжень
+  `<<:`, бо частина worker-ів успадковує бюджет транзитивно через anchor `x-worker`), і що
+  вимір (`0.25 CPU`) лишився в коментарі — інакше наступний рев'юер побачить «магічні» числа
+  і поверне їх назад.
+
+### Перевірка
+
+Три повні цикли `down -v` → `up -d --wait` → `check-healthy` → `down -v`:
+
+```text
+цикл 1: up rc=0 за 31 с | all 17 containers healthy or exited 0
+цикл 2: up rc=0 за 29 с | all 17 containers healthy or exited 0
+цикл 3: up rc=0 за 31 с | all 17 containers healthy or exited 0
+```
+
+Стенд, який навмисно жорсткіший за CI, — **0.15 CPU на кожен з 13 application-контейнерів**
+(override поверх базового файлу):
+
+```text
+CPU-starve (0.15 CPU/сервіс): rc=0 за 52 с
+all 17 containers healthy or exited 0
+```
+
+Фактична тривалість проб у цьому прогоні (з `docker inspect .State.Health`):
+
+```text
+collector-export-worker-1      healthy   8.61 с   <- найгірша
+collector-fetch-worker-1       healthy   8.13 с
+collector-projector-worker-1   healthy   8.11 с
+collector-maintenance-worker-1 healthy   8.00 с
+collector-scheduler-1          healthy   7.24 с
+collector-api-1                healthy   4.81 с
+collector-gui-1                healthy   0.06 с   (busybox wget — дешева проба)
+collector-postgres-1           healthy   0.09 с
+максимум по стеку: 8.61 с при timeout 15 с
+```
+
+Тобто під навантаженням, помітно важчим за CI, найдовша проба (8.61 с) **перевищила б старий
+`timeout: 5s`** — і це рівно той режим відмови, який ловив CI. З новим бюджетом запас ~43%.
+
+Решта перевірок після зміни:
+
+```text
+uv run ruff check . / ruff format --check . / mypy src   -> чисто
+uv run pytest -m "not live" -q                           -> 761 passed, 23 skipped
+docker compose config --quiet                            exit=0
+docker compose up -d --wait (core+workers+gui)           exit=0
+check-healthy                                            all 17 containers healthy or exited 0
+COLLECTOR_E2E_REQUIRED=1 uv run pytest -m e2e tests/e2e   25 passed
+docker compose down -v                                   exit=0
+uv run pre-commit run --all-files                        усі hooks Passed
+```
+
+### Що лишилось неперевіреним
+
+- фактичний прогін job `docker` на GitHub-runner-і — `operationally unverified` до наступного
+  push; локальний стенд відтворює механізм відмови (проба > `timeout`), але не саме
+  оточення runner-а;
+- `start_interval` вимагає Docker Engine 25+/API 1.44+; на старіших движках поле буде
+  проігноровано, і старт повернеться до кроку `interval` (працюватиме, але повільніше).
+  Мінімальну версію Docker у `docs/runbooks/clean-host-start.md` (27+) це не порушує.

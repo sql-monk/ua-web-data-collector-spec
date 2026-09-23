@@ -68,6 +68,34 @@ x-collector-runtime: &collector-runtime
     COLLECTOR_MINIO_URL: http://minio:9000
   logging: *logging
 
+# Бюджет healthcheck для application-сервісів (`collector`/`collector-gui`).
+#
+# Чому такі числа (CI PR #4, job `docker` падав відтворювано — щоразу на іншому контейнері):
+# кожна проба піднімає ПОВНИЙ Python-інтерпретатор і лише потім з'єднується з БД. Заміряно
+# `docker run --cpus=N collector:dev …` (3 прогони, медіана, разом з ~1.9 с накладних
+# `docker run`): 1.0 CPU — 2.9 с, 0.5 CPU — 4.1 с, 0.25 CPU — 6.0 с. На 2-ядерному
+# GitHub-runner-і 17 контейнерів стартують одночасно, тобто частка CPU на контейнер значно
+# менша за 0.25 — колишній `timeout: 5s` проба не вкладалась у принципі.
+#
+# Окрема пастка старих значень: `start_period: 15s` при `interval: 30s` не давав НІЧОГО —
+# перша проба виконувалась приблизно на 30-й секунді, тобто вже після кінця grace-періоду,
+# і її невдача одразу йшла в залік `retries`.
+#
+# `start_interval` (Docker Engine 25+, API 1.44+; тут 29.8/1.56) вирішує обидві проблеми:
+# під час `start_period` Docker пробує кожні 5 с, тому контейнер стає healthy одразу після
+# першого успіху — `up --wait` не лише надійніший, а й ШВИДШИЙ, ніж із 30-секундним кроком.
+# TODO(WP-01D PR1, вимога 7): коли з'явиться довгоживучий worker runtime, він має віддавати
+# liveness без старту нового інтерпретатора і без звертання до БД (heartbeat-файл у tmpfs або
+# endpoint у самому процесі) — тоді цей бюджет повертається до секундних значень. Розділити
+# liveness/readiness у WP-00 не можна: §7.5 вимагає «process + критична dependency», і це
+# закріплено tests/unit/test_compose_config_adversarial.py.
+x-healthcheck-budget: &healthcheck-budget
+  interval: 30s
+  timeout: 15s
+  start_period: 90s
+  start_interval: 5s
+  retries: 5
+
 # Worker pool (§7.5/§7.6): масштабується `--scale`, тому без container_name/ports/volumes;
 # stop_grace_period ≥ 90 с — довший за bounded task shutdown (drain по SIGTERM).
 x-worker: &worker
@@ -87,10 +115,7 @@ x-worker: &worker
       condition: service_completed_successfully
   healthcheck:
     test: ["CMD", "python", "-m", "collector.api.health", "postgres"]
-    interval: 30s
-    timeout: 5s
-    start_period: 15s
-    retries: 3
+    <<: *healthcheck-budget
 
 # Ліміти ресурсів (FR-030). `pids` — захист від fork-exhaustion (gate 3, SEC L-1): application
 # 256 (parse у WP-03 запускає сторонні парсери), stateful 1024. Окремі anchors для stateful, бо
@@ -360,10 +385,8 @@ services:
           import sys, urllib.request
           with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health/components", timeout=5) as r:
               sys.exit(0 if r.status == 200 else 1)
-      interval: 15s
-      timeout: 8s
-      start_period: 20s
-      retries: 3
+      # Той самий бюджет: проба api — теж `python -c`, тобто повний старт інтерпретатора.
+      <<: *healthcheck-budget
     deploy: *limits-medium
 
   scheduler:
@@ -385,10 +408,7 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "collector.api.health", "postgres"]
-      interval: 30s
-      timeout: 5s
-      start_period: 15s
-      retries: 3
+      <<: *healthcheck-budget
     deploy:
       <<: *limits-small
       replicas: 1
@@ -422,10 +442,7 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "collector.api.health", "postgres", "minio"]
-      interval: 30s
-      timeout: 5s
-      start_period: 15s
-      retries: 3
+      <<: *healthcheck-budget
     deploy:
       <<: *limits-medium
       replicas: 2
@@ -443,10 +460,7 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "collector.api.health", "postgres", "minio"]
-      interval: 30s
-      timeout: 5s
-      start_period: 15s
-      retries: 3
+      <<: *healthcheck-budget
     deploy:
       <<: *limits-large
       replicas: 2
@@ -465,10 +479,7 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "collector.api.health", "postgres", "mongo"]
-      interval: 30s
-      timeout: 5s
-      start_period: 15s
-      retries: 3
+      <<: *healthcheck-budget
     deploy:
       <<: *limits-medium
       replicas: 1
@@ -499,10 +510,7 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "collector.api.health", "postgres", "mongo", "minio"]
-      interval: 30s
-      timeout: 5s
-      start_period: 15s
-      retries: 3
+      <<: *healthcheck-budget
     deploy:
       <<: *limits-medium
       replicas: 1
@@ -594,10 +602,9 @@ services:
         - --quiet
         - --spider
         - http://127.0.0.1:8080/api/v1/health/components
-      interval: 15s
-      timeout: 5s
-      start_period: 10s
-      retries: 3
+      # Проба сама по собі дешева (busybox wget), але це readiness: вона ходить до api
+      # через auth_request, тому успадковує той самий бюджет, що й api.
+      <<: *healthcheck-budget
     deploy: *limits-small
 
   # observability (profile observability) — WP-12: otel-collector, prometheus, grafana, loki у
