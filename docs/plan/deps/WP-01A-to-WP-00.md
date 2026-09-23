@@ -5,7 +5,7 @@
 | Від | WP-01A PR1 (`wp/01a-1-control-queue`) |
 | До | WP-00 (owner `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `docker-compose.yml`/`Dockerfile` PR2) |
 | Файли | `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `tests/unit/test_foundation_config.py`, а після rebase на WP-00 PR2 ще `tests/unit/test_cli_compose_commands.py`, `tests/unit/test_health_adversarial.py`, `tests/unit/test_compose_config.py` (змінено в branch WP-01A за прецедентом WP-01C), `docker-compose.yml` (запит), `Dockerfile` (запит) |
-| Стан | п.1 — **resolved**: підтверджено оркестратором на gate 2 як owner-рішення (звіт `docs/plan/reports/WP-01A/testing-pr1.md`, знахідка L-3); п.2–3 — open, для WP-00 PR2 |
+| Стан | п.1 — **resolved**: підтверджено оркестратором на gate 2 як owner-рішення (звіт `docs/plan/reports/WP-01A/testing-pr1.md`, знахідка L-3); п.2–3 — open, для WP-00 PR2; п.4 (WP-01A PR2: DSN-секрети per component) — open |
 
 ## 1. CLI-контракт: `db migrate` більше не стаб, група `db` має підкоманду `roles`
 
@@ -86,3 +86,38 @@ WP-00 за цим пунктом не потрібно.
 cwd/пакета. Image має або `COPY alembic.ini migrations/ /app/` (з `WORKDIR /app`), або
 `ENV COLLECTOR_ALEMBIC_INI=/app/alembic.ini` з відповідним `COPY`; `migrations/postgres`
 резолвиться відносно каталогу `alembic.ini`.
+
+## 4. PR2 (`wp/01a-2-artifacts-projection`): DSN-секрети per component і `db roles --with-login` — open
+
+Контекст: dependency `docs/plan/deps/WP-01D-to-WP-01A.md` §2 (F1 gate 2 WP-01D — усі runtime-процеси
+ходять у PostgreSQL superuser-роллю міграцій). WP-01A PR2 зробив свою частину: команда
+`collector db roles --with-login [--secrets-dir DIR]` робить сім runtime-ролей LOGIN-ролями, а
+пароль кожної бере з DSN-секрету компонента. Лишилися файли, яких WP-01A торкатися не може
+(`deploy/compose/secrets/init-secrets.sh`, `*.example`, `docker-compose.yml` — owner WP-00):
+
+1. **`init-secrets.sh`**: згенерувати сім нових секретів `postgres_dsn_<component>` —
+   `scheduler`, `fetcher`, `parser`, `projector`, `translation`, `api_ro`, `export_ro`. Формат —
+   той самий, що в `postgres_dsn`, але користувач = роль і **власний** випадковий пароль:
+
+   ```text
+   postgresql://collector_<component>:<random_hex_48>@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-collector}
+   ```
+
+   Пароль — лише printable ASCII (hex із `random_hex` підходить; інакше `db roles` відмовить:
+   verifier рахується без SASLprep). Окремі файли паролів не потрібні: джерело істини — сам DSN,
+   `db roles --with-login` читає з нього пароль і ставить ролі SCRAM verifier. Відповідні
+   `postgres_dsn_<component>.example` без секретів (плейсхолдер) — для циклу `for example in *.example`.
+2. **`docker-compose.yml`, one-shot `migrate-postgres`**: `collector db migrate && collector db
+   roles --with-login` і змонтувати йому **всі сім** `postgres_dsn_<component>` (разом із
+   `postgres_dsn` міграційної ролі). Каталог секретів типово `/run/secrets`
+   (`COLLECTOR_POSTGRES_ROLE_SECRETS_DIR` перевизначає). Без будь-якого з файлів команда
+   завершується exit 1 і нічого не змінює — тобто неповний набір секретів видно одразу.
+3. **Runtime-сервіси** (`scheduler`, `worker-*`, `api`, експортер): кожен монтує **свій**
+   `postgres_dsn_<component>` як `COLLECTOR_POSTGRES_DSN_FILE` замість спільного
+   `postgres_dsn`. Це координується з WP-01D (власник worker/scheduler-сервісів і тест-вартового
+   `test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire`) — див.
+   `docs/plan/deps/WP-01A-to-WP-01D.md`.
+
+Нічого з цього не ламає поточний stack: поки секретів немає, `collector db roles` без
+`--with-login` працює як у PR1, а runtime лишається на `postgres_dsn` (відоме відхилення §13,
+записане у WP-01D).
