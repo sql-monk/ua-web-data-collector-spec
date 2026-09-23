@@ -262,7 +262,13 @@ def test_readiness_waits_for_one_shots(services: dict[str, dict[str, Any]]) -> N
 
 
 def test_one_shot_commands_match_spec_16_2(services: dict[str, dict[str, Any]]) -> None:
-    assert services["migrate-postgres"]["command"] == ["collector", "db", "migrate"]
+    # WP-00 PR4: `db migrate`, потім `db roles --with-login` (GRANT + LOGIN ролей §13) —
+    # деталі в tests/unit/test_secrets_role_dsn.py.
+    assert services["migrate-postgres"]["command"] == [
+        "sh",
+        "-c",
+        "collector db migrate && exec collector db roles --with-login",
+    ]
     assert services["ensure-mongo"]["command"] == ["collector", "db", "ensure-mongo"]
     assert services["api"]["command"] == ["collector", "api"]
 
@@ -342,24 +348,56 @@ def test_postgres_init_scripts_are_mounted_read_only_for_wp_01a(
 ) -> None:
     """Approved dependency WP-01A: NOLOGIN group-ролі §13 при першому старті кластера.
 
-    Після merge WP-01A PR1 каталог містить `01-roles.sql` (створення ролей). Тест стежить, щоб
-    у initdb не потрапило те, що туди не можна: GRANT (потребує таблиць, які зʼявляються лише
-    після `collector db migrate`) і будь-які паролі/LOGIN-ролі.
+    Після merge WP-01A PR1 каталог містить `01-roles.sql` (створення ролей), після WP-00 PR4 —
+    ще `02-revoke-public.sql` (права PUBLIC на рівні БД). Тест стежить, щоб у initdb не
+    потрапило те, що туди не можна: GRANT на обʼєкти БД (потребує таблиць, які зʼявляються лише
+    після `collector db migrate`), членство в ролях і будь-які паролі/LOGIN-ролі. Єдиний
+    дозволений GRANT — `GRANT CONNECT ON DATABASE` (право на рівні кластера, не на таблиці).
     """
     mounts = [str(v) for v in services["postgres"]["volumes"]]
     assert "./deploy/compose/postgres/init:/docker-entrypoint-initdb.d:ro" in mounts
     init_dir = REPO_ROOT / "deploy" / "compose" / "postgres" / "init"
     assert init_dir.is_dir() and (init_dir / "README.md").is_file()
     scripts = sorted(path.name for path in init_dir.glob("*.sql"))
-    assert scripts == ["01-roles.sql"], scripts
-    body = (init_dir / "01-roles.sql").read_text(encoding="utf-8")
-    assert "CREATE ROLE %I NOLOGIN" in body
-    # Перевіряємо виконуваний SQL, не коментарі (вони пояснюють, де живе повний скрипт).
-    statements = " ".join(
-        line for line in body.splitlines() if not line.lstrip().startswith("--")
-    ).replace("NOLOGIN", "")
-    for forbidden in ("GRANT", "PASSWORD", "ALTER TABLE", "ALTER FUNCTION"):
-        assert forbidden not in statements, forbidden
+    assert scripts == ["01-roles.sql", "02-revoke-public.sql"], scripts
+    # Ні `*.sh`: entrypoint виконав би його з правами superuser без жодного з цих вартових.
+    assert not list(init_dir.glob("*.sh"))
+    assert "CREATE ROLE %I NOLOGIN" in (init_dir / "01-roles.sql").read_text(encoding="utf-8")
+    for script in scripts:
+        # Перевіряємо виконуваний SQL, не коментарі (вони пояснюють, де живе повний скрипт).
+        statements = _strip_sql_comments((init_dir / script).read_text(encoding="utf-8"))
+        upper = statements.upper().replace("NOLOGIN", "")
+        for forbidden in ("PASSWORD", "LOGIN", "ALTER TABLE", "ALTER FUNCTION", "ALTER ROLE"):
+            assert forbidden not in upper, f"{script}: {forbidden}"
+        for grant in re.finditer(r"(?i)\bgrant\b", statements):
+            tail = statements[grant.end() :]
+            assert re.match(r"(?i)\s+connect\s+on\s+database\s+%I\s+to\s+%I'", tail), (
+                f"{script}: дозволено лише GRANT CONNECT ON DATABASE, не {tail[:60]!r}"
+            )
+        assert not re.search(r"(?i)\bto\s+public\b", statements), f"{script}: GRANT … TO PUBLIC"
+
+
+def test_postgres_init_revokes_public_on_app_and_service_databases() -> None:
+    """WP-00 PR4 (security-pr2.md I-2): PUBLIC не має CONNECT/TEMP на БД кластера.
+
+    БД застосунку — `current_database()` (POSTGRES_DB, а не захардкоджений `collector`);
+    CONNECT повертається явно лише group-ролям §13 (тим самим, що створює `01-roles.sql`),
+    TEMPORARY — нікому.
+    """
+    init_dir = REPO_ROOT / "deploy" / "compose" / "postgres" / "init"
+    sql = _strip_sql_comments((init_dir / "02-revoke-public.sql").read_text(encoding="utf-8"))
+    assert "REVOKE CONNECT, TEMPORARY ON DATABASE %I FROM PUBLIC', current_database()" in sql
+    assert "REVOKE ALL ON DATABASE %I FROM PUBLIC" in sql
+    assert "ARRAY['postgres', 'template1']" in sql
+    assert "GRANT CONNECT ON DATABASE %I TO %I', current_database(), role_name" in sql
+    roles = re.findall(r"'(collector_\w+)'", sql)
+    created = re.findall(
+        r"'(collector_\w+)'",
+        _strip_sql_comments((init_dir / "01-roles.sql").read_text(encoding="utf-8")),
+    )
+    assert roles == created and len(roles) == 8, roles
+    # TEMP(ORARY) згадується рівно один раз — у REVOKE; жодного GRANT TEMP.
+    assert len(re.findall(r"(?i)\btemp(?:orary)?\b", sql)) == 1
 
 
 def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
@@ -374,7 +412,20 @@ def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
     """
     assert "postgres_dsn" in compose["secrets"]
     migrate = services["migrate-postgres"]
-    assert migrate["secrets"] == ["postgres_dsn"]
+    # WP-00 PR4: плюс сім per-role DSN, з яких `db roles --with-login` бере паролі ролей.
+    assert migrate["secrets"][0] == "postgres_dsn"
+    assert {s for s in migrate["secrets"] if s != "postgres_dsn"} == {
+        f"postgres_dsn_{c}"
+        for c in (
+            "scheduler",
+            "fetcher",
+            "parser",
+            "projector",
+            "translation",
+            "api_ro",
+            "export_ro",
+        )
+    }
     assert migrate["environment"]["COLLECTOR_POSTGRES_DSN_FILE"] == "/run/secrets/postgres_dsn"
     allowed = {"migrate-postgres", "scheduler"} | WORKERS
     for name, svc in services.items():
@@ -382,9 +433,7 @@ def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
             s if isinstance(s, str) else s["source"] for s in svc.get("secrets", [])
         ]
         assert holds_dsn == (name in allowed), name
-    # `collector db roles` ще немає в main — у compose лише коментар-нагадування.
-    assert migrate["command"] == ["collector", "db", "migrate"]
-    assert "collector db roles" in COMPOSE_PATH.read_text(encoding="utf-8")
+    assert migrate["command"][-1].endswith("collector db roles --with-login")
 
 
 ROLE_SQL_PATHS = (
