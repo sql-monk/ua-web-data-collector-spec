@@ -27,7 +27,7 @@ boot → verify DB login (§13) → register(starting) → readiness → ready �
   role-wide барʼєр контролера (PR3). Барʼєр перевіряється і в самій транзакції claim під
   `FOR SHARE`, тож після коміту `mark_draining` жоден claim цього instance нової job не візьме;
 - **власна LOGIN-роль БД** (§13): перший запит `_boot` — `verify_component_login`; superuser,
-  член `collector_migrate` чи роль чужого компонента → `RoleLoginError` до реєстрації і claim;
+  член міграційної ролі чи роль чужого компонента → `RoleLoginError` до реєстрації і claim;
 - **SIGKILL — fault case**: при скасуванні (`asyncio.CancelledError`) runtime не повертає
   leases і не пише `stopped` — саме так поводиться вбитий контейнер; lease підбирає
   `recover_expired_leases` іншого instance після експірації.

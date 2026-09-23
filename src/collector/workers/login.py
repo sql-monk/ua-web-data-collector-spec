@@ -4,7 +4,7 @@
 `postgres_dsn_<component>`. Перед першим claim/lease процес переконується, що підключився:
 
 1. runtime-роллю без зайвих прав — `verify_runtime_login` WP-01A (не superuser, не член
-   `collector_migrate`/привілейованих вбудованих ролей);
+   міграційної ролі чи привілейованих вбудованих ролей);
 2. **саме своєю** роллю за мапінгом `collector.workers.roles` — DSN чужого компонента
    (fetch-worker під `collector_parser`) теж помилка конфігурації.
 
