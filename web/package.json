@@ -17,7 +17,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:build": "vitest run tests/unit/build-contract.test.ts",
+    "test:build": "vitest run tests/unit/build-contract.test.ts --mode build-contract",
     "test:e2e": "playwright test"
   },
   "dependencies": {

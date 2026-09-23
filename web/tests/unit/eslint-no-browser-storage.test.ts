@@ -28,7 +28,9 @@ beforeAll(async () => {
   ruleConfig = Object.fromEntries(
     STORAGE_RULES.map((rule) => [rule, config.rules?.[rule]]),
   ) as Partial<Linter.RulesRecord>;
-});
+  // Таймаут — саме у хука: опція `timeout` на `describe` покриває тести, але не
+  // `beforeAll`, а холодний кеш TS тут коштує десятки секунд (код-рев'ю L-2).
+}, 180_000);
 
 function lint(code: string): Linter.LintMessage[] {
   return new Linter().verify(code, { rules: ruleConfig });
@@ -36,7 +38,7 @@ function lint(code: string): Linter.LintMessage[] {
 
 // Файл запускає ESLint програмно з type-aware конфігом: на холодному кеші TS це десятки
 // секунд. Таймаути підняті точково тут, а не глобально у vite.config.ts (код-рев'ю L-2).
-describe('ESLint-заборона browser storage (§13)', { timeout: 120_000 }, () => {
+describe('ESLint-заборона browser storage (§13)', { timeout: 180_000 }, () => {
   it('правила ввімкнені як error для src/', () => {
     for (const rule of STORAGE_RULES) {
       const entry = ruleConfig[rule];

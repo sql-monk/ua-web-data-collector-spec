@@ -588,11 +588,91 @@ def test_ci_health_assert_parses_ps_json_not_grep() -> None:
     assert (REPO_ROOT / "deploy" / "compose" / "check-healthy.py").is_file()
 
 
+def _pytest_invocations(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Кроки job-а, які запускають pytest, разом з їхнім env."""
+    return [s for s in job["steps"] if "pytest" in s.get("run", "")]
+
+
+def _marker_selector(run: str) -> str:
+    """Вираз після `-m` у команді pytest."""
+    match = re.search(r'-m\s+"([^"]+)"', run)
+    assert match, run
+    return match.group(1)
+
+
 def test_ci_python_job_shows_skips() -> None:
     """CR-3: render-тести виконуються у job python; skip видимий (-rs)."""
     ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
     runs = [s.get("run", "") for s in ci["jobs"]["python"]["steps"]]
-    assert any('pytest -m "not live" -rs' in r for r in runs)
+    assert any("pytest" in r and "-rs" in r for r in runs), "skip має бути видимим (-rs)"
+
+
+# Модулі, які фізично потребують піднятого стека / зібраного образу gui.
+GUI_RUNTIME_TEST_MODULES = (
+    "tests/e2e/test_gui_runtime_contract.py",
+    "tests/e2e/test_gui_api_down_branch.py",
+    "tests/e2e/test_runtime_suite_is_enforced.py",
+)
+
+
+def test_ci_python_job_does_not_collect_gui_runtime_tests() -> None:
+    """Пострев'ю S-1: у job `python` немає стека, тому runtime-тести gui там не збираються.
+
+    Перевіряється інваріант, а не дослівний рядок команди. Виключення — по шляху, а не
+    селектором `-m "not e2e"`: §16.2 фіксує `uv run pytest -m "not live"` дослівно, а маркер
+    `e2e` носитимуть і offline-тести WP-14, які мають виконуватись саме тут.
+
+    Друга половина інваріанта: прапорця заборони skip у цьому job немає. Саме прив'язка до
+    універсальної `CI` (її GitHub Actions ставить в усіх job-ах) валила job `python`.
+    """
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    job = ci["jobs"]["python"]
+    invocations = _pytest_invocations(job)
+    assert invocations, "job python не запускає pytest"
+    for step in invocations:
+        run = step["run"]
+        selector = _marker_selector(run)
+        assert "not live" in selector, selector
+        for module in GUI_RUNTIME_TEST_MODULES:
+            assert f"--ignore={module}" in run, f"{module} збирається у job python"
+        assert "COLLECTOR_E2E_REQUIRED" not in str(step.get("env", {}))
+    assert "COLLECTOR_E2E_REQUIRED" not in str(job.get("env", {}))
+
+
+def test_ci_python_job_keeps_spec_16_2_command_verbatim() -> None:
+    """§16.2: CI має виконувати саме задокументовану команду, а не її звужений варіант."""
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    runs = [s.get("run", "") for s in ci["jobs"]["python"]["steps"]]
+    assert any('uv run pytest -m "not live"' in r for r in runs)
+
+
+def test_ci_docker_job_forbids_skipping_e2e_after_stack_is_up() -> None:
+    """Пострев'ю S-1: заборону skip вмикає власний прапорець, і лише там, де є стек."""
+    ci = _load(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    job = ci["jobs"]["docker"]
+    e2e_steps = [s for s in _pytest_invocations(job) if "e2e" in s["run"]]
+    assert len(e2e_steps) == 1, "рівно один крок з runtime-тестами gui"
+    step = e2e_steps[0]
+    assert step["env"]["COLLECTOR_E2E_REQUIRED"] in {"1", 1}, step.get("env")
+    # Прапорець — крокового рівня: на рівні job-а він увімкнув би заборону ще до `up --wait`.
+    assert "COLLECTOR_E2E_REQUIRED" not in str(job.get("env", {}))
+    assert "COLLECTOR_E2E_REQUIRED" not in str(ci.get("env", {})), "не глобально"
+    # Той самий прапорець читають самі модулі — інакше заборона нічого не вмикає.
+    for name in ("test_gui_runtime_contract.py", "test_gui_api_down_branch.py"):
+        source = (REPO_ROOT / "tests" / "e2e" / name).read_text(encoding="utf-8")
+        assert "COLLECTOR_E2E_REQUIRED" in source, name
+        assert 'os.environ.get("CI"' not in source, f"{name}: універсальна CI знову у гейті"
+
+
+def test_build_contract_gate_does_not_depend_on_universal_ci() -> None:
+    """Пострев'ю S-1, той самий клас помилки на боці web: `npm run test` іде до `build`."""
+    package_json = (REPO_ROOT / "web" / "package.json").read_text(encoding="utf-8")
+    assert "--mode build-contract" in package_json, "скрипт test:build має задавати режим"
+    source = (REPO_ROOT / "web" / "tests" / "unit" / "build-contract.test.ts").read_text(
+        encoding="utf-8"
+    )
+    assert "import.meta.env.MODE === 'build-contract'" in source
+    assert "process.env.CI" not in source, "CI=true у job web валив би звичайний `npm run test`"
 
 
 # --- GUI (WP-00 PR3; §7.7, §8, §13) ----------------------------------------------------------

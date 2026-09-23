@@ -4,7 +4,9 @@
   // (`tests/unit/build-contract.test.ts`) і запускати ESLint програмно.
   "extends": "./tsconfig.app.json",
   "compilerOptions": {
-    "types": ["vitest/globals", "@testing-library/jest-dom", "node"],
+    // `vite/client` — заради `import.meta.env.MODE`: build-contract.test.ts гейтиться
+    // режимом Vite, а не змінною оточення (пострев'ю S-1).
+    "types": ["vitest/globals", "@testing-library/jest-dom", "node", "vite/client"],
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo"
   },
   "include": ["tests/unit"]

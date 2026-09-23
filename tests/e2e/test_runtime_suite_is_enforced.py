@@ -3,10 +3,12 @@
 Тести `test_gui_runtime_contract.py` і `test_gui_api_down_branch.py` — єдине, що доводить
 §13-інваріанти nginx на живому контейнері (пастка `add_header` у вкладеному location і фази
 rewrite/access). Обидва модулі пропускаються, якщо стек не піднято, тому «зелений» прогін
-без стека нічого не означає. Цей модуль робить таку ситуацію видимою: у CI (`CI=true`) він
-вимагає, щоб передумови були виконані, тобто щоб суїт справді виконувався.
+без стека нічого не означає. Цей модуль робить таку ситуацію видимою: там, де стек
+обіцяний (`COLLECTOR_E2E_REQUIRED=1` — прапорець виставляє крок job `docker` після
+`up -d --wait`), він вимагає, щоб передумови були виконані, тобто щоб суїт справді
+виконувався.
 
-Локально (без `CI`) сам пропускається — розробник не зобов'язаний тримати стек піднятим.
+Локально (без прапорця) сам пропускається — розробник не зобов'язаний тримати стек піднятим.
 """
 
 from __future__ import annotations
@@ -19,7 +21,12 @@ import urllib.request
 
 import pytest
 
-CI = os.environ.get("CI", "").strip().lower() in {"1", "true", "yes", "on"}
+E2E_REQUIRED = os.environ.get("COLLECTOR_E2E_REQUIRED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 GUI_PORT = os.environ.get("GUI_PORT", "80")
 BASE_URL = f"http://127.0.0.1:{GUI_PORT}"
 GUI_IMAGE = os.environ.get("COLLECTOR_GUI_IMAGE", "collector-gui:dev")
@@ -30,8 +37,11 @@ ENFORCED_MODULES = ("test_gui_runtime_contract.py", "test_gui_api_down_branch.py
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.skipif(
-        not CI,
-        reason="локально пропуск runtime-тестів дозволений; перевірка діє лише у CI",
+        not E2E_REQUIRED,
+        reason=(
+            "перевірка діє лише там, де стек обіцяний "
+            "(COLLECTOR_E2E_REQUIRED=1 — крок job `docker` після `up -d --wait`)"
+        ),
     ),
 ]
 

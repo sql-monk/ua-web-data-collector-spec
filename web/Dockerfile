@@ -46,6 +46,18 @@ ARG COLLECTOR_GIT_SHA=unknown
 ARG COLLECTOR_VERSION=0.1.0
 ARG COLLECTOR_CREATED=1970-01-01T00:00:00Z
 
+# Alpine-пакети з базового образу відстають від security-оновлень дистрибутиву: локальний
+# скан (`docker scout cves`, 2026-09-22) на pinned digest дав 13 CRITICAL / 41 HIGH, з них 53
+# з доступним фіксом — майже все у `curl` і `openssl`. Новішого digest для тега
+# `1.29-alpine` немає (перевірено `docker buildx imagetools inspect`), тому оновлюємо пакети
+# самі: інакше trivy-крок CI (CRITICAL, без `ignore-unfixed` — §13) блокував би кожен PR, а
+# єдиний публічний сервіс стека їздив би з відомими критичними CVE.
+# Base image лишається pinned by digest (вимога картки); змінюється лише набір apk-пакетів,
+# тому збірка перестає бути побайтово відтворюваною у часі — свідомий обмін на §13
+# «critical CVE блокує release». `USER root` потрібен для apk; далі повертаємось на 101:101.
+USER root
+RUN apk upgrade --no-cache && rm -rf /var/cache/apk/*
+
 LABEL org.opencontainers.image.title="collector-gui" \
       org.opencontainers.image.description="UA Web Data Collector — operator GUI (React SPA + nginx reverse proxy)" \
       org.opencontainers.image.version="${COLLECTOR_VERSION}" \

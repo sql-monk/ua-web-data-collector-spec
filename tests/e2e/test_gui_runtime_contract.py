@@ -109,15 +109,23 @@ def _gui_is_up() -> bool:
         return False
 
 
-# Код-рев'ю PR3, H-1: у CI пропуск цих тестів заборонений. Локально skip зручний (стек
-# піднімають не завжди), але в CI стек піднімає крок `up -d --wait`, і мовчазний skip
-# означав би, що §13-інваріанти nginx не перевіряються взагалі. Тому в CI умова skip
-# вимикається: тест впаде гучно, а не зникне з переліку.
-CI = os.environ.get("CI", "").strip().lower() in {"1", "true", "yes", "on"}
+# Код-рев'ю PR3 (H-1) + пострев'ю (S-1): там, де стек ГАРАНТОВАНО піднято, пропуск цих
+# тестів заборонений — мовчазний skip означав би, що §13-інваріанти nginx не перевіряються
+# взагалі. Прапорець власний (`COLLECTOR_E2E_REQUIRED`), а НЕ універсальний `CI`: GitHub
+# Actions виставляє `CI=true` в УСІХ job-ах, тож прив'язка до нього ламала job `python`,
+# де стека немає й бути не може. Прапорець виставляє лише крок job `docker` після
+# `docker compose up -d --wait`.
+E2E_REQUIRED = os.environ.get("COLLECTOR_E2E_REQUIRED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def skip_unless_available(available: bool, reason: str) -> pytest.MarkDecorator:
-    return pytest.mark.skipif(not available and not CI, reason=reason)
+    """Поза середовищем зі стеком — skip; там, де стек обіцяний, — гучне падіння."""
+    return pytest.mark.skipif(not available and not E2E_REQUIRED, reason=reason)
 
 
 pytestmark = [

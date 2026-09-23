@@ -52,8 +52,18 @@ jobs:
 
       # Включно з tests/integration/test_compose_render.py — `docker compose config` через docker
       # CLI runner-а (gate 3, CR-3: render-тести мають реально виконуватись у CI, не skip).
-      - name: pytest (без live)
-        run: uv run pytest -m "not live" -rs
+      # Пострев'ю S-1: runtime-тести gui потребують піднятого стека, якого в цьому job немає
+      # і бути не може — їх виконує job `docker` після `up -d --wait`. Виключаємо їх ПО
+      # ШЛЯХУ, а не селектором `-m "not e2e"`: (1) §16.2 фіксує команду
+      # `uv run pytest -m "not live"` дослівно; (2) маркер `e2e` носитимуть і offline-тести
+      # WP-14 (`collector e2e --source fixtures --offline`), які саме тут і мають
+      # виконуватись — виключення за маркером тихо прибрало б їх з CI назавжди.
+      - name: pytest (без live; runtime-тести gui — у job `docker`)
+        run: >-
+          uv run pytest -m "not live" -rs
+          --ignore=tests/e2e/test_gui_runtime_contract.py
+          --ignore=tests/e2e/test_gui_api_down_branch.py
+          --ignore=tests/e2e/test_runtime_suite_is_enforced.py
 
       - name: contracts JSON Schema snapshots без drift (WP-01C)
         run: uv run collector contracts export --check
@@ -171,12 +181,12 @@ jobs:
       # для trivy HIGH нижче: без fix — датоване risk acceptance у звіті/ADR, не мовчазний
       # ignore). `npm ci` вище гарантує, що аудит іде по lockfile, а не по ре-резолвлених
       # версіях.
-      # §13 «Dependency scanning — щотижня і на кожен PR; critical CVE блокує». HIGH блокує
+      # §13 «Dependency scanning — щотижня і на кожен PR; critical CVE блокує». Поріг HIGH
       # в обох прогонах: перший виділяє runtime-залежності (те, що їде у браузер) окремим
       # повідомленням, другий покриває весь toolchain — компрометований dev-пакет це теж
-      # ланцюжок постачання. Якщо колись з'явиться dev-only HIGH без фіксу — точковий
-      # `--exclude <pkg>` з CVE ID, owner і датою в ADR, а не зниження порогу.
-      - name: npm audit (HIGH/CRITICAL блокують, §13)
+      # ланцюжок постачання. Виняток для конкретного dev-only HIGH без фіксу оформлюється
+      # точковим `--exclude <pkg>` з CVE ID, owner і датою в ADR, а не зниженням порогу.
+      - name: npm audit (HIGH блокує, §13)
         run: |
           npm audit --omit=dev --audit-level=high
           npm audit --audit-level=high
@@ -370,6 +380,12 @@ jobs:
         run: uv sync --frozen
 
       - name: pytest -m e2e (runtime-контракт gui проти піднятого стека)
+        # Прапорець виставляється ЛИШЕ тут — після `up -d --wait`, тобто там, де стек
+        # гарантовано є. Саме він (а не універсальний `CI`) вмикає заборону skip усередині
+        # модулів: `CI=true` GitHub Actions ставить в усіх job-ах, і прив'язка до нього
+        # валила job `python`, де стека немає (пострев'ю S-1).
+        env:
+          COLLECTOR_E2E_REQUIRED: "1"
         run: uv run pytest -m e2e tests/e2e -rs
 
       - name: docker compose ps + health

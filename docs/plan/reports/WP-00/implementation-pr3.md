@@ -392,9 +392,9 @@ exit=0
   лише валідність YAML (`yaml.safe_load`) і структурними тестами
   (`test_ci_runs_web_pipeline_from_spec_16_2`, adversarial-тести PR2). Фактичний прогон
   побачить перший PR — `operationally unverified`.
-- **SBOM/trivy для `collector-gui`** — не додавав: картка PR3 цього не вимагає, а `syft`/
-  `trivy` локально відсутні (як зафіксовано в PR2). Скани `collector-gui` варто додати
-  разом з registry pipeline (WP-14) або наступним security-gate.
+- ~~**SBOM/trivy для `collector-gui`**~~ — **втратило актуальність**: додано під час gate 2
+  (SBOM syft + два trivy-скани з політикою `collector`), а локальний скан образу виконано
+  на пострев'ю — див. «Локальний скан образу `collector-gui`» наприкінці звіту.
 - **HSTS у дії** — заголовок віддається, але TLS termination перед `gui` з'явиться у WP-13;
   на plain HTTP браузер його ігнорує.
 - **Accessibility, i18n понад `uk`, dark/light-тема** — не в scope PR3.
@@ -445,6 +445,8 @@ Owned files картки — `web/**`, `deploy/compose/gui/**`, `docker-compose.
 |---|---|
 | `tests/unit/test_compose_config.py` | прямо вимагає промпт задачі: unit-тест на compose-конфіг для `gui`; плюс оновлення інваріантів, які змінює вимога 4 (мережі, публічний порт) |
 | `tests/integration/test_compose_render.py` | ті самі інваріанти на рівні рендеру; без оновлення тест став би червоним через profile `gui` |
+| `tests/e2e/test_gui_runtime_contract.py`, `tests/e2e/test_gui_api_down_branch.py` | додані тестувальником на gate 2 (`a9beb94`); реалізатор змінював їх на gate 3 і пострев'ю (гейт skip, нові перевірки Host/sourcemaps/`/api`, дедлайн замість busy-loop) |
+| `tests/e2e/test_runtime_suite_is_enforced.py` | новий: тривога проти мовчазного skip runtime-тестів там, де стек обіцяний (код-рев'ю H-1) |
 | `tests/unit/test_compose_config_adversarial.py` | два інваріанти PR2 потребували уточнення: healthcheck `gui` (критична dependency — `api`, не БД) і перевірка privileged-режиму, яка хибно спрацьовувала на назві образу `nginx-unprivileged` (тепер regex на директиву, а не підрядок) |
 | `.gitattributes` | `web/** text eol=lf` — інакше Windows `core.autocrlf` дає CRLF у робочій копії і `prettier --check` (`endOfLine: lf`) падає локально при зеленому CI |
 | `web/README.md` | етап «Docs» картки для PR3 |
@@ -681,3 +683,130 @@ $ docker compose down -v                      exit=0
   `http://localhost/`;
 - поведінка `auth_request` після того, як WP-11A закриє health автентифікацією — за
   визначенням не перевіряється до появи OIDC; попередження лишене в конфігу (L-5).
+
+---
+
+## Відповіді на пострев'ю
+
+Вхід: `docs/plan/reports/WP-00/spec-review-pr3.md` (**changes_requested**, 1 high + 3 low).
+База — `f371700`.
+
+| # | Severity | Знахідка | Рішення | Що саме зроблено |
+|---|---|---|---|---|
+| S-1 | high | заборона skip прив'язана до універсальної `CI`, яку GitHub Actions ставить в УСІХ job-ах → job `python` падав би на кожному PR (без стека e2e-модулі виконувались замість skip) | **fixed** | Знахідка підтверджена дослівно: `CI=true uv run pytest -m e2e tests/e2e` без стека → **21 failed, 4 passed**. Причина моєї помилки — я перевіряв `CI=true` лише з піднятим стеком. Два незалежні виправлення: (1) гейт тепер на власній змінній **`COLLECTOR_E2E_REQUIRED`**, яку виставляє **єдиний крок** job `docker` — той, що йде після `up -d --wait`; на рівні workflow і job-ів її немає (це теж перевіряється тестом); (2) job `python` більше не збирає runtime-модулі gui. Той самий клас помилки був і на боці web (`npm run test` іде до `build`, а `CI=true` вимикав би skip у `build-contract.test.ts`) — там гейт переведено на **режим Vite** (`vitest run … --mode build-contract`, `import.meta.env.MODE`), який не залежить від оточення взагалі й крос-платформний |
+| S-1 (спосіб виключення) | — | рев'ю пропонувало селектор `-m "not live and not e2e"` | **fixed інакше, з обґрунтуванням** | Виключення зроблено **по шляху** (`--ignore=tests/e2e/test_gui_*.py --ignore=tests/e2e/test_runtime_suite_is_enforced.py`), а не за маркером, з двох причин: (а) §16.2 фіксує команду `uv run pytest -m "not live"` **дослівно**, і звужений селектор ламав чинний контрактний тест `test_ci_runs_spec_16_2_commands_without_hardcoded_secrets` (перевірено: падає); (б) маркер `e2e` за §16.1 носитимуть і **offline**-тести WP-14 (`collector e2e --source fixtures --offline`), які мають виконуватись саме в job `python` — виключення за маркером тихо прибрало б їх з CI назавжди, тобто відтворило б рівно ту помилку, за яку PR отримав H-1. Інваріант «runtime-модулі gui не збираються в job python» від способу не залежить і закріплений тестом |
+| S-2 | low | суперечливі коментарні блоки над `npm audit` (залишок відкликаного послаблення) | **fixed** | Коментар переписаний: поріг HIGH в обох прогонах, виняток оформлюється точковим `--exclude <pkg>` з CVE ID, owner і датою в ADR. Формулювань про «не має зупиняти кожен PR» більше немає; назва кроку теж виправлена (`npm audit (HIGH блокує, §13)`) |
+| S-3 | low | «Що не перевірено» застаріло; owned files не називають нові `tests/e2e/**` | **fixed** | Пункт про відсутність SBOM/trivy для `collector-gui` перекреслений із посиланням на фактичний результат; у таблицю розширення scope додані три файли `tests/e2e/**` (два від тестувальника + новий тривожний модуль) |
+| S-4 | low | немає локального скану образу `collector-gui` | **fixed** — і знайшов блокер, див. нижче | `trivy`/`syft` локально відсутні, тому скан зроблено через `docker scout cves` (без потреби в registry). Результат змусив змінити `web/Dockerfile` |
+
+### Локальний скан образу `collector-gui` (S-4) — знайдено і виправлено реальний блокер
+
+`docker scout cves --only-severity critical,high collector-gui:dev` на образі, зібраному з
+pinned digest `nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56a…`:
+
+```text
+   10C    19H     0M     0L  curl 8.17.0-r1
+    3C    15H     0M     0L  openssl 3.5.6-r0
+    0C     3H     0M     0L  util-linux 2.41.4-r0
+    0C     2H     0M     0L  expat 2.7.5-r0
+    0C     1H     0M     0L  libxml2 2.13.9-r0
+    0C     1H     0M     0L  c-ares 1.34.6-r0
+
+54 vulnerabilities found in 6 packages
+  CRITICAL  13
+  HIGH      41
+```
+
+**53 з 54 мали доступний фікс.** Новішого digest для тега `1.29-alpine` немає
+(`docker buildx imagetools inspect` повертає той самий `0c79d56a…`) — тобто **сам vendor-образ
+відстає від security-оновлень Alpine**. Наслідок, який пропустили всі попередні гейти: крок
+trivy `CRITICAL` (`exit-code: 1`, без `ignore-unfixed`, §13), доданий мною ж на gate 2,
+**блокував би кожен PR** — а єдиний публічний сервіс стека їздив би з 13 критичними CVE.
+
+Виправлено в `web/Dockerfile`: `USER root` + `RUN apk upgrade --no-cache && rm -rf
+/var/cache/apk/*` перед поверненням на `101:101`. Base image лишається pinned by digest
+(вимога картки); змінюється лише набір apk-пакетів — свідомий обмін побайтової
+відтворюваності у часі на §13 «critical CVE блокує release», записаний коментарем у
+Dockerfile.
+
+Після перезбірки:
+
+```text
+   0C     1H     0M     0L  libxml2 2.13.9-r1
+  CRITICAL  0
+  HIGH      1
+    x HIGH CVE-2026-86140   Affected range : <=2.13.9-r1   Fixed version : not fixed
+```
+
+Єдиний HIGH, що лишився, **не має фіксу** upstream, тому крок trivy `HIGH`
+(`ignore-unfixed: true`) його пропустить, а крок `CRITICAL` — зелений. Для порівняння,
+`collector:dev` у тому ж прогоні: **0 CRITICAL / 2 HIGH** (обидва без фіксу).
+
+### Доказ обох гілок гейта (вимога пострев'ю)
+
+```text
+# (а) без стека і без прапорця — точна команда job `python`
+$ CI=true uv run pytest -m "not live" -rs \
+    --ignore=tests/e2e/test_gui_runtime_contract.py \
+    --ignore=tests/e2e/test_gui_api_down_branch.py \
+    --ignore=tests/e2e/test_runtime_suite_is_enforced.py -q
+606 passed, 1 skipped          <- job python зелений; `CI=true` більше ні на що не впливає
+
+# (а2) без стека, модулі викликані напряму — skip, а не падіння
+$ CI=true uv run pytest -m e2e tests/e2e -q -rs
+3 passed, 22 skipped
+SKIPPED tests/e2e/test_gui_runtime_contract.py: gui не відповідає на http://127.0.0.1:80 …
+SKIPPED tests/e2e/test_runtime_suite_is_enforced.py: перевірка діє лише там, де стек обіцяний
+                                                    (COLLECTOR_E2E_REQUIRED=1 …)
+
+# (б) зі стеком і прапорцем — виконуються, skip заборонений
+$ COLLECTOR_E2E_REQUIRED=1 uv run pytest -m e2e tests/e2e -q -rs
+25 passed                      <- жодного skip
+
+# (б-) прапорець без стека — падає гучно, а не зникає
+$ COLLECTOR_E2E_REQUIRED=1 uv run pytest tests/e2e/test_runtime_suite_is_enforced.py -q
+1 failed, 1 passed
+E  Failed: gui недоступний на http://127.0.0.1:80 …, тому тести
+   ('test_gui_runtime_contract.py', 'test_gui_api_down_branch.py') були б пропущені.
+```
+
+Структурні тести переписані на інваріанти, а не на дослівні рядки:
+`test_ci_python_job_does_not_collect_gui_runtime_tests` (модулі виключені + прапорця в job
+немає), `test_ci_docker_job_forbids_skipping_e2e_after_stack_is_up` (прапорець рівно на
+одному кроці, після `up --wait`, і його ж читають самі модулі; `os.environ.get("CI"` у
+гейті заборонено), `test_ci_python_job_keeps_spec_16_2_command_verbatim`,
+`test_build_contract_gate_does_not_depend_on_universal_ci`.
+
+### Команди перевірки після виправлень
+
+```text
+$ cd web && npm ci && npm audit --omit=dev --audit-level=high && npm audit --audit-level=high \
+    && npm run lint && npm run test && npm run build && npm run test:build && npm run test:e2e
+found 0 vulnerabilities (обидва прогони)
+lint OK · test: 24 passed | 4 skipped · build OK · test:build: 4 passed · test:e2e: 4 passed
+EXIT=0
+
+$ uv run ruff check . / ruff format --check . / mypy src      -> чисто
+$ uv run pytest -m "not live" -q                              -> 605 passed, 23 skipped
+$ COLLECTOR_E2E_REQUIRED=1 uv run pytest -m "not live" -q     -> 628 passed (стек піднято)
+$ uv run pre-commit run --all-files                           -> усі hooks Passed
+
+$ docker compose config --quiet                               exit=0
+$ docker compose build gui                                    Image collector-gui:dev Built
+$ docker compose --profile core --profile workers --profile gui up -d --wait   exit=0
+$ docker compose ps -a --format json | python deploy/compose/check-healthy.py
+all 17 containers healthy or exited 0
+$ COLLECTOR_E2E_REQUIRED=1 uv run pytest -m e2e tests/e2e -q   25 passed
+$ docker compose down -v                                      exit=0
+```
+
+### Що лишилось неперевіреним
+
+- фактичний прогін CI — як і раніше, `operationally unverified`; цього разу обидві гілки
+  гейта відтворені локально саме тими командами, які виконує workflow;
+- `trivy`/`syft` локально відсутні — скан зроблено `docker scout`; числа trivy у CI можуть
+  відрізнятись (інша БД), але клас проблеми (застарілі apk-пакети базового образу) закрито
+  на рівні збірки;
+- `apk upgrade` робить збірку образу невідтворюваною побайтово у часі — свідомий обмін
+  (§13); якщо це стане проблемою для release-пайплайну, альтернатива — власний base image з
+  періодичним оновленням digest (owner WP-14).
