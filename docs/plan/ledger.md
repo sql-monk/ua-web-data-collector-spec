@@ -21,10 +21,10 @@
 | WP | Стан | Примітка |
 |---|---|---|
 | WP-01A | PR1 merged 758c68c (PR #3); PR2 merged 43ee69f (PR #6); PR3 pending | CI green (PR1: python, integration PostgreSQL 18, docker); ADR-0005, ADR-0007, `docs/persistence/postgres.md`; PR2 (`bad6a25`+fixes) — spec-review gate 4 `changes_requested` закрито (SR-1 gitleaks, SR-2 lineage, SR-5, N-1..N-5 fixed; D-1/D-2 задокументовані ADR-0007 + ТЗ §9.1); CI PR2 green 6/6 на `d83b627` |
-| WP-01B | pending | після WP-01A |
+| WP-01B | card draft (`docs/plan/cards/WP-01B.md`) — чекає рішень оркестратора/користувача і dependency-передумов | 2026-09-24 |
 | WP-01D | PR1 merged f87df17 (PR #5); PR1b merged de517cf (PR #8) — runtime на per-component LOGIN-ролях, **блокер pilot §13 (I-1) закрито** разом з WP-00 PR4; залишок S-1: export-worker під `collector_scheduler` до першого export handler (WP-11A) або pilot; PR2 pending | CI green 6/6; ADR-0006, `docs/workers.md`, runbook worker-recovery; флак ризик — `tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising` нестабільний під паралельним навантаженням (відтворено на WP-01A PR2 verification, не внесений PR2 — `docs/plan/reports/WP-01A/implementation-pr2.md`) |
-| WP-02 | pending | після WP-01A |
-| WP-04 | pending | після WP-01A |
+| WP-02 | card draft (`docs/plan/cards/WP-02.md`) — чекає рішень оркестратора/користувача і dependency-передумов | 2026-09-24 |
+| WP-04 | card draft (`docs/plan/cards/WP-04.md`) — чекає рішень оркестратора/користувача і dependency-передумов | 2026-09-24 |
 
 ## Хвиля 2
 
