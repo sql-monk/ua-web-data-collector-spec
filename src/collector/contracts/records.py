@@ -9,7 +9,7 @@
 
 Усі записи мають `_id` UUID (генерує projector) і `schema_version` `major.minor`. Доменні поля
 observation/contact/review додають WP-07/WP-09 **optional**-полями minor-версії через
-dependency-запит до WP-01C (`docs/contracts.md`, розділ 12).
+dependency-запит до WP-01C (`docs/contracts.md`, розділ 11.2).
 """
 
 from __future__ import annotations
