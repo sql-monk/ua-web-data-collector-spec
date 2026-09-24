@@ -21,6 +21,7 @@
 | #4 (`715d54e`) | WP-00 PR3 | React 19 + Vite 7 GUI scaffold, non-root Nginx із CSP, profile `gui`, job `web` + e2e проти живого стека в CI; закриває WP-00 |
 | #5 (`f87df17`) | WP-01D PR1 | Worker runtime: claim-loop, lease heartbeat, **self-fencing за часом**, drain, singleton scheduler, hot concurrency, дешевий liveness-probe; ADR-0006, `docs/workers.md`, runbook |
 | #6 (`43ee69f`) | WP-01A PR2 | Artifacts, upload claims, projection tasks/acks, outboxes, entity index, LOGIN-ролі (`db roles --with-login`), `queue.release`, транзакційний audit; ADR-0007 |
+| #13 (`b9bed91`) | WP-01D PR1c | Handler plumbing: defer/not-before/retry schedule, lazy registry + context, crawl/projection backends, transactional fenced ack, domain scheduler ticks; CR-1 cancellation race fixed; CI green 6/6 |
 
 CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (build + SBOM + trivy обох образів + clean-host `up --wait` + e2e), `pre-commit`, `gitleaks`.
 
@@ -33,8 +34,8 @@ CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (buil
 
 ## 4. Наступний крок
 
-1. **Блокер pilot §13 — закрито** (2026-09-24): WP-00 PR4 (PR #7, `ae63917`) + WP-01D PR1b (PR #8, `de517cf`). Залишок — export-worker під `collector_scheduler` (S-1) до першого export handler (WP-11A) або pilot; уточнення ТЗ §13 для exporter-а — до WP-11A. Наступне — картки WP-01B (внести N-2: лічильник доставок outbox), WP-02 (врахувати `deps/WP-01A-to-WP-02.md`), WP-04.
-2. Далі паралельно: **WP-01B** (MongoDB projector, receipts, reconciler, compaction — головний споживач PR2), **WP-02** (fetch core), **WP-04** (translation core). Карток для них ще немає — писати за зразком WP-01A/WP-01D.
+1. **WP-01D PR1c завершено** (PR #13, `b9bed91`): залежність WP-01A PR3a спожито, усі gates і CI 6/6 зелені. Це розблоковує runtime-частини WP-01B PR3, WP-02 PR2 і WP-04 PR2.
+2. Наступна незалежна передумова хвилі 1 — **WP-00 PR5 object-store/component secrets**. Паралельно готові WP-01B PR1 (Mongo schema) і WP-01D PR2 (global permit client); картки WP-01B/WP-02/WP-04 вже створені й актуальні в `docs/plan/cards/`.
 3. Потім хвиля 2: WP-03, WP-05, WP-07, WP-09.
 
 ## 5. Відкриті борги та ризики
