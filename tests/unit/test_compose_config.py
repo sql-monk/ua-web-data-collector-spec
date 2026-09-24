@@ -265,9 +265,7 @@ def test_long_running_services_have_healthcheck_and_grace_period(
 
 def test_readiness_waits_for_one_shots(services: dict[str, dict[str, Any]]) -> None:
     api = services["api"]["depends_on"]
-    # `api` → `ensure-minio`: depends_on api поза owned-частиною WP-00 PR5 — запит
-    # docs/plan/deps/WP-00-to-WP-01D.md; поки api лише читає health MinIO без облікових даних.
-    for one_shot in ONE_SHOTS - {"ensure-minio"}:
+    for one_shot in ONE_SHOTS:
         assert api[one_shot]["condition"] == "service_completed_successfully"
     for stateful in STATEFUL:
         assert api[stateful]["condition"] == "service_healthy"

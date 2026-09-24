@@ -5,10 +5,16 @@
 | Від | WP-00 PR5 (`wp/00-5-object-store-secrets`) |
 | Кому | WP-01D (owner `x-worker`, `scheduler`, `*-worker` у `docker-compose.yml`); `api` — orchestrator (після WP-00 PR5 owner сервісу не визначений, до WP-11A) |
 | Дата | 2026-09-24 |
-| Статус | open |
+| Статус | п.1–2 — resolved by orchestrator, 2026-09-24 (виконано в WP-00 PR5) |
 | Блокує | п.1 — не блокує merge WP-00 PR5, потрібне до WP-02 PR2; **п.2 — блокує зелений `pytest -m "not live"` гілки WP-00 PR5** |
 
-## 1. `depends_on: ensure-minio`
+## 1. `depends_on: ensure-minio` — resolved by orchestrator, 2026-09-24
+
+Рішення: дозволено WP-00 PR5 для всіх споживачів MinIO і `api` (мінімальні правки в сервісах
+WP-01D). Виконано: `api`, `discovery-`, `fetch-`, `browser-`, `parse-`, `translation-`,
+`export-`, `maintenance-worker` (для сервісів, що успадковували `depends_on` з `x-worker`, блок
+повторено явно + `ensure-minio`); вартовий
+`test_secrets_object_store.py::test_every_minio_consumer_waits_for_ensure_minio`.
 
 ### Що потрібно
 
@@ -38,7 +44,13 @@ runtime ще не ходить у MinIO з обліковими даними (WP
 - `tests/unit/test_compose_config_adversarial.py::test_worker_readiness_dependencies_are_declared_in_depends_on`
   — додати `ensure-minio: service_completed_successfully` для MinIO-споживачів.
 
-## 2. `tests/unit/workers/test_db_login.py::test_compose_mounts_the_dsn_of_the_role_the_process_verifies`
+## 2. `tests/unit/workers/test_db_login.py::test_compose_mounts_the_dsn_of_the_role_the_process_verifies` — resolved by orchestrator, 2026-09-24
+
+Рішення: разовий виняток WP-00 PR5. Інваріант уточнено до «рівно один PostgreSQL DSN (per-role
+або міграційний рахуються разом) — роль, яку перевіряє процес; міграційного `postgres_dsn` немає»;
+інші типи секретів дозволені. Додано негативні кейси
+`test_dsn_invariant_rejects_extra_foreign_or_missing_postgres_dsn` (два per-role DSN, +міграційний,
+чужа роль, без DSN) і позитивний `test_dsn_invariant_allows_other_component_secrets`.
 
 Тест (owner WP-01D, forbidden для WP-00 PR5) перевіряє `services[name]["secrets"] == [secret]`,
 тобто що runtime-сервіс монтує **лише** DSN. WP-00 PR5 за карткою (п.1–4) додає workers

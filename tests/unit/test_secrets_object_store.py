@@ -152,6 +152,21 @@ def test_projector_waits_for_both_init_one_shots(services: dict[str, dict[str, A
     assert deps["ensure-minio"]["condition"] == "service_completed_successfully"
 
 
+def test_every_minio_consumer_waits_for_ensure_minio(services: dict[str, dict[str, Any]]) -> None:
+    """Deps WP-00-to-WP-01D п.1 (resolved by orchestrator 2026-09-24): користувач MinIO існує
+    до старту кожного сервісу, що монтує `minio_<component>`."""
+    consumers = {
+        name
+        for name, svc in services.items()
+        if name not in {"minio", "ensure-minio"}
+        and any(s.startswith("minio_") for s in _secret_names(svc))
+    }
+    assert consumers >= {"api", "fetch-worker", "parse-worker", "maintenance-worker"}
+    for name in consumers:
+        condition = services[name]["depends_on"]["ensure-minio"]["condition"]
+        assert condition == "service_completed_successfully", name
+
+
 def test_new_credentials_never_inlined_into_environment(
     services: dict[str, dict[str, Any]],
 ) -> None:

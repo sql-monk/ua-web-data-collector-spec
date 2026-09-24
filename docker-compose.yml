@@ -502,6 +502,8 @@ services:
         condition: service_completed_successfully
       ensure-mongo:
         condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -562,6 +564,14 @@ services:
     networks:
       - backend
       - source-egress
+    # WP-00 PR5 (deps WP-00-to-WP-01D п.1): x-worker depends_on + ensure-minio.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-small
       replicas: 1
@@ -586,6 +596,8 @@ services:
         condition: service_healthy
       migrate-postgres:
         condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-medium
       replicas: 2
@@ -607,6 +619,8 @@ services:
       minio:
         condition: service_healthy
       migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
         condition: service_completed_successfully
     deploy:
       <<: *limits-large
@@ -666,6 +680,14 @@ services:
     networks:
       - backend
       - provider-egress
+    # WP-00 PR5 (deps WP-00-to-WP-01D п.1): x-worker depends_on + ensure-minio.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-small
       replicas: 1
@@ -693,6 +715,8 @@ services:
         condition: service_completed_successfully
       ensure-mongo:
         condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-medium
       replicas: 1
@@ -707,6 +731,14 @@ services:
     secrets:
       - postgres_dsn_scheduler
       - minio_maintenance
+    # WP-00 PR5 (deps WP-00-to-WP-01D п.1): x-worker depends_on + ensure-minio.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-small
       replicas: 1
@@ -735,6 +767,14 @@ services:
     networks:
       - backend
       - source-egress
+    # WP-00 PR5 (deps WP-00-to-WP-01D п.1): x-worker depends_on + ensure-minio.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     shm_size: 512m
     deploy:
       <<: *limits-large
