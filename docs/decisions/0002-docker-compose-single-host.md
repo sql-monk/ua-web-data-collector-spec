@@ -185,15 +185,17 @@ digest/залежність; unfixed HIGH — risk acceptance нижче) → `d
 core+workers → `ps`/health → `down -v`. Локально SBOM/CVE — `docker scout sbom`/`docker scout
 cves`.
 
-**Risk acceptance (дата 2026-09-22, owner WP-13 — security/log tests §16.1 п.8;
-тригери перегляду: кожне оновлення digest `python:3.13-slim`; **злиття WP-02 fetch** (zlib
-почне розпаковувати недовірений gzip sitemap/body — §13 decompression bomb, обґрунтування
-«довірені дані» перестає діяти); не пізніше 2026-12-22):**
+**Risk acceptance (дата 2026-09-22, переглянуто після merge WP-02 2026-09-25; owner WP-13 —
+security/log tests §16.1 п.8; наступні тригери: кожне оновлення digest `python:3.13-slim`,
+поява Debian fixed version; не пізніше 2026-12-22):**
 2 HIGH без fix у base image Debian 13 trixie — `perl 5.40.1-6+deb13u1` (CVE-2026-82560) і
 `zlib 1:1.3.dfsg+really1.3.1-1` (CVE-2026-85091); 0 CRITICAL. Обидва — системні пакети base
-image, не виконуються application-кодом (perl не викликається; zlib — через stdlib Python лише
-для довірених даних у PR2). Прийнято до появи fix у Debian; CI `HIGH ignore-unfixed` їх не
-блокує, `CRITICAL` без `ignore-unfixed` заблокує будь-яке підвищення severity. Механізм
+image. Perl/Pod::Text не викликається. Після WP-02 zlib справді розпаковує недовірені body,
+але CVE-2026-85091 стосується `gzwrite`/`gzprintf` після non-blocking write stall, а fetch path
+використовує лише inflate/decompression; вразливий write path недосяжний. Debian tracker на
+2026-09-25 усе ще позначає обидва пакети `unfixed`; final PR #17 Trivy показав 0 CRITICAL і
+0 HIGH із доступним fix. Прийнято до появи Debian fix або дедлайну; CI `HIGH ignore-unfixed`
+їх не блокує, `CRITICAL` без `ignore-unfixed` заблокує підвищення severity. Механізм
 датованих винятків для unfixed CRITICAL (`trivyignores: .trivyignore`, gate 3 CR-11) — owner
 WP-13 разом із security-тестами; до того unfixed CRITICAL блокує PR, і acceptance вноситься
 сюди правкою workflow.

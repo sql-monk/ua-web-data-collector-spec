@@ -18,4 +18,6 @@ Verdict: **approve after fix `9b94f53`**.
   isolation itself remains PR3.
 
 No new critical/high dependency finding was introduced. Existing base-image risk acceptance in
-ADR-0002 remains owned by WP-13 and is not weakened by this PR.
+ADR-0002 remains owned by WP-13. Its WP-02 merge trigger was reviewed on 2026-09-25: Debian
+still has no fix for CVE-2026-85091/CVE-2026-82560, but the zlib CVE is confined to a
+non-blocking gzip write path while fetch uses inflate only; the dated acceptance was updated.

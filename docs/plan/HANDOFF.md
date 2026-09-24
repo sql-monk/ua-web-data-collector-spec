@@ -1,6 +1,6 @@
 # Стан робіт і точка відновлення
 
-Оновлено: 2026-09-24.
+Оновлено: 2026-09-25.
 
 ## 1. Як відновити роботу
 
@@ -24,8 +24,9 @@
 | #13 (`b9bed91`) | WP-01D PR1c | Handler plumbing: defer/not-before/retry schedule, lazy registry + context, crawl/projection backends, transactional fenced ack, domain scheduler ticks; CR-1 cancellation race fixed; CI green 6/6 |
 | #14 (`f14d17d`) | WP-00 PR5 | MinIO buckets і per-role policies/credentials, Mongo per-component URI, exact mounts/startup ordering; pinned source-built `mc`; translation credential placeholder лишається disabled; live permission/leak checks; CI green 6/6 |
 | #15 (`774f7c7`) | WP-01B PR1 | 11 Mongo collections, forward-only checksum migrations, frozen validators, 23 indexes, repositories і least-privilege users; clean-host schema/users default; окремий MongoDB replica-set CI job; CI green 7/7 |
+| #17 (`76473d4`) | WP-02 PR2 | Verified S3/MinIO artifact API, fenced upload/orphan sweep, FetchHandler, robots TTL + fail-closed policy, bounded metrics; ADR-0011/0012; CI green 8/8 |
 
-CI має 7 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `integration (MongoDB 8.0 replica set)`, `docker` (build + SBOM + trivy обох образів + clean-host `up --wait` + e2e), `pre-commit`, `gitleaks`.
+CI має 8 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `integration (MongoDB 8.0 replica set)`, `integration (PostgreSQL 18 + MinIO)`, `docker` (build + SBOM + trivy обох образів + clean-host `up --wait` + e2e), `pre-commit`, `gitleaks`.
 
 ## 3. WP-01A PR2 — злито (PR #6, `43ee69f`)
 
@@ -38,7 +39,7 @@ CI має 7 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `integration (
 
 1. **WP-01B PR1 завершено** (PR #15, `774f7c7`): усі gates і CI 7/7 зелені; Mongo foundation та clean-host schema/users готові.
 2. Переклад відкладено за рішенням користувача: не починати WP-04 PR2.
-3. Наступний автономний пакет — **WP-02 PR2** (shared object storage/artifact client), потрібний WP-01B PR3/PR4. Після нього — WP-01B PR2, далі WP-01B PR3.
+3. WP-02 PR2 завершено (PR #17, `76473d4`, CI 8/8). Наступний автономний пакет — **WP-01B PR2** (projector); далі WP-01B PR3, потім WP-02 PR3 browser worker за залежностями.
 4. Після foundation-пакетів перейти до хвилі 2: WP-03, WP-05, WP-07, WP-09.
 
 ## 5. Відкриті борги та ризики
@@ -50,7 +51,7 @@ CI має 7 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `integration (
 | 3 | `command_timeout` в engine — зміна у файлі WP-01A, потребує підтвердження owner | WP-01A PR2 | підтверджено |
 | 4 | Role-wide drain barrier (зараз per-instance), origin limiter runtime, Compose/Swarm adapters | WP-01D PR2/PR3 | картка WP-01D |
 | 5 | TOCTOU у scheduler-тіку (нешкідливо для ідемпотентного maintenance) | WP-01D | «Відомі ризики» картки |
-| 6 | 2 unfixed HIGH CVE (perl, zlib) у базовому образі; 1 HIGH у GUI-образі | WP-13 | датований risk acceptance в ADR-0002, тригер перегляду — merge WP-02 |
+| 6 | 2 unfixed HIGH CVE (perl, zlib) у базовому образі | WP-13 | risk acceptance ADR-0002 переглянуто після WP-02: zlib write-path недосяжний; Debian fix відсутній, дедлайн 2026-12-22; final Trivy: 0 CRITICAL, 0 HIGH з fix |
 | 7 | Щотижневий scan за розкладом (§13 вимагає «щотижня і на кожен PR») | WP-13 | знахідка F-2 пострев'ю PR2 |
 | 8 | `api` у мережі `ingress` має необмежений egress замість «лише OIDC» | WP-11A | accepted, коментар у compose |
 | 9 | Health-endpoint розкриває версії/внутрішні адреси без auth | WP-11A | accepted |

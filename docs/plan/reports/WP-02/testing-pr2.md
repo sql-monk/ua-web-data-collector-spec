@@ -40,3 +40,9 @@ uv run pytest tests/integration/fetch/test_handler.py \
 
 Mutation evidence for SSRF/body/permit paths remains in `testing-pr1.md`; PR2 adds database and
 object-store fault injection at the transaction boundaries.
+
+## Final GitHub evidence
+
+Run `36059903510` on head `2e08b13`: 8/8 passed — Python 3m31s, PostgreSQL 2m13s,
+PostgreSQL+MinIO 2m32s, MongoDB 1m13s, web 1m02s, Docker clean-host 5m29s, pre-commit 15s,
+gitleaks 5s. PR #17 merged only after this run.
