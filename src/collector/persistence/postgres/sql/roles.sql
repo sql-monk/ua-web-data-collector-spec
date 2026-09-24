@@ -1,4 +1,4 @@
--- Ролі БД §13 / картка WP-01A (PR1 + PR2). Ідемпотентно; виконується `collector db roles`
+-- Ролі БД §13 / картка WP-01A (PR1 + PR2 + PR3a). Ідемпотентно; виконується `collector db roles`
 -- ПІСЛЯ `collector db migrate` (GRANT потребує таблиць) і повторюється після кожної міграції.
 --
 -- Скрипт створює group-ролі NOLOGIN і видає GRANT; атрибут LOGIN і паролі він НЕ змінює
@@ -113,8 +113,12 @@ REVOKE UPDATE ON artifact_upload_claims, projection_tasks, outbox_events FROM co
 GRANT SELECT ON artifact_upload_claims, projection_tasks, outbox_events TO collector_scheduler;
 GRANT UPDATE (status, lease_owner, lease_expires_at, leased_at, finished_at, last_error_code,
     last_error_message, updated_at) ON projection_tasks TO collector_scheduler;
-GRANT UPDATE (available_at, published_at, parked_at, attempts, last_error_code,
-    last_error_message, updated_at) ON outbox_events TO collector_scheduler;
+-- PR3a: `delivery_attempts` — лічильник видач `fetch_unpublished` (N-2), `unpark` скидає його.
+GRANT UPDATE (available_at, published_at, parked_at, attempts, delivery_attempts,
+    last_error_code, last_error_message, updated_at) ON outbox_events TO collector_scheduler;
+-- PR3a п.3: `purge_published` (maintenance WP-12) видаляє опубліковані `domain` і acknowledged
+-- `internal` рядки. RLS-політика `outbox_events_all` scheduler-а покриває DELETE.
+GRANT DELETE ON outbox_events TO collector_scheduler;
 GRANT INSERT (claim_id, object_key, owner, status, claim_generation, acquired_at,
     lease_expires_at, media_type, created_at, updated_at) ON artifact_upload_claims
     TO collector_scheduler;
@@ -126,7 +130,14 @@ GRANT UPDATE (owner, status, claim_generation, acquired_at, lease_expires_at, re
 GRANT SELECT ON sources, source_policy_versions, crawl_runs TO collector_fetcher;
 GRANT INSERT ON crawl_jobs TO collector_fetcher;
 GRANT SELECT, INSERT, UPDATE ON origin_rate_permits, source_cursors TO collector_fetcher;
-GRANT SELECT, INSERT, UPDATE ON source_routes TO collector_fetcher;
+-- source_routes (PR3a п.6): fetcher створює route (`upsert_route`, INSERT) і веде лічильник
+-- збоїв/circuit breaker (`record_route_failure`/`reset_route_failures`) — лише ці колонки.
+-- REVOKE табличного UPDATE спершу: column GRANT його не звужує (повторний `db roles` на БД до
+-- PR3a інакше лишив би fetcher-у право переписати `route_key`/`source_id`).
+REVOKE UPDATE ON source_routes FROM collector_fetcher;
+GRANT SELECT, INSERT ON source_routes TO collector_fetcher;
+GRANT UPDATE (consecutive_failures, last_failure_at, last_success_at, state, state_reason,
+    circuit_open_until, revision, updated_at) ON source_routes TO collector_fetcher;
 GRANT SELECT, UPDATE ON origin_rate_buckets TO collector_fetcher;
 GRANT SELECT, INSERT ON fetches, raw_objects TO collector_fetcher;
 GRANT SELECT, INSERT, UPDATE ON artifact_upload_claims TO collector_fetcher;

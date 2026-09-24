@@ -9,17 +9,24 @@ Transaction boundary: викликач. Усі UPDATE versioned-ресурсів
 транзакції**, що й зміну (той самий патерн, що `pools.request_scale`), і вимагає
 `actor`/`reason` як обов'язкові аргументи: дію без сліду неможливо навіть написати. Операції,
 які нічого не змінили (`upsert_route` для наявного route), сліду не лишають — це не мутація.
+
+Винятки без audit — **лічильник** збоїв route (`record_route_failure` до порогу,
+`reset_route_failures`): це телеметрія fetch-а, а не рішення; audit пишеться лише тоді, коли
+лічильник переводить route у `circuit_open` (PR3a п.6).
+
+Hot path fetch-а (PR3a п.4): `get_fetch_preflight` — один SELECT стану джерела, чинної policy
+і route за UUID перед кожним запитом.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import NoReturn
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,6 +60,79 @@ class PolicySnapshot:
     burst_tokens: int = 1
     browser_allowed: bool = False
     manifest_uri: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FetchPreflight:
+    """Що fetch-у треба знати перед запитом (PR3a п.4, WP-02 п.1): стан джерела, чинна policy
+    і стан route. `policy is None` — у джерела ще немає жодної policy-версії (fetch має
+    відмовити: без лімітів запит заборонений)."""
+
+    source_pk: UUID
+    source_id: str
+    source_state: SourceState
+    policy: PolicySnapshot | None
+    policy_version: int | None
+    route_id: UUID
+    route_state: RouteState
+    route_revision: int
+    route_kind: str
+    circuit_open_until: datetime | None
+
+
+async def get_fetch_preflight(
+    session: AsyncSession, source_uuid: UUID, route_id: UUID
+) -> FetchPreflight | None:
+    """Стан джерела + чинна policy (`sources.current_policy_version_id`) + route **одним**
+    запитом (PR3a п.4).
+
+    `None` — джерела з таким UUID немає, route немає або route належить іншому джерелу (для
+    fetch-а всі три випадки означають «не виконувати»). Доступно `collector_fetcher` (SELECT
+    на `sources`, `source_policy_versions`, `source_routes`). Transaction boundary: викликач;
+    один SELECT без блокувань.
+    """
+    row = (
+        await session.execute(
+            select(Source, SourceRoute, SourcePolicyVersion)
+            .join(
+                SourceRoute,
+                and_(SourceRoute.source_id == Source.id, SourceRoute.id == route_id),
+            )
+            .outerjoin(
+                SourcePolicyVersion, SourcePolicyVersion.id == Source.current_policy_version_id
+            )
+            .where(Source.id == source_uuid)
+            .execution_options(populate_existing=True)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    source, route, version = row.tuple()
+    return FetchPreflight(
+        source_pk=source.id,
+        source_id=source.source_id,
+        source_state=SourceState(source.state),
+        policy=_policy_snapshot(version) if version is not None else None,
+        policy_version=version.version if version is not None else None,
+        route_id=route.id,
+        route_state=RouteState(route.state),
+        route_revision=route.revision,
+        route_kind=route.route_kind,
+        circuit_open_until=route.circuit_open_until,
+    )
+
+
+def _policy_snapshot(version: SourcePolicyVersion) -> PolicySnapshot:
+    return PolicySnapshot(
+        requests_per_second=version.requests_per_second,
+        max_concurrency=version.max_concurrency,
+        crawl_interval_seconds=version.crawl_interval_seconds,
+        robots_policy=version.robots_policy,
+        manifest_sha256=version.manifest_sha256,
+        burst_tokens=version.burst_tokens,
+        browser_allowed=version.browser_allowed,
+        manifest_uri=version.manifest_uri,
+    )
 
 
 async def create_source(
@@ -354,6 +434,121 @@ async def set_route_state(
         now=current,
     )
     return route
+
+
+CIRCUIT_OPENABLE_ROUTE_STATES: frozenset[str] = frozenset(
+    {RouteState.HEALTHY.value, RouteState.DEGRADED.value}
+)
+"""Стани, з яких лічильник збоїв відкриває circuit. `unsupported` — сильніше рішення
+оператора/адаптера, лічильник його не перезаписує; `circuit_open` уже відкритий."""
+
+
+async def record_route_failure(
+    session: AsyncSession,
+    route_id: UUID,
+    *,
+    actor: str,
+    reason: str,
+    threshold: int,
+    circuit_open_for: timedelta | None = None,
+    request_id: str | None = None,
+    now: datetime | None = None,
+) -> RouteState:
+    """Атомарно `consecutive_failures + 1` і `last_failure_at = now` (PR3a п.6, WP-02 п.3).
+
+    Якщо лічильник досяг `threshold`, а route у `healthy`/`degraded`, у **тій самій**
+    транзакції route переходить у `circuit_open` (`circuit_open_until = now +
+    circuit_open_for`, `None` — до рішення оператора), `revision + 1`, і пишеться audit
+    `source_route.circuit_open` з `actor`/`reason`. Повертає стан route після виклику.
+
+    Інкремент — один `UPDATE … SET consecutive_failures = consecutive_failures + 1`: row lock
+    серіалізує конкурентних fetcher-ів, жоден збій не губиться, а поріг спрацьовує рівно
+    один раз (перехід відбувається лише з `healthy`/`degraded`). Сам інкремент `revision` не
+    змінює: інакше кожен збій робив би застарілою відкриту в GUI форму route.
+
+    `actor`/`reason` обов'язкові завжди — виклик, що може відкрити circuit, мусить уміти
+    залишити слід. Відсутній route → `NotFoundError`. Transaction boundary: викликач
+    (зазвичай разом із `record_fetch`). GRANT `collector_fetcher` — лише column UPDATE
+    лічильника/стану route (`sql/roles.sql`).
+    """
+    require_audit_context(actor, reason)
+    if threshold < 1:
+        msg = "threshold має бути >= 1"
+        raise ValueError(msg)
+    current = resolve_now(now)
+    counted = (
+        await session.execute(
+            update(SourceRoute)
+            .where(SourceRoute.id == route_id)
+            .values(
+                consecutive_failures=SourceRoute.consecutive_failures + 1,
+                last_failure_at=current,
+                updated_at=current,
+            )
+            .returning(SourceRoute.consecutive_failures, SourceRoute.state, SourceRoute.revision)
+        )
+    ).one_or_none()
+    if counted is None:
+        msg = f"route {route_id} не знайдено"
+        raise NotFoundError(msg)
+    failures, state, revision = counted.tuple()
+    if failures < threshold or state not in CIRCUIT_OPENABLE_ROUTE_STATES:
+        return RouteState(state)
+    open_until = current + circuit_open_for if circuit_open_for is not None else None
+    await session.execute(
+        update(SourceRoute)
+        .where(SourceRoute.id == route_id)
+        .values(
+            state=RouteState.CIRCUIT_OPEN.value,
+            state_reason=reason,
+            circuit_open_until=open_until,
+            revision=SourceRoute.revision + 1,
+            updated_at=current,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await append_audit(
+        session,
+        actor=actor,
+        action="source_route.circuit_open",
+        resource_type="source_route",
+        resource_id=str(route_id),
+        before={"state": state, "revision": revision},
+        after={
+            "state": RouteState.CIRCUIT_OPEN.value,
+            "revision": revision + 1,
+            "consecutive_failures": failures,
+            "threshold": threshold,
+            "circuit_open_until": open_until.isoformat() if open_until is not None else None,
+            "reason": reason,
+        },
+        request_id=request_id,
+        now=current,
+    )
+    return RouteState.CIRCUIT_OPEN
+
+
+async def reset_route_failures(
+    session: AsyncSession, route_id: UUID, *, now: datetime | None = None
+) -> RouteState:
+    """Успішний fetch: `consecutive_failures = 0`, `last_success_at = now` (PR3a п.6).
+
+    Стан route **не** змінюється: закрити відкритий circuit — окреме рішення
+    (`set_route_state` з audit), а не побічний ефект одного успіху. Повертає поточний стан;
+    відсутній route → `NotFoundError`. Transaction boundary: викликач; без audit (телеметрія).
+    """
+    current = resolve_now(now)
+    state = await session.scalar(
+        update(SourceRoute)
+        .where(SourceRoute.id == route_id)
+        .values(consecutive_failures=0, last_success_at=current, updated_at=current)
+        .returning(SourceRoute.state)
+        .execution_options(synchronize_session=False)
+    )
+    if state is None:
+        msg = f"route {route_id} не знайдено"
+        raise NotFoundError(msg)
+    return RouteState(state)
 
 
 async def upsert_cursor(

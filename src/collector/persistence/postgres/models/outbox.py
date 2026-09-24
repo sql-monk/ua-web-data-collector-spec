@@ -116,6 +116,7 @@ class OutboxEvent(Base):
         UniqueConstraint("event_id"),
         enum_check("topic", OUTBOX_TOPICS, "topic"),
         CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+        CheckConstraint("delivery_attempts >= 0", name="delivery_attempts_non_negative"),
         CheckConstraint(
             "(payload_bytes IS NULL) <> (payload_artifact_uri IS NULL)",
             name="inline_xor_artifact",
@@ -160,6 +161,12 @@ class OutboxEvent(Base):
     parked_at: Mapped[datetime | None]
     """Доставку зупинено після `max_attempts` (gate 3, CR-3): рядок чекає рішення оператора."""
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    """Невдалі доставки, про які publisher встиг повідомити (`mark_failed`)."""
+    delivery_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    """Видачі publisher-у (`fetch_unpublished`, PR3a N-2): рахуються в lease-транзакції, тож
+    crash publisher-а до `mark_failed` не обходить межу паркування."""
     last_error_code: Mapped[str | None] = mapped_column(String(64))
     last_error_message: Mapped[str | None] = mapped_column(String(2048))
     created_at: Mapped[CreatedAt]
