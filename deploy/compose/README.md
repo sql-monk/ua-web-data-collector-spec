@@ -79,7 +79,8 @@ Parse/projector/export/maintenance/scheduler/one-shots — лише `backend`, �
 ### MinIO: buckets, користувачі, policies (WP-00 PR5)
 
 One-shot `ensure-minio` (profile `core`, `depends_on: minio: service_healthy`) виконує
-`minio/ensure-minio.sh` у тому самому pinned image, що й сервер (там є vendor `mc`), від uid
+`minio/ensure-minio.sh` у тому самому source-built image, що й сервер (`minio` і `mc`
+збираються з pinned upstream commit-ів), від uid
 10001 з read-only rootfs. Ідемпотентно створює buckets `raw`, `normalized`, `archive`,
 `translated`, `events` і для кожного компонента — policy `collector-<component>`
 (`minio/policies/<component>.json`) та користувача з тим самим іменем. Після attach

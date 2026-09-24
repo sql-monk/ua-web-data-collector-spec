@@ -426,12 +426,12 @@ services:
   ensure-minio:
     # Buckets raw/normalized/archive/translated/events і per-component користувачі MinIO з
     # policies (§13 «writer/parser/auditor roles»; WP-00 PR5). Vendor `mc` з того самого
-    # pinned image, що й сервер `minio` (окремого digest для mc не потрібно), але від non-root
+    # source-built image, що й сервер `minio` (`mc` з pinned upstream commit), але від non-root
     # uid, read-only rootfs, без capabilities; конфіг mc — у tmpfs. Скрипт і policies — read-only
     # bind з репозиторію (deploy/compose/minio). Ідемпотентний: повторний `up` безпечний.
     # Root монтує лише цей one-shot (і сервер minio); minio_<component> — щоб створити
     # користувачів із ключами, які монтують відповідні сервіси.
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    image: ${COLLECTOR_MINIO_IMAGE:-collector-minio:RELEASE.2025-09-07T16-13-09Z}
     profiles: [core]
     restart: "no"
     read_only: true
@@ -444,7 +444,7 @@ services:
     cap_drop:
       - ALL
     logging: *logging
-    entrypoint: ["bash", "/etc/collector/minio/ensure-minio.sh"]
+    entrypoint: ["/bin/sh", "/etc/collector/minio/ensure-minio.sh"]
     environment:
       COLLECTOR_MINIO_URL: http://minio:9000
       MC_CONFIG_DIR: /tmp/.mc

@@ -9,6 +9,8 @@ FROM ${GO_IMAGE} AS builder
 
 ARG MINIO_VERSION=RELEASE.2025-09-07T16-13-09Z
 ARG MINIO_COMMIT=07c3a429bfed433e49018cb0f78a52145d4bedeb
+ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
+ARG MC_COMMIT=7394ce0dd2a80935aded936b09fa12cbb3cb8096
 ENV CGO_ENABLED=0 \
     GOBIN=/out
 
@@ -23,7 +25,15 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       "github.com/minio/minio@${MINIO_VERSION}" \
     && go version -m /out/minio | grep -F "v0.0.0-20250907161309-07c3a429bfed" \
     && module_dir="$(go env GOPATH)/pkg/mod/github.com/minio/minio@v0.0.0-20250907161309-07c3a429bfed" \
-    && cp "${module_dir}/LICENSE" "${module_dir}/CREDITS" /out/
+    && cp "${module_dir}/LICENSE" "${module_dir}/CREDITS" /out/ \
+    && go install -trimpath -ldflags="-s -w \
+      -X github.com/minio/mc/cmd.Version=2025-08-13T08:35:41Z \
+      -X github.com/minio/mc/cmd.ReleaseTag=${MC_VERSION} \
+      -X github.com/minio/mc/cmd.CommitID=${MC_COMMIT} \
+      -X github.com/minio/mc/cmd.ShortCommitID=7394ce0dd2a8 \
+      -X github.com/minio/mc/cmd.CopyrightYear=2025" \
+      "github.com/minio/mc@${MC_COMMIT}" \
+    && go version -m /out/mc | grep -F "v0.0.0-20250813083541-7394ce0dd2a8"
 
 FROM ${RUNTIME_IMAGE}
 
@@ -33,6 +43,7 @@ LABEL org.opencontainers.image.title="collector-minio" \
       org.opencontainers.image.version="${MINIO_VERSION}"
 
 COPY --from=builder /out/minio /usr/local/bin/minio
+COPY --from=builder /out/mc /usr/local/bin/mc
 COPY --from=builder /out/LICENSE /out/CREDITS /licenses/
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 

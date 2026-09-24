@@ -1,8 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # One-shot `ensure-minio` (WP-00 PR5, §13 «доступ розділений на writer/parser/auditor roles»):
 # ідемпотентно створює buckets і per-component користувачів MinIO з policies з ./policies.
 #
-# Виконується в тому самому pinned image, що й сервер `minio` (у ньому є vendor `mc`), від
+# Виконується в тому самому source-built image, що й сервер `minio` (pinned `mc` збирається
+# разом із ним), від
 # non-root uid з read-only rootfs; конфіг mc — лише у tmpfs. У image немає sed/grep/awk, тому
 # розбір файлів — вбудованими засобами bash.
 #
@@ -19,17 +20,18 @@
 # секрету + повторний `up`); `policy attach` уже прикріпленої policy — rc 0. Після attach
 # перевіряється, що в користувача рівно одна policy — власна; інакше exit 1 (least privilege:
 # зайву policy, додану вручну, мовчки не лишаємо).
-set -euo pipefail
+set -eu
 
 secrets_dir="${COLLECTOR_MINIO_SECRETS_DIR:-/run/secrets}"
 policies_dir="${COLLECTOR_MINIO_POLICIES_DIR:-/etc/collector/minio/policies}"
 endpoint="${COLLECTOR_MINIO_URL:-http://minio:9000}"
 alias_name=collector
 
-# Buckets: імена ключів у bucket-і — конвенція WP-02 `collector.storage`.
-buckets=(raw normalized archive translated events)
+# Списки без shell arrays: runtime image має POSIX BusyBox `sh`, додатковий bash не потрібен.
+# Імена ключів у bucket-і — конвенція WP-02 `collector.storage`.
+buckets="raw normalized archive translated events"
 # Компонент → policies/<component>.json → користувач `collector-<component>`.
-components=(fetcher parser projector translation maintenance readonly)
+components="fetcher parser projector translation maintenance readonly"
 
 die() { echo "ensure-minio: error: $*" >&2; exit 1; }
 
@@ -46,19 +48,23 @@ read_first_line() {
 root_user="$(read_first_line "$secrets_dir/minio_root_user")"
 root_password="$(read_first_line "$secrets_dir/minio_root_password")"
 # Обидва значення стають частиною URL у MC_HOST_*: лише URL-безпечні символи.
-[[ "$root_user" =~ ^[A-Za-z0-9._-]{3,}$ ]] || die "minio_root_user має недопустимий формат"
-[[ "$root_password" =~ ^[A-Za-z0-9._-]{8,}$ ]] || die "minio_root_password має недопустимий формат"
+[ "${#root_user}" -ge 3 ] || die "minio_root_user має недопустимий формат"
+[ "${#root_password}" -ge 8 ] || die "minio_root_password має недопустимий формат"
+case "$root_user" in *[!A-Za-z0-9._-]*) die "minio_root_user має недопустимий формат" ;; esac
+case "$root_password" in
+  *[!A-Za-z0-9._-]*) die "minio_root_password має недопустимий формат" ;;
+esac
 export "MC_HOST_${alias_name}=${endpoint%%://*}://${root_user}:${root_password}@${endpoint#*://}"
 unset root_password
 
 timeout 60 mc ready "$alias_name" >/dev/null
 
-for bucket in "${buckets[@]}"; do
+for bucket in $buckets; do
   mc mb --ignore-existing "$alias_name/$bucket" >/dev/null
   echo "ensure-minio: bucket $bucket ok"
 done
 
-for component in "${components[@]}"; do
+for component in $components; do
   file="$secrets_dir/minio_$component"
   [ -f "$file" ] || die "немає секрету $file (запустіть deploy/compose/secrets/init-secrets.sh)"
   access_key=""
@@ -74,16 +80,21 @@ for component in "${components[@]}"; do
   done < "$file"
   [ "$access_key" = "collector-$component" ] \
     || die "$file: access_key має бути collector-$component"
-  [[ "$secret_key" =~ ^[0-9a-f]{40}$ ]] || die "$file: secret_key має бути 40 hex-символів"
+  [ "${#secret_key}" -eq 40 ] || die "$file: secret_key має бути 40 hex-символів"
+  case "$secret_key" in
+    *[!0-9a-f]*) die "$file: secret_key має бути 40 hex-символів" ;;
+  esac
 
   policy="collector-$component"
   mc admin policy create "$alias_name" "$policy" "$policies_dir/$component.json" >/dev/null
   printf '%s\n%s\n' "$access_key" "$secret_key" | mc admin user add "$alias_name" >/dev/null
   mc admin policy attach "$alias_name" "$policy" --user "$access_key" >/dev/null
   info="$(mc admin user info "$alias_name" "$access_key" --json)"
-  [[ "$info" == *"\"policyName\":\"$policy\""* ]] \
-    || die "$access_key: очікувалась лише policy $policy; зайві policies відкріпіть" \
-      "(mc admin policy detach) і повторіть"
+  case "$info" in
+    *"\"policyName\":\"$policy\""*) ;;
+    *) die "$access_key: очікувалась лише policy $policy; зайві policies відкріпіть" \
+      "(mc admin policy detach) і повторіть" ;;
+  esac
   echo "ensure-minio: user $access_key → policy $policy ok"
 done
 

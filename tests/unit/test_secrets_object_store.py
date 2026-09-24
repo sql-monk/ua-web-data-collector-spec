@@ -185,9 +185,8 @@ def test_ensure_minio_is_a_hardened_one_shot_on_the_pinned_minio_image(
     services: dict[str, dict[str, Any]],
 ) -> None:
     svc = services["ensure-minio"]
-    # Той самий digest, що й сервер (vendor `mc` уже в ньому) — окремого образу немає.
+    # Той самий source-built image, що й сервер; pinned `mc` збирається в ньому ж.
     assert svc["image"] == services["minio"]["image"]
-    assert "@sha256:" in svc["image"]
     assert svc["profiles"] == ["core"]
     assert svc["restart"] == "no" and "healthcheck" not in svc
     assert svc["user"] == "10001:10001"
@@ -197,7 +196,7 @@ def test_ensure_minio_is_a_hardened_one_shot_on_the_pinned_minio_image(
     assert any(str(t).startswith("/tmp") for t in svc["tmpfs"])  # noqa: S108 — tmpfs mount
     assert svc["environment"]["MC_CONFIG_DIR"].startswith("/tmp")  # noqa: S108
     assert svc["volumes"] == ["./deploy/compose/minio:/etc/collector/minio:ro"]
-    assert svc["entrypoint"] == ["bash", "/etc/collector/minio/ensure-minio.sh"]
+    assert svc["entrypoint"] == ["/bin/sh", "/etc/collector/minio/ensure-minio.sh"]
     assert svc["networks"] == ["backend"]
     assert "ports" not in svc
     assert svc["depends_on"] == {"minio": {"condition": "service_healthy"}}
@@ -209,8 +208,8 @@ def test_minio_names_agree_across_compose_script_policies_and_examples(
     compose: dict[str, Any],
 ) -> None:
     script = ENSURE_MINIO.read_text(encoding="utf-8")
-    assert f"components=({' '.join(MINIO_COMPONENTS)})" in script
-    assert f"buckets=({' '.join(BUCKETS)})" in script
+    assert f'components="{" ".join(MINIO_COMPONENTS)}"' in script
+    assert f'buckets="{" ".join(BUCKETS)}"' in script
     assert {p.stem for p in (MINIO_DIR / "policies").glob("*.json")} == set(MINIO_COMPONENTS)
     declared = {n for n in compose["secrets"] if n.startswith("minio_") and "root" not in n}
     assert declared == set(MINIO_SECRETS)
@@ -704,8 +703,8 @@ def test_ensure_minio_propagates_mc_failure(tmp_path: Path, generated_secrets: P
 def test_ensure_minio_script_is_lf_and_strict() -> None:
     raw = ENSURE_MINIO.read_bytes()
     assert b"\r" not in raw
-    assert raw.startswith(b"#!/usr/bin/env bash\n")
-    assert b"set -euo pipefail" in raw
+    assert raw.startswith(b"#!/bin/sh\n")
+    assert b"set -eu" in raw
     # `mc alias set` приймає секрет в argv — заборонено.
     assert b"alias set" not in raw
 

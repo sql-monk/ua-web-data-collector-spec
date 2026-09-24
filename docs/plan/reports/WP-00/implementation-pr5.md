@@ -275,7 +275,7 @@ ensure-minio: user collector-translation → policy collector-translation ok
 ensure-minio: user collector-maintenance → policy collector-maintenance ok
 ensure-minio: user collector-readonly → policy collector-readonly ok
 ensure-minio: done
-$ docker compose run --rm --no-deps -v <scratch>/chk:/chk:ro --entrypoint bash ensure-minio /chk/perm.sh
+$ docker compose run --rm --no-deps -v <scratch>/chk:/chk:ro --entrypoint /bin/sh ensure-minio /chk/perm.sh
  Container collector-ensure-minio-run-1d6b2b6e8465 Creating
  Container collector-ensure-minio-run-1d6b2b6e8465 Created
 fetcher      PUT raw/probe              -> 200 (очікувано 200)
@@ -437,7 +437,8 @@ $ ls deploy/compose/secrets | grep -v -e .example -e init-secrets.sh | wc -l
   `init-secrets.sh`, тож нові файли з'являться там автоматично; `ensure-minio` входить у
   `--profile core`. Фактичний зелений прогін CI буде видно лише на PR.
 - **Linux-запуск unit-тестів shell-скриптів.** Прогін був на Windows (Git Bash). Тести не
-  пропускаються на POSIX: відсутність `bash`/`sh` там — провал, а не skip.
+  пропускаються на POSIX: відсутність потрібного shell там — провал, а не skip. Runtime
+  `ensure-minio.sh` є POSIX `sh`; `init-secrets.sh` використовує bash.
 
 ## Ризики
 

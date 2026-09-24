@@ -99,7 +99,7 @@ One-shot `ensure-minio` створює buckets і користувачів MinIO
 `up -d --wait` (з контейнера `ensure-minio`-образу, секрети лише з файлів, у argv — нічого):
 
 ```bash
-docker compose run --rm --no-deps --entrypoint bash ensure-minio -c '
+docker compose run --rm --no-deps --entrypoint /bin/sh ensure-minio -c '
   export MC_HOST_c="http://$(cat /run/secrets/minio_root_user):$(cat /run/secrets/minio_root_password)@minio:9000"
   mc ls c; mc admin user list c'
 # buckets archive/ events/ normalized/ raw/ translated/; шість enabled collector-<component>
