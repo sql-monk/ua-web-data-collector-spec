@@ -9,6 +9,7 @@ authors = [{ name = "UA Web Data Collector team" }]
 # Foundation-залежності (WP-00). Наступні WP додають свої залежності самостійно
 # в алфавітному порядку та перегенеровують uv.lock (docs/plan/cards/WP-00.md).
 dependencies = [
+  "aiobotocore>=3.9.1",
   # alembic, asyncpg, sqlalchemy — WP-01A PostgreSQL foundation (§7.2 queue, §9.1 schema).
   "alembic>=1.16",
   "asyncpg>=0.30",
