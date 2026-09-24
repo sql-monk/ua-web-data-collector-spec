@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html
 import re
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -49,6 +50,7 @@ _IMPLIED_END: dict[str, tuple[frozenset[str], frozenset[str]]] = {
 }
 # Слот перекладного атрибута (`alt`/`title`) усередині сирого тегу; U+FDD0/U+FDD1 —
 # Unicode noncharacters, у вхідному HTML замінюються на U+FFFD.
+_IMPLIED_END_SCAN = 256  # межа пошуку неявного закриття: hostile-вкладеність не дає O(n²)
 _ATTR_SLOT = "\ufdd0{}\ufdd1"
 _ATTR_SLOT_RE = re.compile("\ufdd0(\\d+)\ufdd1")
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
@@ -166,12 +168,14 @@ class _Segmenter(HTMLParser):
         self._max_chars = max_chars
         self._parts: list[str | int] = []
         self._segments: list[Segment] = []
-        self._stack: list[tuple[str, str | None]] = []
+        self._stack: list[tuple[str, str | None]] = []  # (блочний тег, успадкована мова)
+        self._open: Counter[str] = Counter()
         self._run: list[Token] = []
         self._run_context: tuple[str, str | None] = ("", None)
         # Захищений/пропущений елемент: (тег, глибина, куди: run чи parts, буфер).
         self._skip: tuple[str, int, bool, list[str]] | None = None
         self._root_lang: str | None = None
+        self._top_level = 0
 
     def document(self) -> SegmentedDocument:
         return SegmentedDocument(tuple(self._parts), tuple(self._segments), self._root_lang)
@@ -199,10 +203,11 @@ class _Segmenter(HTMLParser):
             return
         self._flush()
         self._parts.append(raw)
-        for position in range(len(self._stack) - 1, -1, -1):
-            if self._stack[position][0] == tag:
-                del self._stack[position:]
-                break
+        if self._open[tag]:
+            for position in range(len(self._stack) - 1, -1, -1):
+                if self._stack[position][0] == tag:
+                    self._pop_to(position)
+                    break
 
     def handle_data(self, data: str) -> None:
         self._text(data)
@@ -246,8 +251,10 @@ class _Segmenter(HTMLParser):
             return
         attr_map = {key.lower(): value for key, value in attrs}
         lang = attr_map.get("lang")
-        if not self._stack and self._root_lang is None and lang:
-            self._root_lang = lang
+        if not self._stack:
+            # Мова документа — `lang` єдиного елемента верхнього рівня (`html`/обгортка).
+            self._top_level += 1
+            self._root_lang = lang if self._top_level == 1 else None
         no_translate = (attr_map.get("translate") or "").lower() == "no"
         inline = tag in INLINE_TAGS or tag in PROTECTED_INLINE_TAGS
         if tag in SKIPPED_TAGS or tag in PROTECTED_INLINE_TAGS or no_translate:
@@ -270,18 +277,27 @@ class _Segmenter(HTMLParser):
     def _block_start(self, tag: str, raw: str, lang: str | None, *, void: bool) -> None:
         self._flush()
         if self._stack and self._stack[-1][0] == "p":
-            self._stack.pop()
+            self._pop_to(len(self._stack) - 1)
         closes, boundary = _IMPLIED_END.get(tag, (frozenset(), frozenset()))
-        for position in range(len(self._stack) - 1, -1, -1):
-            name = self._stack[position][0]
-            if name in boundary:
-                break
-            if name in closes:
-                del self._stack[position:]
-                break
+        if any(self._open[name] for name in closes):
+            lowest = max(len(self._stack) - _IMPLIED_END_SCAN, 0)
+            for position in range(len(self._stack) - 1, lowest - 1, -1):
+                name = self._stack[position][0]
+                if name in boundary:
+                    break
+                if name in closes:
+                    self._pop_to(position)
+                    break
         self._parts.append(raw)
         if not void:
-            self._stack.append((tag, lang))
+            # У стеку — успадкована мова: контекст сегмента береться за O(1).
+            self._stack.append((tag, lang or (self._stack[-1][1] if self._stack else None)))
+            self._open[tag] += 1
+
+    def _pop_to(self, position: int) -> None:
+        for name, _ in self._stack[position:]:
+            self._open[name] -= 1
+        del self._stack[position:]
 
     def _attribute_slots(
         self, raw: str, tag: str, attrs: list[tuple[str, str | None]], lang: str | None
@@ -313,9 +329,7 @@ class _Segmenter(HTMLParser):
             self._parts.append(raw)
 
     def _context(self) -> tuple[str, str | None]:
-        block = self._stack[-1][0] if self._stack else ""
-        lang = next((lang for _, lang in reversed(self._stack) if lang), None)
-        return block, lang
+        return self._stack[-1] if self._stack else ("", None)
 
     def _append(self, token: Token) -> None:
         if not self._run:
