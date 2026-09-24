@@ -4,12 +4,16 @@
 |---|---|
 | Від | WP-01A PR2 (`wp/01a-2-artifacts-projection`), gate 4 (`docs/plan/reports/WP-01A/spec-review-pr2.md` §5.2 D-2; `code-review-pr2-r2.md` N-1) |
 | До | WP-02 (fetch/parse workers, claimed/verified PUT normalized artifact-ів) |
-| Стан | open — вимоги до викликача; схеми й репозиторію не змінює |
+| Стан | partially resolved — умови 1–2 закриті WP-02 PR2; умова 3 передана WP-05 |
 
 `projection.record_parse_result` визначає ідемпотентність за **ідентичністю parse-кроку**
 (`projection_tasks.parse_key` = sha256 від `fetch_id`, `raw_sha256`, `parser_version`,
 `entity_uuid` і `target_collection`), а не за вмістом artifact. Рішення D-2 коректне лише
 за трьох умов на боці parser-а.
+
+WP-02 PR2 надає єдину `normalized_object_key(entity_uuid, sha256)`/`put_normalized` і передає
+справжній `fetches.fetch_id` у `parse.raw`, тому умови 1–2 закриті. Parse handler належить
+WP-05; він мусить виконати умову 3 нижче та зафіксувати її у власній картці/acceptance.
 
 ## 1. Ключ normalized artifact — функція `(sha256, entity_uuid)`
 
