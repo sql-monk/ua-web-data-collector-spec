@@ -19,6 +19,7 @@ Env-змінні worker-а:
 | `COLLECTOR_WORKER_LIVENESS_FILE` | `$TMPDIR/…alive` | маркер liveness (healthcheck) |
 | `COLLECTOR_WORKER_DEPLOYMENT` | `compose` | metadata `worker_instances.deployment` |
 | `COLLECTOR_CONTAINER_ID` | `HOSTNAME` | metadata `worker_instances.container_id` |
+| `COLLECTOR_WORKER_MAX_DEFER_SECONDS` | `86400` | стеля defer і нижньої межі retry (clamp) |
 
 Env-змінні scheduler-а: `COLLECTOR_SCHEDULER_TICK_SECONDS` (`5`),
 `COLLECTOR_SCHEDULER_LEASE_RETRY_SECONDS` (`5`), `COLLECTOR_SCHEDULER_LEASE_NAME`
@@ -50,6 +51,8 @@ HEARTBEAT_BUDGET_RATIO = 2.0
 """У скільки разів бюджет одного heartbeat-тіку більший за вікно fencing (сторож — першим)."""
 MISSED_BEATS_BUDGET = 3
 """Скільки періодів heartbeat має вміщатись у lease TTL."""
+DEFAULT_MAX_DEFER_SECONDS = 24 * 60 * 60.0
+"""Стеля `TaskResult.deferred(until)` і `retryable(not_before=)` від now (PR1c п.1): 24 год."""
 MAX_SLOTS_UNBOUNDED = 1_000_000
 """`max_concurrency=None` — вбудований запуск без власного engine: стелі немає."""
 CONNECTION_RESERVE = 3
@@ -130,6 +133,9 @@ class WorkerRuntimeConfig:
     # Маркер liveness для Docker healthcheck (вимога 7 картки). `None` — вимкнено: вбудований
     # запуск і тести не мають писати нічого, навіть у tmpfs.
     liveness_path: Path | None = None
+    # Стеля відкладення (defer, `Retry-After`) від now: далі — clamp з warning (PR1c п.1), щоб
+    # помилковий `until` у далекому майбутньому не «загубив» job у черзі на тижні.
+    max_defer_seconds: float = DEFAULT_MAX_DEFER_SECONDS
     deployment: str = "compose"
     hostname: str | None = field(default=None)
     container_id: str | None = None
@@ -154,6 +160,9 @@ class WorkerRuntimeConfig:
             raise WorkerConfigError(msg)
         if self.claim_batch < 1:
             msg = f"claim_batch має бути >= 1, отримано {self.claim_batch}"
+            raise WorkerConfigError(msg)
+        if self.max_defer_seconds <= 0:
+            msg = f"max_defer_seconds має бути > 0, отримано {self.max_defer_seconds}"
             raise WorkerConfigError(msg)
         if self.fence_after_seconds is not None and not (
             0 < self.fence_after_seconds <= self.lease_seconds
@@ -231,6 +240,9 @@ class WorkerRuntimeConfig:
                 default_pool_spec(role).desired_concurrency,
             ),
             liveness_path=default_liveness_path(dict(env)),
+            max_defer_seconds=_positive_float(
+                env, f"{WORKER_ENV_PREFIX}MAX_DEFER_SECONDS", DEFAULT_MAX_DEFER_SECONDS
+            ),
             deployment=env.get(f"{WORKER_ENV_PREFIX}DEPLOYMENT", "compose").strip() or "compose",
             # Docker hostname — лише metadata (§7.5): за нею не приймається жодне рішення.
             hostname=socket.gethostname(),

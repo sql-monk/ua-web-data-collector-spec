@@ -32,22 +32,36 @@ token/password/api_key параметрів (§13), але handler усе одн
 
 Винятки handler-а runtime трактує як retryable (`result_for_exception`), окрім
 `PermanentTaskError` — він означає карантин без подальших спроб.
+
+PR1c (передумова хвилі 1): `TaskResult.deferred` (відкласти без спалювання спроби),
+`TaskResult.retryable(..., not_before=)` (нижня межа наступної спроби, наприклад `Retry-After`),
+`TaskHandler.retry_schedule` (таблична затримка §10 замість дефолтного `BackoffPolicy`),
+`TaskResult.success(output=)` (результат для report-транзакції, напр. receipt projector-а) і
+`HandlerContext`, який фабрика ролі отримує від runtime. Реєстр із lazy import доменних модулів
+— `collector.workers.registry`; черги (`crawl_jobs`, `projection_tasks`) —
+`collector.workers.backends`.
 """
 
 from __future__ import annotations
 
 import inspect
+import random
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Final, Literal
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Final, Literal
 from uuid import UUID
 
 from collector.workers.roles import WorkerRole
 
-Disposition = Literal["complete", "retry", "quarantine"]
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from collector.workers.backends import QueueBackend
+
+Disposition = Literal["complete", "retry", "quarantine", "defer"]
 ERROR_CODE_MAX_LENGTH = 64
 
 
@@ -74,18 +88,44 @@ class Task:
     source_id: UUID | None
 
 
+def _require_aware(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        msg = f"{name} має бути timezone-aware (UTC), отримано naive {value!r}"
+        raise ValueError(msg)
+
+
 @dataclass(frozen=True, slots=True)
 class TaskResult:
-    """Рішення handler-а: `complete` | `retry` | `quarantine` (+ код/повідомлення помилки)."""
+    """Рішення handler-а: `complete` | `retry` | `quarantine` | `defer`.
+
+    - `complete` — успіх; `output` — необов'язковий результат, який runtime передає в
+      report-транзакцію backend-а (для `projection_tasks` — receipt для ack);
+    - `retry` — retryable-помилка; `not_before` — **нижня межа** наступної спроби (напр.
+      `Retry-After`): runtime бере `max(now + затримка з розкладу, not_before)`;
+    - `quarantine` — permanent failure (карантин + dead letter);
+    - `defer` — «ще не час» (limiter відмовив, source paused, бюджет вичерпано): job
+      повертається в чергу з `not_before = until` **без** спалювання спроби, без полів помилки
+      і без dead letter. `error_code` обов'язковий — він іде в лог `worker.task_deferred`.
+    """
 
     disposition: Disposition
     error_code: str | None = None
     error_message: str | None = None
+    not_before: datetime | None = None
+    output: object | None = None
 
     def __post_init__(self) -> None:
+        if self.output is not None and self.disposition != "complete":
+            msg = f"output дозволений лише для complete, не для {self.disposition!r}"
+            raise ValueError(msg)
+        if self.not_before is not None:
+            if self.disposition not in {"retry", "defer"}:
+                msg = f"not_before дозволений лише для retry/defer, не для {self.disposition!r}"
+                raise ValueError(msg)
+            _require_aware(self.not_before, "not_before")
         if self.disposition == "complete":
-            if self.error_code is not None:
-                msg = "успішний результат не має error_code"
+            if self.error_code is not None or self.error_message is not None:
+                msg = "успішний результат не має error_code/error_message"
                 raise ValueError(msg)
             return
         if not self.error_code:
@@ -94,18 +134,72 @@ class TaskResult:
         if len(self.error_code) > ERROR_CODE_MAX_LENGTH:
             msg = f"error_code довший за {ERROR_CODE_MAX_LENGTH} символів"
             raise ValueError(msg)
+        if self.disposition == "defer":
+            if self.not_before is None:
+                msg = "defer потребує until (not_before)"
+                raise ValueError(msg)
+            if self.error_message is not None:
+                # Defer нікого не провалив: runtime не пише полів помилки, тож текст мовчки
+                # губився б — краще відмовити одразу.
+                msg = "defer не пише полів помилки — error_message не приймається"
+                raise ValueError(msg)
 
     @classmethod
-    def success(cls) -> TaskResult:
-        return cls(disposition="complete")
+    def success(cls, output: object | None = None) -> TaskResult:
+        return cls(disposition="complete", output=output)
 
     @classmethod
-    def retryable(cls, error_code: str, error_message: str | None = None) -> TaskResult:
-        return cls(disposition="retry", error_code=error_code, error_message=error_message)
+    def retryable(
+        cls,
+        error_code: str,
+        error_message: str | None = None,
+        *,
+        not_before: datetime | None = None,
+    ) -> TaskResult:
+        return cls(
+            disposition="retry",
+            error_code=error_code,
+            error_message=error_message,
+            not_before=not_before,
+        )
 
     @classmethod
     def permanent(cls, error_code: str, error_message: str | None = None) -> TaskResult:
         return cls(disposition="quarantine", error_code=error_code, error_message=error_message)
+
+    @classmethod
+    def deferred(cls, until: datetime, error_code: str) -> TaskResult:
+        return cls(disposition="defer", error_code=error_code, not_before=until)
+
+
+@dataclass(frozen=True, slots=True)
+class RetrySchedule:
+    """Таблична затримка retry (§10: 5 с / 30 с / 2 хв / 10 хв), яку задає handler.
+
+    Затримка для спроби `n` (1-based, `Task.attempt` після claim) — `delays[min(n, len) - 1]`
+    плюс рівномірний jitter у `[0, delay * jitter_ratio]` — jitter обмежений зверху цією межею.
+    `max_attempts` — властивість job-и (ставить планувальник домену при enqueue), не розкладу.
+    """
+
+    delays: tuple[timedelta, ...]
+    jitter_ratio: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.delays:
+            msg = "RetrySchedule.delays не може бути порожнім"
+            raise ValueError(msg)
+        if any(delay <= timedelta(0) for delay in self.delays):
+            msg = "кожна затримка RetrySchedule має бути > 0"
+            raise ValueError(msg)
+        if not 0.0 <= self.jitter_ratio <= 1.0:
+            msg = f"jitter_ratio має бути у [0, 1], отримано {self.jitter_ratio}"
+            raise ValueError(msg)
+
+    def delay(self, attempt: int, rng: random.Random) -> timedelta:
+        base = self.delays[min(max(attempt, 1), len(self.delays)) - 1]
+        if self.jitter_ratio <= 0:
+            return base
+        return base + timedelta(seconds=rng.uniform(0.0, base.total_seconds() * self.jitter_ratio))
 
 
 class TaskHandler(ABC):
@@ -115,6 +209,11 @@ class TaskHandler(ABC):
     @abstractmethod
     def job_types(self) -> tuple[str, ...]:
         """Типи jobs, які claim-ить runtime цієї ролі (непорожній кортеж)."""
+
+    @property
+    def retry_schedule(self) -> RetrySchedule | None:
+        """Таблична затримка retry; `None` — дефолтний `BackoffPolicy` черги (як до PR1c)."""
+        return None
 
     async def check_ready(self) -> None:
         """Readiness-перевірка залежностей ролі; виняток = instance не стає `ready`."""
@@ -144,17 +243,48 @@ class NoopHandler(TaskHandler):
         return TaskResult.success()
 
 
-HandlerFactory = Callable[[WorkerRole], TaskHandler]
+@dataclass(frozen=True, slots=True)
+class HandlerContext:
+    """Що runtime дає фабриці handler-а ролі (PR1c п.4).
+
+    - `sessions` — **той самий** `async_sessionmaker`, що й у runtime (одна LOGIN-роль §13,
+      один pool з'єднань): handler не відкриває другого pool-у під тим самим DSN;
+    - `worker_instance_id` — id зареєстрованого instance; `owner` (рядок) — власник upload
+      claims/origin permits, той самий, що `lease_owner` jobs цього instance;
+    - `clock` — годинник runtime (UTC); `env` — env процесу (конфігурація домену).
+    """
+
+    role: WorkerRole
+    sessions: async_sessionmaker[AsyncSession]
+    worker_instance_id: UUID
+    clock: Callable[[], datetime]
+    env: Mapping[str, str]
+
+    @property
+    def owner(self) -> str:
+        return str(self.worker_instance_id)
+
+
+@dataclass(frozen=True, slots=True)
+class HandlerBinding:
+    """Прив'язка handler-а до черги; роль може мати кілька (PR1c п.5).
+
+    `projector`: `ProjectionTasksBackend` + `ProjectorHandler` і `CrawlJobsBackend` + handler-и
+    `projection.reconcile`/`projection.compact`. Слоти `desired_concurrency` спільні для всіх
+    прив'язок ролі; claim по прив'язках — round-robin.
+    """
+
+    backend: QueueBackend
+    handler: TaskHandler
+
+
+HandlerFactory = Callable[[HandlerContext], TaskHandler | Sequence[HandlerBinding]]
+"""Фабрика ролі: один `TaskHandler` (черга `crawl_jobs`) або кілька `HandlerBinding`."""
 
 HANDLER_FACTORIES: Final[dict[WorkerRole, HandlerFactory]] = {}
-"""Реєстр доменних handler-ів: роль → фабрика. Доменні WP додають свої записи при імпорті
-свого модуля; ролі без запису працюють на `NoopHandler`."""
-
-
-def resolve_handler(role: WorkerRole) -> TaskHandler:
-    """Handler ролі з реєстру або `NoopHandler`, якщо доменний ще не зареєстровано."""
-    factory = HANDLER_FACTORIES.get(role)
-    return factory(role) if factory is not None else NoopHandler(role)
+"""Реєстр доменних handler-ів: роль → фабрика. Доменний модуль ролі додає свій запис при
+імпорті, а імпортує модуль runtime — ліниво, через `collector.workers.registry`. Ролі без
+модуля і без запису працюють на `NoopHandler`."""
 
 
 _CREDENTIALS_IN_URL = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)[^/\s:@]+:[^/\s@]*@")
@@ -209,14 +339,16 @@ def result_for_exception(exc: BaseException) -> TaskResult:
 __all__ = [
     "HANDLER_FACTORIES",
     "REDACTED",
+    "HandlerBinding",
+    "HandlerContext",
     "HandlerFactory",
     "NoopHandler",
     "PermanentTaskError",
+    "RetrySchedule",
     "Task",
     "TaskHandler",
     "TaskResult",
     "check_handler_contract",
     "redact",
-    "resolve_handler",
     "result_for_exception",
 ]
