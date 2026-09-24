@@ -421,3 +421,15 @@ Docker-стек (один раз після rebase): `init-secrets.sh` (12 фа�
 `leaks inspect=0 logs=0`. `down -v` → `containers=0 volumes=0`; згенеровані секрети видалено, не
 комітились; стек `puluj-g-*` не чіпався. Жорсткіші перевірки S-2/S-3 не заважають реальним
 LOGIN-ролям стека: усі runtime-процеси стартували.
+
+## Статуси знахідок після gate 3' і gate 4 (оркестратор, 2026-09-24)
+
+| Знахідка | Статус | Owner | Дата | Примітка |
+|---|---|---|---|---|
+| Gate 3' low #1 — docstring `SLOW` відірвано `CYCLE_CLOCK` (`test_runtime_login_adversarial.py:58-65`) | accepted | WP-01D | 2026-09-24 | косметика тесту; виправити при наступній правці файлу (PR2) |
+| Gate 3' low #2 — вартовий S-1 шукає реєстрацію handler-а однорядковим regex (`test_db_login.py:185-193`) | accepted | WP-11A | 2026-09-24 | страхує жорсткий тригер у картці WP-01D (до першого export handler або pilot) |
+| Security S-6 — PR1b стояв на проміжному PR4 | fixed | WP-01D | 2026-09-24 | rebase на `main` після PR #7 |
+| Testing T-1 — CI integration з trust-auth | accepted (= S-4) | WP-13 | 2026-09-24 | SCRAM перевіряється в Docker-прогонах і CI job `docker` (WP-00 PR4) |
+| Spec SR-3 — виняток оркестратора на `roles.py` | accepted | WP-01A | 2026-09-24 | WP-01A підтверджує при наступному PR (PR3); записано в ledger |
+| Spec SR-4 — N-2 (лічильник доставок outbox) передано у ще не створену картку WP-01B | accepted | orchestrator | 2026-09-24 | внести в картку WP-01B при її створенні; записано в ledger |
+| Spec ТЗ-1 — уточнити §13 для exporter-а (мінімальна роль черги + read-only для даних) | open | orchestrator / WP-11A | 2026-09-24 | до старту WP-11A |

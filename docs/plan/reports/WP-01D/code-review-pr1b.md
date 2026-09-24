@@ -50,3 +50,44 @@ Critical / high / medium знахідок немає.
   - `uv run pytest -q tests/unit/workers/test_db_login.py tests/unit/test_compose_config.py tests/unit/test_compose_config_adversarial.py` → `97 passed`.
   - `uv run mypy src/collector/workers src/collector/cli.py` → `Success: no issues found in 12 source files`.
   - Integration (Docker) не запускались, за умовою завдання.
+
+## Re-review (gate 3')
+
+Обсяг: лише інкрементальні коміти `091ea5a` (код, тести) і `f721571` (картка, deps §6, звіти).
+
+### Знахідки
+
+- low | tests/integration/scaling/test_runtime_login_adversarial.py:58-65 | `CYCLE_CLOCK` вставлено між `SLOW = 60.0` і його docstring. Тепер docstring про таймаут стоїть окремим рядковим літералом одразу після docstring `CYCLE_CLOCK`, а `SLOW` лишився без опису | IDE/Sphinx показують для `CYCLE_CLOCK` лише перший рядок, `SLOW` — без документації, другий літерал висить як no-op. На поведінку не впливає | CONFIRMED (читання файлу)
+- low | tests/unit/workers/test_db_login.py:185-193 | Другу половину тесту-вартового S-1 (перевірку джерел) побудовано на regex `HANDLER_FACTORIES\s*(\[|\.update|\.setdefault)[^\n]*EXPORT` по одному рядку. Перша половина (`resolve_handler`) бачить лише модулі, які вже імпортовано в тесті | Реєстрацію в модулі, який тест не імпортує, записану багаторядково (`HANDLER_FACTORIES[\n    WorkerRole.EXPORT\n] = ...`) або через `WorkerRole("export")`, вартовий не помітить. Тоді export отримає реальний handler під `collector_scheduler`. Жорсткий тригер у картці WP-01D (WP-11A / pilot) це страхує | PLAUSIBLE
+
+Critical, high і medium знахідок немає.
+
+### Вердикт
+
+`approve`
+
+### Що перевірено окремо
+
+- **`verify_runtime_login`, `session_user`/`current_user`/`is_superuser`** (`roles.py:310-329`).
+  - Перевірка стоїть до решти перевірок атрибутів і allowlist.
+  - `current_setting('is_superuser')` повертає `'off'`/`'on'`, тож порівняння рядків коректне.
+  - Default GUC `role` (`server_settings`/`ALTER ROLE … SET role`) дає `session_user` ≠ `current_user`, і логін відхиляється. Це покриває `test_worker_refuses_a_privileged_session_with_a_default_role`.
+  - Окремо перевірив обхід через `session_authorization` на одноразовому `postgres:18`, `docker run`; compose не піднімав. `ALTER ROLE ops SET session_authorization = 'collector_fetcher'` і `PGOPTIONS='-c session_authorization=…'` на старті не застосовуються: `session_user` = `current_user` = логін, `is_superuser=on`. Отже цього обходу немає, і перевірка `session_user` достатня.
+- **Рекурсивне членство** (`_PRIVILEGED_MEMBERSHIPS`).
+  - `pg_has_role(:role, oid, 'MEMBER')` транзитивний і не залежить від `INHERIT`/`SET`-опцій гранту (PG16+). Отже `NOINHERIT`-грант, через який можна зробити `SET ROLE`, теж ловиться. `USAGE` пропустив би саме такі гранти, тож вибір `MEMBER` правильний.
+  - `LIKE :component_roles` з bind-значенням `collector\_%` при `standard_conforming_strings=on` і default escape `\` дає буквальний `_`. `collectorX…` не збігається. Саму роль виключає `rolname <> :role`.
+- **False positive для легітимних ролей.**
+  - У `src/collector/persistence/postgres/sql/roles.sql` role-to-role GRANT-ів немає: лише `CREATE ROLE … NOLOGIN` і об'єктні GRANT-и до group-ролей §13. Тобто runtime-роль не є членом жодної іншої `collector_*`.
+  - `pg_database_owner` збігається лише для власника поточної БД. У compose це `POSTGRES_USER`, а не runtime.
+  - `tests/integration/postgres/test_role_logins.py` (WP-01A, без змін) зелений.
+- **Міграційний шлях.** `apply_logins` (`db roles --with-login`) використовує той самий `privileged_memberships`. При чистих `roles.sql` нових відмов немає. Дрейф (зовнішній `GRANT collector_* TO collector_*`) тепер валить `migrate-postgres` з повідомленням без секретів — це очікувана поведінка S-3.
+- **Детермінізм тесту з замороженим годинником.**
+  - `clock` runtime використовується лише для `now=` у SQL claim/heartbeat/retry/release.
+  - Self-fencing і drain рахуються від `monotonic()` (`runtime.py:160, 550-575, 657, 743`), тож заморожений годинник їх не зупиняє.
+  - `not_before = CYCLE_CLOCK + backoff` > `CYCLE_CLOCK`, тому повторного claim job `n=1` не буде за жодної тривалості тесту. Це закріплено двома новими asserts.
+- **Порядок teardown `running` → `role_engine`, `_cli_env` без `COLLECTOR_POSTGRES_DSN_FILE`** (`None` у `CliRunner.env` прибирає змінну). Обидві правки коректні.
+- **Прогони.**
+  - `uv run pytest tests/unit/workers/test_db_login.py -q` → `8 passed`.
+  - `uv run pytest tests/integration/postgres/test_role_logins.py tests/integration/scaling/test_runtime_login.py tests/integration/scaling/test_runtime_login_adversarial.py -q -p no:randomly` (testcontainers) → `52 passed in 143.38s`.
+  - `uv run ruff check` змінених файлів → `All checks passed!`.
+  - `mypy` по `roles.py` і `test_db_login.py` помилок не дає. Помилки `import-not-found .conftest` та інші в `tests/integration/scaling/test_worker_runtime*.py` — артефакт прямого виклику mypy на теки тестів і файли поза інкрементом, до цих комітів не належать.
