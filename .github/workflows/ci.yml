@@ -201,6 +201,40 @@ jobs:
         if: failure()
         run: docker logs mongo 2>&1 | tail -200
 
+  integration-fetch:
+    name: integration (PostgreSQL 18 + MinIO)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # Вартовий каталогу перетворює будь-який skip на fail. PostgreSQL запускає pinned
+      # testcontainer; MinIO image нижче збирається з exact upstream commits WP-00 PR5.
+      COLLECTOR_TEST_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python from .python-version
+        run: uv python install
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: Build pinned MinIO test image
+        # Plain Docker CLI is the same path used by the already-proven compose job and does not
+        # depend on a separate buildx/cache exporter being available on the runner.
+        run: >-
+          docker build
+          -t collector-minio:RELEASE.2025-09-07T16-13-09Z
+          deploy/compose/minio
+
+      - name: pytest -m integration tests/integration/fetch (no skip)
+        run: uv run pytest -m integration tests/integration/fetch -rs
+
   pre-commit:
     name: pre-commit (ruff, markdownlint, hygiene)
     runs-on: ubuntu-latest

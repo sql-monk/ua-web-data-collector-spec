@@ -14,16 +14,23 @@ PostgreSQL (маркер `integration` → `allow_hosts` у `tests/conftest.py`)
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import importlib.util
 import os
+import secrets
 import sys
-from collections.abc import Generator, Iterator
+import time
+from collections.abc import AsyncIterator, Generator, Iterator
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
+import pytest_asyncio
+
+from collector.storage import S3ArtifactStore, S3Credentials, StorageSettings
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "fetch"
 if str(FIXTURES_DIR) not in sys.path:
@@ -33,6 +40,97 @@ REQUIRE_DOCKER_ENV = "COLLECTOR_TEST_REQUIRE_DOCKER"
 _FIXTURES_MODULE = "collector_tests_postgres_fixtures"
 _FIXTURES_PATH = Path(__file__).resolve().parent.parent / "postgres" / "conftest.py"
 _SHARED: dict[str, Any] = {}
+MINIO_IMAGE = "collector-minio:RELEASE.2025-09-07T16-13-09Z"
+MINIO_URL_ENV = "COLLECTOR_TEST_MINIO_URL"
+MINIO_ACCESS_KEY_ENV = "COLLECTOR_TEST_MINIO_ACCESS_KEY"
+MINIO_SECRET_KEY_ENV = "COLLECTOR_TEST_MINIO_SECRET_KEY"  # noqa: S105 - env variable name
+
+
+@dataclass(frozen=True, slots=True)
+class MinioServer:
+    settings: StorageSettings
+
+
+def _skip_or_fail(reason: str) -> None:
+    if os.environ.get(REQUIRE_DOCKER_ENV) == "1":
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
+def _start_minio() -> Iterator[MinioServer]:
+    try:
+        from testcontainers.core.config import testcontainers_config
+        from testcontainers.core.container import DockerContainer
+        from testcontainers.core.docker_client import DockerClient
+    except ImportError as exc:  # pragma: no cover - dev dependency
+        _skip_or_fail(f"testcontainers unavailable: {exc}")
+        raise
+    try:
+        DockerClient().client.ping()
+    except Exception as exc:
+        _skip_or_fail(f"Docker unavailable ({type(exc).__name__}: {exc})")
+        raise
+    if not testcontainers_config.tc_host_override:
+        testcontainers_config.tc_host_override = "127.0.0.1"
+    access_key = f"test-{secrets.token_hex(8)}"
+    secret_key = secrets.token_urlsafe(24)
+    container = (
+        DockerContainer(MINIO_IMAGE)
+        .with_env("MINIO_ROOT_USER", access_key)
+        .with_env("MINIO_ROOT_PASSWORD", secret_key)
+        .with_command("server /data --console-address :9001")
+        .with_exposed_ports(9000)
+    )
+    try:
+        container.start()
+    except Exception as exc:
+        _skip_or_fail(f"MinIO container failed to start ({type(exc).__name__}: {exc})")
+        raise
+    try:
+        endpoint = f"http://127.0.0.1:{container.get_exposed_port(9000)}"
+        yield MinioServer(StorageSettings(endpoint, S3Credentials(access_key, secret_key)))
+    finally:
+        container.stop()
+
+
+@pytest.fixture(scope="session")
+def minio_server() -> Iterator[MinioServer]:
+    endpoint = os.environ.get(MINIO_URL_ENV)
+    access_key = os.environ.get(MINIO_ACCESS_KEY_ENV)
+    secret_key = os.environ.get(MINIO_SECRET_KEY_ENV)
+    if endpoint or access_key or secret_key:
+        if not (endpoint and access_key and secret_key):
+            pytest.fail(
+                f"{MINIO_URL_ENV}, {MINIO_ACCESS_KEY_ENV}, and {MINIO_SECRET_KEY_ENV} "
+                "must be set together"
+            )
+        yield MinioServer(StorageSettings(endpoint, S3Credentials(access_key, secret_key)))
+        return
+    yield from _start_minio()
+
+
+@pytest_asyncio.fixture
+async def minio_store(minio_server: MinioServer) -> AsyncIterator[tuple[S3ArtifactStore, str]]:
+    store = S3ArtifactStore(minio_server.settings)
+    bucket = f"wp02-{secrets.token_hex(8)}"
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            async with store._client() as client:  # noqa: SLF001 - test provisioning
+                await client.create_bucket(Bucket=bucket)
+            break
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(0.25)
+    try:
+        yield store, bucket
+    finally:
+        async with store._client() as client:  # noqa: SLF001 - test cleanup
+            response = await client.list_objects_v2(Bucket=bucket)
+            for item in response.get("Contents", []):
+                await client.delete_object(Bucket=bucket, Key=item["Key"])
+            await client.delete_bucket(Bucket=bucket)
 
 
 @pytest.hookimpl(hookwrapper=True)

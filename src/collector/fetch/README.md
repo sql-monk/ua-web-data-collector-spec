@@ -1,4 +1,4 @@
-# Fetch core (`collector.fetch`) — PR1
+# Fetch core (`collector.fetch`)
 
 Owner: WP-02. Спільний fetch layer §7.1: жоден адаптер не створює власного HTTP-клієнта (§11).
 HTTP-клієнт — `httpx` згідно з [ADR-0008](../../../docs/decisions/0008-fetch-core-on-httpx-not-scrapy.md)
@@ -6,8 +6,8 @@ HTTP-клієнт — `httpx` згідно з [ADR-0008](../../../docs/decisions
 `WorkerRuntime`, власний `httpcore` network backend для DNS pinning, `trust_env=False`,
 `follow_redirects=False`. Відхилення від ADR-0008 — лише через оркестратора.
 
-Статус: PR1 (URL/origin, Route Guard, SSRF-клієнт, ліміти, retry decisions, permits). Artifact
-store, upload claim, robots snapshot і `FetchHandler` — PR2; browser worker — PR3.
+Статус: PR1 і PR2 реалізовані (HTTP/SSRF/ліміти, artifact store, upload claims, robots,
+`FetchHandler`); browser worker — PR3.
 
 ## Модулі
 
@@ -22,6 +22,27 @@ store, upload claim, robots snapshot і `FetchHandler` — PR2; browser worker �
 | `permits.py` | Protocol `OriginPermits`, `Permit`/`Denied`, тимчасовий `PgOriginPermits` (O-1) |
 | `client.py` | `SafeFetcher.fetch(FetchRequest) -> FetchResult` |
 | `config.py` | `FetchConfig.from_env` |
+| `robots.py` | versioned robots snapshots, TTL і policy `diagnostic`/`ignore`/`respect` |
+| `metrics.py` | bounded in-process counters; експорт належить WP-12 |
+| `handler.py` | preflight, conditional GET, robots, raw upload, fetch lineage і наступний job |
+
+## Robots snapshot
+
+Job із `request_kind="robots"` завжди нормалізує URL до `/robots.txt`, використовує той самий
+SSRF-клієнт і global origin permit, що й page fetch, та зберігає відповідь як raw artifact без
+`parse.raw`. `COLLECTOR_ROBOTS_TTL_SECONDS` типово дорівнює 86400; свіжа версія не запитується
+повторно. HTTP 404 фіксується як snapshot «відсутній», а 5xx не витісняє попередню версію.
+
+`robots_policy=diagnostic` (default) і `ignore` не блокують page fetch. `respect` перед page
+fetch оновлює прострочений snapshot і застосовує правила до стабільного User-Agent. Заборонений
+URL не запитується: у `fetches` пишеться `policy_blocked`, а рішення спирається на immutable raw
+snapshot. Невідоме значення policy завершує job як `robots_policy_invalid` без мережевого I/O.
+
+## Метрики
+
+`FetchMetrics` накопичує `http_requests_total{source,status_class}`, `http_429_total`,
+`policy_blocks_total`, `raw_bytes_total`, numerator/denominator для `raw_dedup_ratio` та
+`artifact_orphans_total`. URL і origin не є labels. WP-12 підключає exporter до цього API.
 
 ## Як викликати
 

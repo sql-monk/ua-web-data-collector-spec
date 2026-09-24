@@ -288,7 +288,60 @@ class S3ArtifactStore:
         if not bucket:
             raise ValueError("bucket має бути непорожнім")
         async with self._client() as client:
-            await client.head_bucket(Bucket=bucket)
+            # HeadBucket requires s3:ListBucket, which would let producers enumerate every
+            # content-addressed key. GetBucketLocation proves endpoint, credentials and bucket
+            # access with a narrower bucket-level permission.
+            await client.get_bucket_location(Bucket=bucket)
+
+
+class LazyS3ArtifactStore:
+    """Create the configured S3 client on readiness/first use, not during handler wiring.
+
+    Worker boot verifies its PostgreSQL LOGIN role before dependency readiness. Deferring file
+    access preserves that diagnostic ordering while missing credentials still fail closed before
+    the instance becomes ready or performs source I/O.
+    """
+
+    def __init__(self, environ: Mapping[str, str]) -> None:
+        self._environ = dict(environ)
+        self._store: S3ArtifactStore | None = None
+
+    def _configured(self) -> S3ArtifactStore:
+        if self._store is None:
+            self._store = S3ArtifactStore(StorageSettings.from_env(self._environ))
+        return self._store
+
+    async def put(
+        self, bucket: str, key: str, data: bytes, *, sha256: str, media_type: str
+    ) -> StoredObject:
+        return await self._configured().put(bucket, key, data, sha256=sha256, media_type=media_type)
+
+    async def head(self, bucket: str, key: str) -> ObjectHead:
+        return await self._configured().head(bucket, key)
+
+    async def get(self, bucket: str, key: str, *, expected_sha256: str, max_bytes: int) -> bytes:
+        return await self._configured().get(
+            bucket, key, expected_sha256=expected_sha256, max_bytes=max_bytes
+        )
+
+    async def _stream(
+        self, bucket: str, key: str, *, expected_sha256: str, max_bytes: int | None
+    ) -> AsyncIterator[bytes]:
+        async for chunk in self._configured().get_stream(
+            bucket, key, expected_sha256=expected_sha256, max_bytes=max_bytes
+        ):
+            yield chunk
+
+    def get_stream(
+        self, bucket: str, key: str, *, expected_sha256: str, max_bytes: int | None = None
+    ) -> AsyncIterator[bytes]:
+        return self._stream(bucket, key, expected_sha256=expected_sha256, max_bytes=max_bytes)
+
+    async def delete(self, bucket: str, key: str) -> None:
+        await self._configured().delete(bucket, key)
+
+    async def check_ready(self, bucket: str) -> None:
+        await self._configured().check_ready(bucket)
 
 
 __all__ = [
@@ -296,6 +349,7 @@ __all__ = [
     "ArtifactNotFoundError",
     "ArtifactStore",
     "ArtifactTooLargeError",
+    "LazyS3ArtifactStore",
     "ObjectHead",
     "S3ArtifactStore",
     "S3Credentials",
