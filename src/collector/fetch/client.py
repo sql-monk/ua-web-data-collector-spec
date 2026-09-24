@@ -251,7 +251,8 @@ class SafeFetcher:
     ) -> FetchResult:
         status = response.status_code
         media_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        headers = {k: v for k in SAFE_RESPONSE_HEADERS if (v := response.headers.get(k))}
+        # `redact`: Location/ETag можуть нести credentials чи токени в URL (§13).
+        headers = {k: redact(v) for k in SAFE_RESPONSE_HEADERS if (v := response.headers.get(k))}
 
         def result(decision: FetchDecision, body: Body | None = None) -> FetchResult:
             return FetchResult(

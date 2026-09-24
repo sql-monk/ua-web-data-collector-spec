@@ -271,3 +271,13 @@ async def test_logs_and_result_do_not_leak_secrets(make_fetcher, network) -> Non
         assert secret not in dumped, secret
     assert "authorization" not in dumped.lower()
     assert any(entry["event"] == "fetch.hop" for entry in logs)
+
+
+async def test_safe_headers_are_redacted(make_fetcher, network) -> None:
+    network.routes[(PUBLIC_IP, 80)] = static(
+        404, b"", {"Location": "http://u:pw@example.org/x?token=LEAKED", "Set-Cookie": "a=b"}
+    )
+    result = await make_fetcher(_resolver()).fetch(FetchRequest(URL))
+    assert "set-cookie" not in result.headers
+    assert "LEAKED" not in result.headers["location"]
+    assert "u:pw@" not in result.headers["location"]
