@@ -225,13 +225,12 @@ jobs:
         run: uv sync --frozen
 
       - name: Build pinned MinIO test image
-        uses: docker/build-push-action@v6
-        with:
-          context: deploy/compose/minio
-          load: true
-          tags: collector-minio:RELEASE.2025-09-07T16-13-09Z
-          cache-from: type=gha,scope=minio
-          cache-to: type=gha,mode=max,scope=minio
+        # Plain Docker CLI is the same path used by the already-proven compose job and does not
+        # depend on a separate buildx/cache exporter being available on the runner.
+        run: >-
+          docker build
+          -t collector-minio:RELEASE.2025-09-07T16-13-09Z
+          deploy/compose/minio
 
       - name: pytest -m integration tests/integration/fetch (no skip)
         run: uv run pytest -m integration tests/integration/fetch -rs
