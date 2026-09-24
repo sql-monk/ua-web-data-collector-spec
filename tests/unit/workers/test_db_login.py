@@ -68,6 +68,23 @@ def test_mapping_matches_the_card() -> None:
     }
 
 
+def _postgres_dsn_secrets(service: dict[str, Any]) -> list[str]:
+    """PostgreSQL DSN-секрети сервісу: per-role `postgres_dsn_*` і міграційний `postgres_dsn`."""
+    names = [s if isinstance(s, str) else s["source"] for s in service.get("secrets", [])]
+    return [n for n in names if n == "postgres_dsn" or n.startswith("postgres_dsn_")]
+
+
+def _assert_mounts_only_the_verified_dsn(name: str, service: dict[str, Any], db_role: str) -> None:
+    # Інваріант §13 уточнено рішенням оркестратора 2026-09-24
+    # (docs/plan/deps/WP-00-to-WP-01D.md п.2, разовий виняток WP-00 PR5): сервіс монтує РІВНО
+    # ОДИН PostgreSQL DSN — саме тієї ролі, яку перевіряє процес, і жодного міграційного
+    # `postgres_dsn`. Інші типи секретів (MinIO/Mongo/provider per component, WP-00 PR5)
+    # дозволені; їхню точну мапу тримає test_compose_config_adversarial.py (WP-00).
+    secret = dsn_secret_name(db_role)
+    assert _postgres_dsn_secrets(service) == [secret], name
+    assert service["environment"]["COLLECTOR_POSTGRES_DSN_FILE"] == f"/run/secrets/{secret}", name
+
+
 def test_compose_mounts_the_dsn_of_the_role_the_process_verifies() -> None:
     """Compose і runtime узгоджені: сервіс монтує DSN саме тієї ролі, яку перевіряє процес."""
     services: dict[str, Any] = yaml.safe_load(
@@ -76,11 +93,36 @@ def test_compose_mounts_the_dsn_of_the_role_the_process_verifies() -> None:
     expected = {f"{role.value}-worker": db_role_for(role) for role in WorkerRole}
     expected["scheduler"] = SCHEDULER_DB_ROLE
     for name, db_role in expected.items():
-        secret = dsn_secret_name(db_role)
-        assert services[name]["secrets"] == [secret], name
-        assert services[name]["environment"]["COLLECTOR_POSTGRES_DSN_FILE"] == (
-            f"/run/secrets/{secret}"
-        ), name
+        _assert_mounts_only_the_verified_dsn(name, services[name], db_role)
+
+
+@pytest.mark.parametrize(
+    "secrets_list",
+    [
+        ["postgres_dsn_fetcher", "postgres_dsn_parser", "minio_fetcher"],  # два per-role DSN
+        ["postgres_dsn_fetcher", "postgres_dsn"],  # + міграційний DSN
+        ["postgres_dsn_parser", "minio_fetcher"],  # DSN чужої ролі
+        ["minio_fetcher"],  # без DSN
+    ],
+)
+def test_dsn_invariant_rejects_extra_foreign_or_missing_postgres_dsn(
+    secrets_list: list[str],
+) -> None:
+    """Негативні кейси уточненого інваріанта: уточнення не послаблює PG-частину."""
+    service = {
+        "secrets": secrets_list,
+        "environment": {"COLLECTOR_POSTGRES_DSN_FILE": "/run/secrets/postgres_dsn_fetcher"},
+    }
+    with pytest.raises(AssertionError):
+        _assert_mounts_only_the_verified_dsn("fetch-worker", service, "collector_fetcher")
+
+
+def test_dsn_invariant_allows_other_component_secrets() -> None:
+    service = {
+        "secrets": ["postgres_dsn_fetcher", "minio_fetcher"],
+        "environment": {"COLLECTOR_POSTGRES_DSN_FILE": "/run/secrets/postgres_dsn_fetcher"},
+    }
+    _assert_mounts_only_the_verified_dsn("fetch-worker", service, "collector_fetcher")
 
 
 class _Session:

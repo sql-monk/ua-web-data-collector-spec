@@ -1,7 +1,8 @@
 # UA Web Data Collector — single-host Docker Compose (§7.5, §13, FR-030, FR-035; ADR-0002).
 #
 # Profiles (§7.5):
-#   core          postgres, mongo, minio, one-shot migrate-postgres/ensure-mongo, api, scheduler
+#   core          postgres, mongo, minio, one-shot migrate-postgres/ensure-mongo/ensure-minio,
+#                 api, scheduler
 #   workers       discovery/fetch/parse/projector/translation/export/maintenance-worker
 #   browser       browser-worker (0 replicas за замовчуванням; окремий image — WP-02 PR3)
 #   gui           gui (React SPA + nginx reverse proxy /api; єдиний публічний порт стека)
@@ -19,7 +20,10 @@
 #   - worker services без container_name, host ports і local persistent state;
 #   - жодного Docker socket mount; application services read_only + non-root + tmpfs /tmp;
 #   - публічний порт публікує лише gui (решта — dev.override.yml → 127.0.0.1);
-#   - секрети лише через Docker secrets/files (deploy/compose/secrets/), не ARG/ENV.
+#   - секрети лише через Docker secrets/files (deploy/compose/secrets/), не ARG/ENV;
+#   - облікові дані за компонентами (§13, WP-00 PR5): кожен сервіс монтує лише свої
+#     postgres_dsn_*/minio_*/mongo_uri_*; root MinIO — лише minio/ensure-minio, root Mongo —
+#     лише mongo/ensure-mongo (мапа споживачів — deploy/compose/README.md «Secrets»).
 
 name: collector
 
@@ -379,22 +383,86 @@ services:
     deploy: *limits-small
 
   ensure-mongo:
-    # Ініціалізує single-member replica set (реально, ідемпотентно); validators/indexes —
-    # WP-01B додає `--validators --indexes` (§16.2) після реалізації.
+    # Ініціалізує single-member replica set (реально, ідемпотентно). WP-00 PR5: перемикач
+    # COLLECTOR_ENSURE_MONGO_SCHEMA=1 додає `--validators --indexes --users` (§16.2; `--users` —
+    # Mongo-користувачі компонентів §13 з паролями з mongo_uri_*, реалізація CLI — WP-01B PR1).
+    # Типово 0, поки CLI WP-01B не в main: інакше one-shot завершився б кодом стабу і стек не
+    # піднявся. Вартовий у tests/unit/test_compose_config.py падає, щойно CLI отримає `--users`,
+    # а типове значення лишиться 0 (хто зливається другим — вмикає). Невідоме значення — exit 2.
+    # Root монтує лише цей one-shot; mongo_uri_* — лише щоб узяти з них паролі користувачів.
     <<: *collector-runtime
     profiles: [core]
     restart: "no"
-    command: ["collector", "db", "ensure-mongo"]
+    command:
+      - sh
+      - -c
+      - |
+        case "$${COLLECTOR_ENSURE_MONGO_SCHEMA}" in
+          1) exec collector db ensure-mongo --validators --indexes --users ;;
+          0) exec collector db ensure-mongo ;;
+          *) echo "COLLECTOR_ENSURE_MONGO_SCHEMA має бути 0 або 1" >&2; exit 2 ;;
+        esac
     environment:
       <<: *collector-env
+      COLLECTOR_ENSURE_MONGO_SCHEMA: ${COLLECTOR_ENSURE_MONGO_SCHEMA:-0}
+      # Domain-БД ролей `--users` (WP-01B); має збігатися зі шляхом URI у mongo_uri_* —
+      # init-secrets.sh бере той самий MONGO_DB.
+      COLLECTOR_MONGO_DATABASE: ${MONGO_DB:-collector}
       COLLECTOR_MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-collector_root}
       COLLECTOR_MONGO_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
     secrets:
       - mongo_root_password
+      - mongo_uri_projector
+      - mongo_uri_compactor
+      - mongo_uri_api_ro
+      - mongo_uri_export_ro
     networks:
       - backend
     depends_on:
       mongo:
+        condition: service_healthy
+    deploy: *limits-small
+
+  ensure-minio:
+    # Buckets raw/normalized/archive/translated/events і per-component користувачі MinIO з
+    # policies (§13 «writer/parser/auditor roles»; WP-00 PR5). Vendor `mc` з того самого
+    # source-built image, що й сервер `minio` (`mc` з pinned upstream commit), але від non-root
+    # uid, read-only rootfs, без capabilities; конфіг mc — у tmpfs. Скрипт і policies — read-only
+    # bind з репозиторію (deploy/compose/minio). Ідемпотентний: повторний `up` безпечний.
+    # Root монтує лише цей one-shot (і сервер minio); minio_<component> — щоб створити
+    # користувачів із ключами, які монтують відповідні сервіси.
+    image: ${COLLECTOR_MINIO_IMAGE:-collector-minio:RELEASE.2025-09-07T16-13-09Z}
+    profiles: [core]
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    user: "10001:10001"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *logging
+    entrypoint: ["/bin/sh", "/etc/collector/minio/ensure-minio.sh"]
+    environment:
+      COLLECTOR_MINIO_URL: http://minio:9000
+      MC_CONFIG_DIR: /tmp/.mc
+    secrets:
+      - minio_root_user
+      - minio_root_password
+      - minio_fetcher
+      - minio_parser
+      - minio_projector
+      - minio_translation
+      - minio_maintenance
+      - minio_readonly
+    volumes:
+      - ./deploy/compose/minio:/etc/collector/minio:ro
+    networks:
+      - backend
+    depends_on:
+      minio:
         condition: service_healthy
     deploy: *limits-small
 
@@ -414,6 +482,12 @@ services:
       <<: *collector-env
       COLLECTOR_API_HOST: 0.0.0.0
       COLLECTOR_API_PORT: "8000"
+      # §13 «API/exporter має read-only ролі в обох БД» (WP-00 PR5): read-only MinIO і Mongo.
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_readonly
+      COLLECTOR_MONGO_URI_FILE: /run/secrets/mongo_uri_api_ro
+    secrets:
+      - minio_readonly
+      - mongo_uri_api_ro
     expose:
       - "8000"
     # §7.5 «API — лише OIDC egress» (gate 3 CR-14/SEC L-2, виконано у PR3): api більше не в
@@ -433,6 +507,8 @@ services:
       migrate-postgres:
         condition: service_completed_successfully
       ensure-mongo:
+        condition: service_completed_successfully
+      ensure-minio:
         condition: service_completed_successfully
     healthcheck:
       test:
@@ -487,11 +563,21 @@ services:
     environment:
       <<: *worker-env
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_fetcher
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_fetcher
     secrets:
       - postgres_dsn_fetcher
+      - minio_fetcher
     networks:
       - backend
       - source-egress
+    # WP-00 PR5 (deps WP-00-to-WP-01D п.1): x-worker depends_on + ensure-minio.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-small
       replicas: 1
@@ -502,8 +588,10 @@ services:
     environment:
       <<: *worker-env
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_fetcher
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_fetcher
     secrets:
       - postgres_dsn_fetcher
+      - minio_fetcher
     networks:
       - backend
       - source-egress
@@ -513,6 +601,8 @@ services:
       minio:
         condition: service_healthy
       migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
         condition: service_completed_successfully
     deploy:
       <<: *limits-medium
@@ -525,14 +615,18 @@ services:
     environment:
       <<: *worker-env
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_parser
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_parser
     secrets:
       - postgres_dsn_parser
+      - minio_parser
     depends_on:
       postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
       migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
         condition: service_completed_successfully
     deploy:
       <<: *limits-large
@@ -544,8 +638,17 @@ services:
     environment:
       <<: *worker-env
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_projector
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_projector
+      COLLECTOR_MONGO_URI_FILE: /run/secrets/mongo_uri_projector
+      # compactor (WP-01B PR4) працює в тому ж процесі, але під окремим Mongo-користувачем
+      # (delete лише на entity_projection_versions); projector/reconciler — під
+      # mongo_uri_projector.
+      COLLECTOR_MONGO_COMPACTOR_URI_FILE: /run/secrets/mongo_uri_compactor
     secrets:
       - postgres_dsn_projector
+      - minio_projector
+      - mongo_uri_projector
+      - mongo_uri_compactor
     depends_on:
       postgres:
         condition: service_healthy
@@ -554,6 +657,9 @@ services:
       migrate-postgres:
         condition: service_completed_successfully
       ensure-mongo:
+        condition: service_completed_successfully
+      # WP-00 PR5: користувач collector-projector і bucket-и events/archive існують до старту.
+      ensure-minio:
         condition: service_completed_successfully
     deploy:
       <<: *limits-medium
@@ -565,11 +671,29 @@ services:
     environment:
       <<: *worker-env
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_translation
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_translation
+      # Провайдер перекладу (WP-04): типово вимкнений — jobs чекають у pending, стек
+      # піднімається без credentials; порожній google_translation_credentials створює
+      # init-secrets.sh.
+      COLLECTOR_TRANSLATION_PROVIDER: ${COLLECTOR_TRANSLATION_PROVIDER:-disabled}
+      COLLECTOR_TRANSLATION_PROJECT: ${COLLECTOR_TRANSLATION_PROJECT:-}
+      COLLECTOR_TRANSLATION_LOCATION: ${COLLECTOR_TRANSLATION_LOCATION:-global}
+      COLLECTOR_TRANSLATION_CREDENTIALS_FILE: /run/secrets/google_translation_credentials
     secrets:
       - postgres_dsn_translation
+      - minio_translation
+      - google_translation_credentials
     networks:
       - backend
       - provider-egress
+    # WP-00 PR5 (deps WP-00-to-WP-01D п.1): x-worker depends_on + ensure-minio.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-small
       replicas: 1
@@ -580,8 +704,12 @@ services:
     environment:
       <<: *worker-env
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_scheduler
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_readonly
+      COLLECTOR_MONGO_URI_FILE: /run/secrets/mongo_uri_export_ro
     secrets:
       - postgres_dsn_scheduler
+      - minio_readonly
+      - mongo_uri_export_ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -593,6 +721,8 @@ services:
         condition: service_completed_successfully
       ensure-mongo:
         condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-medium
       replicas: 1
@@ -603,8 +733,18 @@ services:
     environment:
       <<: *worker-env
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_scheduler
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_maintenance
     secrets:
       - postgres_dsn_scheduler
+      - minio_maintenance
+    # WP-00 PR5 (deps WP-00-to-WP-01D п.1): x-worker depends_on + ensure-minio.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     deploy:
       <<: *limits-small
       replicas: 1
@@ -626,11 +766,21 @@ services:
     environment:
       <<: *worker-env
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_fetcher
+      COLLECTOR_MINIO_CREDENTIALS_FILE: /run/secrets/minio_fetcher
     secrets:
       - postgres_dsn_fetcher
+      - minio_fetcher
     networks:
       - backend
       - source-egress
+    # WP-00 PR5 (deps WP-00-to-WP-01D п.1): x-worker depends_on + ensure-minio.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-postgres:
+        condition: service_completed_successfully
+      ensure-minio:
+        condition: service_completed_successfully
     shm_size: 512m
     deploy:
       <<: *limits-large
@@ -766,3 +916,30 @@ secrets:
     file: ./deploy/compose/secrets/minio_root_user
   minio_root_password:
     file: ./deploy/compose/secrets/minio_root_password
+  # Per-component облікові дані MinIO §13 (WP-00 PR5): `access_key=collector-<component>` +
+  # `secret_key=<40 hex>`; користувачів і policies створює `ensure-minio`.
+  minio_fetcher:
+    file: ./deploy/compose/secrets/minio_fetcher
+  minio_parser:
+    file: ./deploy/compose/secrets/minio_parser
+  minio_projector:
+    file: ./deploy/compose/secrets/minio_projector
+  minio_translation:
+    file: ./deploy/compose/secrets/minio_translation
+  minio_maintenance:
+    file: ./deploy/compose/secrets/minio_maintenance
+  minio_readonly:
+    file: ./deploy/compose/secrets/minio_readonly
+  # Per-component Mongo-користувачі §13 (WP-00 PR5; `ensure-mongo --users`, WP-01B PR1):
+  # scheduler/fetcher/parser Mongo-облікових даних не мають.
+  mongo_uri_projector:
+    file: ./deploy/compose/secrets/mongo_uri_projector
+  mongo_uri_compactor:
+    file: ./deploy/compose/secrets/mongo_uri_compactor
+  mongo_uri_api_ro:
+    file: ./deploy/compose/secrets/mongo_uri_api_ro
+  mongo_uri_export_ro:
+    file: ./deploy/compose/secrets/mongo_uri_export_ro
+  # Зовнішній credential провайдера перекладу (WP-04): не генерується; порожній файл = вимкнено.
+  google_translation_credentials:
+    file: ./deploy/compose/secrets/google_translation_credentials

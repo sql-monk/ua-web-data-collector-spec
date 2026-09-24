@@ -4,6 +4,13 @@
 # з *.example копіюється лише не-секретне ім'я користувача MinIO. Реальні файли — у .gitignore.
 # DSN: `postgres_dsn` — міграційний (superuser POSTGRES_USER, пароль = postgres_password);
 # `postgres_dsn_<component>` — сім runtime-ролей §13, кожна з власним паролем (WP-00 PR4).
+# WP-00 PR5 (§13 «облікові дані за компонентами» для object store і MongoDB):
+#   `minio_<component>`     — `access_key=collector-<component>` + `secret_key=<40 hex>`;
+#   `mongo_uri_<component>` — URI користувача `collector_<component>` з власним паролем;
+#   `google_translation_credentials` — зовнішній credential оператора: НЕ генерується, лише
+#     створюється порожній файл (інакше `docker compose up` падає на відсутньому file-secret).
+# Невідомий `*.example` — зупинка до будь-якого запису (fail-closed: раніше будь-який новий
+# приклад мовчки копіювався як «секрет»).
 #
 # Права файлів: 0644 свідомо. Compose bind-mount-ить file-secrets у /run/secrets/<name> з правами
 # ХОСТА, а читають їх non-root uid контейнерів (postgres/mongo 999, collector 10001) — 0600 від
@@ -25,14 +32,15 @@ umask 022
 
 die() { echo "error: $*" >&2; exit 1; }
 
-random_hex() {  # 24 байти → 48 hex-символів (без перевірки — див. new_hex)
+random_hex() {  # $1 байтів (типово 24) → 2×$1 hex-символів (без перевірки — див. new_hex)
+  local bytes="${1:-24}"
   {
     if command -v openssl >/dev/null 2>&1; then
-      openssl rand -hex 24
+      openssl rand -hex "$bytes"
     elif command -v python3 >/dev/null 2>&1; then
-      python3 -c 'import secrets; print(secrets.token_hex(24))'
+      python3 -c "import secrets; print(secrets.token_hex($bytes))"
     else
-      head -c 24 /dev/urandom | od -An -tx1
+      head -c "$bytes" /dev/urandom | od -An -tx1
     fi
   } | tr -d ' \r\n'
   echo
@@ -50,10 +58,13 @@ random_keyfile() {  # MongoDB keyFile: base64 із 756 байтів ентроп
 # раніше це ставало DSN з порожнім паролем і exit 0. Тепер значення отримується в змінну в
 # основному shell і перевіряється за форматом; інакше — exit 1, файл не створюється.
 # Результат — у глобальній змінній `value` (без subshell, щоб `die` завершував скрипт).
+# $2 — кількість байтів (типово 24 → 48 hex; MinIO secret key — 20 → 40 hex: MinIO історично
+# обмежує secret key 40 символами).
 new_hex() {
-  value="$(random_hex)"
-  [[ "$value" =~ ^[0-9a-f]{48}$ ]] || die "генератор випадкових чисел не дав 48 hex-символів" \
-    "для $1 (openssl/python3//dev/urandom); файл не створено"
+  local bytes="${2:-24}"
+  value="$(random_hex "$bytes")"
+  [[ "$value" =~ ^[0-9a-f]{$((bytes * 2))}$ ]] || die "генератор випадкових чисел не дав" \
+    "$((bytes * 2)) hex-символів для $1 (openssl/python3//dev/urandom); файл не створено"
 }
 
 new_keyfile() {
@@ -123,9 +134,36 @@ secret_present() {
   [ -s "$1" ]
 }
 
+# Кожен *.example має відомий тип. Перевірка — ДО будь-якого запису: помилка в імені нового
+# прикладу не лишає половину секретів згенерованими, а placeholder не копіюється як секрет.
+for example in "$here"/*.example; do
+  name="${example##*/}"
+  name="${name%.example}"
+  case "$name" in
+    mongo_keyfile | *_password | postgres_dsn | postgres_dsn_* | minio_root_user) ;;
+    minio_fetcher | minio_parser | minio_projector | minio_translation | minio_maintenance) ;;
+    minio_readonly | mongo_uri_* | google_translation_credentials) ;;
+    *) die "невідомий приклад секрету $name.example: додайте для нього гілку в init-secrets.sh" ;;
+  esac
+done
+
 for example in "$here"/*.example; do
   name="$(basename "$example" .example)"
   target="$here/$name"
+  if [ "$name" = google_translation_credentials ]; then
+    # Зовнішній credential оператора (WP-04): вміст не генеруємо і не чіпаємо ніколи. Порожній
+    # файл — легальний стан «провайдер не налаштований» (COLLECTOR_TRANSLATION_PROVIDER=disabled);
+    # створюється лише тоді, коли файла немає (або на його місці порожній каталог Docker).
+    if secret_present "$target"; then
+      echo "skip  $name (exists)"
+    elif [ -f "$target" ]; then
+      echo "keep  $name (порожній: провайдер перекладу не налаштовано)"
+    else
+      write_secret "$target" ""
+      echo "empty $name (порожній файл; credential вписує оператор — deploy/compose/README.md)"
+    fi
+    continue
+  fi
   if secret_present "$target"; then
     echo "skip  $name (exists)"
     continue
@@ -172,9 +210,29 @@ for example in "$here"/*.example; do
         "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}"
       write_secret "$target" "$dsn"
       echo "gen   $name (random, роль collector_$component)" ;;
-    *)
+    minio_root_user)
       write_secret "$target" "$(tr -d '\r' < "$example")"$'\n'
       echo "copy  $name (from example — non-secret)" ;;
+    minio_*)
+      # Per-component користувач MinIO (WP-00 PR5): access key — ім'я компонента (видно в
+      # audit-журналі MinIO, хто що видалив), secret key — власний випадковий hex. Користувача,
+      # policy і bucket-и створює one-shot `ensure-minio` з цього ж файла.
+      component="${name#minio_}"
+      new_hex "$name" 20
+      write_secret "$target" "access_key=collector-$component"$'\n'"secret_key=$value"$'\n'
+      echo "gen   $name (random, користувач collector-$component)" ;;
+    mongo_uri_*)
+      # URI Mongo-користувача компонента §13 (WP-01B PR1 п.6; користувачів створює
+      # `collector db ensure-mongo --users` з паролів у цих файлах). Користувачі — в `admin`.
+      component="${name#mongo_uri_}"
+      new_hex "$name"
+      printf -v uri 'mongodb://collector_%s:%s@%s:%s/%s?replicaSet=rs0&authSource=admin\n' \
+        "$component" "$value" \
+        "${MONGO_HOST:-mongo}" "${MONGO_PORT:-27017}" "${MONGO_DB:-collector}"
+      write_secret "$target" "$uri"
+      echo "gen   $name (random, користувач collector_$component)" ;;
+    *)
+      die "немає гілки для $name" ;;
   esac
 done
 

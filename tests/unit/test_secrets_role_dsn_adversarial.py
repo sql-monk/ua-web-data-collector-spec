@@ -124,7 +124,8 @@ def test_rerun_leaves_every_existing_secret_byte_identical(tmp_path: Path) -> No
     _prepare(tmp_path)
     _run(tmp_path)
     before = _secret_files(tmp_path)
-    # 5 секретів Compose + 8 DSN; жодного «зайвого» файла.
+    # 5 секретів Compose + 8 DSN + WP-00 PR5 (6 MinIO, 4 Mongo URI, порожній credential
+    # перекладу); жодного «зайвого» файла.
     expected = {
         "postgres_password",
         "postgres_dsn",
@@ -133,6 +134,12 @@ def test_rerun_leaves_every_existing_secret_byte_identical(tmp_path: Path) -> No
         "minio_root_user",
         "minio_root_password",
         *ROLE_DSN_SECRETS,
+        *(
+            f"minio_{c}"
+            for c in ("fetcher", "parser", "projector", "translation", "maintenance", "readonly")
+        ),
+        *(f"mongo_uri_{c}" for c in ("projector", "compactor", "api_ro", "export_ro")),
+        "google_translation_credentials",
     }
     assert set(before) == expected
     stdout = _run(tmp_path)
