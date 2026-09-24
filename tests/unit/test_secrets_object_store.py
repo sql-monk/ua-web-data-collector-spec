@@ -43,6 +43,7 @@ COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
 SECRETS_DIR = REPO_ROOT / "deploy" / "compose" / "secrets"
 MINIO_DIR = REPO_ROOT / "deploy" / "compose" / "minio"
 ENSURE_MINIO = MINIO_DIR / "ensure-minio.sh"
+MINIO_DOCKERFILE = MINIO_DIR / "Dockerfile"
 
 MINIO_COMPONENTS = ("fetcher", "parser", "projector", "translation", "maintenance", "readonly")
 MINIO_SECRETS = tuple(f"minio_{c}" for c in MINIO_COMPONENTS)
@@ -202,6 +203,17 @@ def test_ensure_minio_is_a_hardened_one_shot_on_the_pinned_minio_image(
     assert svc["depends_on"] == {"minio": {"condition": "service_healthy"}}
     assert _secret_names(svc) == {"minio_root_user", "minio_root_password", *MINIO_SECRETS}
     assert svc["deploy"]["resources"]["limits"]["pids"]
+
+
+def test_minio_image_builds_the_pinned_client_with_release_metadata() -> None:
+    dockerfile = MINIO_DOCKERFILE.read_text(encoding="utf-8")
+    assert "ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z" in dockerfile
+    assert "ARG MC_COMMIT=7394ce0dd2a80935aded936b09fa12cbb3cb8096" in dockerfile
+    assert '"github.com/minio/mc@${MC_COMMIT}"' in dockerfile
+    for name in ("Version", "ReleaseTag", "CommitID", "ShortCommitID", "CopyrightYear"):
+        assert f"github.com/minio/mc/cmd.{name}=" in dockerfile
+    assert "v0.0.0-20250813083541-7394ce0dd2a8" in dockerfile
+    assert "COPY --from=builder /out/mc /usr/local/bin/mc" in dockerfile
 
 
 def test_minio_names_agree_across_compose_script_policies_and_examples(
@@ -707,6 +719,17 @@ def test_ensure_minio_script_is_lf_and_strict() -> None:
     assert b"set -eu" in raw
     # `mc alias set` приймає секрет в argv — заборонено.
     assert b"alias set" not in raw
+
+
+def test_ensure_minio_script_is_valid_posix_shell() -> None:
+    proc = subprocess.run(  # noqa: S603 — фіксований локальний shell і шлях до скрипту
+        [_shell("sh"), "-n", ENSURE_MINIO.as_posix()],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 # --- ensure-mongo: дослівна команда з compose у POSIX sh ------------------------------------
