@@ -281,3 +281,16 @@ async def test_safe_headers_are_redacted(make_fetcher, network) -> None:
     assert "set-cookie" not in result.headers
     assert "LEAKED" not in result.headers["location"]
     assert "u:pw@" not in result.headers["location"]
+
+
+def test_client_cookie_jar_rejects_every_cookie() -> None:
+    """Другий шар Q-007: навіть якщо запит колись збиратиметься через `build_request` (merge
+    cookies клієнта), jar нічого не зберігає."""
+    from collector.fetch.client import _no_cookies
+
+    cookies = httpx.Cookies(_no_cookies())
+    request = httpx.Request("GET", "http://example.org/")
+    cookies.extract_cookies(
+        httpx.Response(200, headers={"Set-Cookie": "sid=abc; Path=/"}, request=request)
+    )
+    assert len(cookies.jar) == 0
