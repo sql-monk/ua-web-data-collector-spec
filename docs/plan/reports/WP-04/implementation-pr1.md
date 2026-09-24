@@ -202,7 +202,7 @@ AST-скриптом): `segmenter` 343, `preservation` 172, `pipeline` 143, `pla
 | Ризик | Статус / пом'якшення |
 |---|---|
 | **Обсяг PR1 ≈ 1019 логічних рядків > ~800** картки | accepted оркестратором одним PR (gate 2). Раніше пропонувалося: Коміти згруповані так, що PR розбивається без переписування: `4a61109`+`877df0f` (segmenter, preservation, glossary, TM key ≈ 671) → PR1a; `2ff0e7e` (detection, planner, pipeline ≈ 348) → PR1b; тести розкладаються за модулями. Рішення — за gate/оркестратором |
-| `lingua-language-detector`: wheel ≈ 170 МБ, розпакований ≈ 291 МБ, wheels лише cp313 (див. `uv.lock`); збільшить runtime-образ | open — рішення щодо залежності ухвалює рев'ю. Пам'ять (T-11, вимір тестувальника): після класифікації текстів усіх 19 мов working set 18,9 → 64,4 МБ (**+45 МБ**), private 11,8 → 13,9 МБ — переважно file-backed сторінки `.pyd`. Моя попередня оцінка «≈ +10 МБ» стосувалась лише однієї мови й була занижена. Варіанти для оркестратора/WP-01D: окремий образ `translation-worker` або extra-група залежностей; WP-04 Dockerfile не змінює |
+| `lingua-language-detector`: wheel ≈ 170 МБ, розпакований ≈ 291 МБ, wheels лише cp313 (див. `uv.lock`); збільшить runtime-образ | open — рішення щодо залежності ухвалює рев'ю. Пам'ять (T-11, вимір тестувальника): після класифікації текстів усіх 19 мов working set 18,9 → 64,4 МБ (**+45 МБ**), private 11,8 → 13,9 МБ — переважно file-backed сторінки `.pyd`. Моя попередня оцінка «≈ +10 МБ» стосувалась лише однієї мови й була занижена. Після gate 3 (R-4, 37 мов із sentinel) — +83 МБ working set, +2 МБ private (див. «Fixes after gate 3»). Варіанти для оркестратора/WP-01D: окремий образ `translation-worker` або extra-група залежностей; WP-04 Dockerfile не змінює |
 | Локальні типи замість контрактів WP-01C PR2: `ArticleText`, `QualityFlag` (Literal), `not_required` як властивість плану замість `TranslationStatus` | accepted до PR2. Перехід: `QualityFlag` → `collector.contracts.TranslationQualityFlag` (`preservation_failed`, `low_language_confidence`, `provider_truncated` збігаються з мінімумом WP-01C; `language_unsupported` — О-5); `ArticleText` будується з `NewsVersionCreatedEvent` + artifact-ів; статус версії (`not_required`/`translated`/`translation_failed`) виставляє handler PR2 з `TranslationOutcome` |
 | `SegmentTranslator` — мінімальний callable, не `TranslationProvider` | accepted: PR2 п.1 вводить Protocol з класифікованими помилками; `execute_plan` лишається, змінюється тип параметра |
 | TM-запис спільний для сегментів, що відрізняються лише числами/URL/термінами glossary (masked-хеш) | accepted — ключ від нормалізованого masked-тексту (FR-017); ризик — узгодження відмінків навколо підставленої форми glossary; покаже golden corpus PR3 і human QA WP-06x |
@@ -262,3 +262,72 @@ Skipped (23), усі поза WP-04: `tests/e2e/test_gui_runtime_contract.py` (2
 `tests/e2e/test_runtime_suite_is_enforced.py` (2, `COLLECTOR_E2E_REQUIRED` не задано),
 `tests/unit/test_network_blocked.py` (1, Windows). Таймінгових scaling-флейків WP-01D у цьому
 прогоні не було (0 failed).
+
+## Fixes after gate 3
+
+Джерело: `docs/plan/reports/WP-04/code-review-pr1.md` (R-1…R-10). Тести тестувальника
+(`f6e6852` і раніше) не змінювались.
+
+| Знахідка | Статус | Що зроблено | Тест |
+|---|---|---|---|
+| R-1 (medium) — фікс T-2 закривав лише блочного батька; `<p><a><code>x</a> текст</p>` → 0 сегментів, `complete` без прапорця | fixed | Узагальнено. На старті захищеної області знімається лічильник **усіх** відкритих предків (`_Skip.closers`): блочний стек плюс непарні inline-теги поточного run. Область завершується end-tag-ом будь-якого з них, як у DOM браузера; теги, відкриті всередині області, рахуються окремо (`inner`). Якщо область дотягнулась до кінця документа, виставляється `SegmentedDocument.unterminated_protected`, план ставить quality flag **`untranslated_content`**, і версія ніколи не буває `complete` без прапорця. Цього значення ще немає в контракті — див. dependency-запит | `test_unclosed_protected_ends_at_any_open_ancestor[*]` (a/b/em), `test_protected_until_end_of_document_is_reported`, `test_unclosed_protected_inside_inline_parent_is_translated`, `test_protected_to_end_of_document_is_never_complete_without_flag` |
+| R-2 (medium) — слот атрибута шукався regex-ом по тегу | fixed | Послідовний токенайзер атрибутів сирого тегу (`_attribute_values`, та сама граматика, що в `html.parser`): ім'я → `=` → значення в лапках або без. Вміст значень ніколи не читається як ім'я; позиції значень підставляються справа наліво | `test_attribute_slot_uses_attribute_position_not_substring`, `test_attribute_tokenizer_edge_cases[*]` |
+| R-3 (medium) — `_EMAIL_RE` O(n²) | fixed | `(?<![\w.+-])` на старті: один старт на токен, лінійний час (старий regex: 20k символів — 2,37 с). Заодно `_TAG_RE` зроблено лінійним на hostile-виводі провайдера (`<[^<>]*>`, коментар без `.*?` через увесь рядок) | `test_preservation_regexes_are_fast_on_large_hostile_input[*]` (9 входів по 60k, бюджет 3 с на mask + validate), `test_validation_is_fast_on_hostile_provider_output[*]` (4) |
+| R-4 (medium, spec-mismatch) — вузький classifier мовчки видавав найближчу мову | fixed | Classifier = `uk` + 16 + extra + **`SENTINEL_LANGUAGES`** (18 європейських мов, близьких до підтримуваних: be, bg, bs, cy, da, el, eu, fi, ga, is, mk, nb, nn, pt, sq, sr, sv, tr). Якщо top-мова sentinel, повертається вона, і план дає `language_unsupported`. Якщо поруч підтримувана мова з confidence ≥ 0,3 (близький варіант, bs/hr), береться підтримувана з `uncertain=True` (`low_language_confidence`). Для підтримуваної top-мови confidence перераховується серед підтримуваних, тож частка непідтримуваного сусіда не робить впевнений хорватський текст невпевненим | `test_foreign_language_segment_is_unsupported_not_nearest_supported[pt,nb,bg]`, `test_foreign_article_without_metadata_is_unsupported[pt,nb,bg]`, `test_close_unsupported_variant_falls_back_to_supported_with_flag`, `test_production_classifier_keeps_supported_languages_confident[*]`, `test_production_classifier_covers_supported_and_sentinel` |
+| R-5 (low) — `big`/`label`/`tt`… розрізали речення | fixed | `INLINE_TAGS` доповнено phrasing-тегами `acronym`, `big`, `button`, `label`, `nobr`, `output`, `rp`, `rt`, `ruby`, `strike`, `tt`. Кастомні елементи лишаються блочними: консервативно, текст не губиться | `test_phrasing_tags_outside_old_inline_list_do_not_split_sentence` |
+| R-6 (low) — дубльований атрибут | fixed | Токенайзер R-2 бере лише перше входження атрибута, як HTML; noncharacter-слоти до провайдера не потрапляють | `test_attribute_tokenizer_edge_cases[<img title="a" title="b">]` |
+| R-7 (low) — квадратичне склеювання entity | fixed | Сусідні text/entity-шматки накопичуються в `list[str]` і склеюються один раз | `test_many_entities_in_one_block_is_linear` (80k entity < 2 с) |
+| R-8 (low) — O(k²) у `claim` і `_numbers` | fixed | `claim` перевіряє зайнятість через bytearray; `_numbers` збирає текст через список шматків | покрито `test_preservation_regexes_are_fast_on_large_hostile_input[many-numbers]` (12k чисел) |
+| R-9 (low) — `glossary.version` від сирого YAML | fixed | Версія рахується від канонізованого змісту: `schema`, `target_language`, пари `[term (після strip), target \| null]`. `keep: false`, пробіли, порядок ключів і сторонні ключі версію не змінюють. Порядок записів у списку лишається значущим (консервативно, T-8; цей факт фіксує тест тестувальника) | `test_default_glossary_loads_and_version_is_canonical_content_hash`, `test_glossary_version_ignores_non_semantic_yaml_differences` |
+| R-10 (low) — термін glossary з цифрами давав `number_mismatch` | fixed | Очікувані числа джерела = числа видимого тексту мінус числа glossary-терміна плюс числа його форми | `test_glossary_term_with_digits_is_not_number_mismatch` |
+
+Owner усіх рядків — WP-04, дата 2026-09-24. Accepted-пунктів немає: усі low виправлено.
+
+### R-4: вибір і заміри
+
+Заміри на Windows (working set / private, 19 підтримуваних мов + 4 чужі тестові тексти, моделі
+вантажаться ліниво на першій класифікації):
+
+| Набір classifier-а | Working set | Private | Перша класифікація | Результат на pt / nb / bg / sv |
+|---|---|---|---|---|
+| `uk` + 16 + extra (19, вимога п.3 картки) | 16,9 → 59,9 МБ (+43) | +1,8 МБ | 0,06–0,3 с | es / nl / ru / de — **хибно, без прапорця** |
+| + sentinel (37) — **обрано** | 19,8 → 103,1 МБ (+83) | +2 МБ | 0,13 с | pt / nb / bg / sv — правильно |
+| усі 75 розмовних мов lingua | 16,8 → 110,2 МБ (+93) | +2,1 МБ | 3,1 с | правильно, але український текст «Програма діятиме щонайменше три роки…» → `kk` з confidence 1,0, а hr поруч із bs 0,58/0,42 |
+
+Приріст пам'яті — переважно file-backed сторінки `.pyd`; private майже не росте. Повний набір
+відкинуто: хибні `kk` для української (і `language_unsupported` там, де переклад потрібен)
+гірші за вузький sentinel-набір. Розширення sentinel-набору — одна константа.
+
+**Суперечність у картці (для оркестратора; картку не правлю):** п.3 PR1 (рядок 128) вимагає
+classifier, «обмежений `uk` + 16 + extra». Рядки 99, 168 і 177 вимагають для мови поза 16 і
+extra `language_unsupported`, але через такий classifier це недосяжно. Реалізовано рішення
+оркестратора з gate 3 («неправильна мова без сигналу неприпустима»). Фікстура `classifier` у
+`conftest.py` лишилась вузькою (формулювання п.3, на ній тримаються тести тестувальника);
+модулі планера/pipeline перевизначають її на продакшн-набір `production_classifier`.
+
+### Dependency-запит
+
+`docs/plan/deps/WP-04-to-WP-01C.md` — додати `untranslated_content` до `TranslationQualityFlag`
+(і підтвердити назву `language_unsupported`). PR1 не блокує; потрібно до PR2.
+
+### Перевірка після виправлень gate 3
+
+Повторний прогін перед комітом виправлень:
+
+```text
+$ uv run ruff check src/collector/translation tests/unit/translation
+All checks passed!
+$ uv run ruff format --check src/collector/translation tests/unit/translation
+22 files already formatted
+$ uv run mypy src/collector/translation
+Success: no issues found in 10 source files
+$ uv run pytest -q -rs tests/unit/translation
+1589 passed in 13.66s
+$ uv run pytest -m "not live and not integration and not e2e" -q -rs
+2362 passed, 1 skipped, 317 deselected, 8 warnings in 183.10s (0:03:03)
+$ uv run pre-commit run --all-files
+... усі 11 hooks Passed
+```
+
+Єдиний skip — платформний `tests/unit/test_network_blocked.py:27` на Windows, поза WP-04.
+У `tests/unit/translation/**` немає skip або xfail.

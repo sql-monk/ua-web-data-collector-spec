@@ -24,8 +24,9 @@ from typing import Literal
 
 INLINE_TAGS = frozenset(
     {
-        "a", "abbr", "b", "bdi", "bdo", "br", "cite", "data", "del", "dfn", "em", "font", "i",
-        "img", "ins", "mark", "q", "s", "small", "span", "strong", "sub", "sup", "time", "u",
+        "a", "abbr", "acronym", "b", "bdi", "bdo", "big", "br", "button", "cite", "data", "del",
+        "dfn", "em", "font", "i", "img", "ins", "label", "mark", "nobr", "output", "q", "rp",
+        "rt", "ruby", "s", "small", "span", "strike", "strong", "sub", "sup", "time", "tt", "u",
         "wbr",
     }
 )  # fmt: skip
@@ -104,6 +105,9 @@ class SegmentedDocument:
     parts: tuple[str | int, ...]
     segments: tuple[Segment, ...]
     root_lang: str | None
+    # Незакритий захищений/пропущений елемент тягнувся до кінця документа: його текст не
+    # перекладається (як і в DOM браузера), тож план ставить quality flag.
+    unterminated_protected: bool = False
 
 
 def matched_tag_pairs(tokens: Sequence[Token]) -> list[tuple[int, int]]:
@@ -171,6 +175,7 @@ class _Skip:
     buffer: list[str]
     depth: int = 1
     inner: Counter[str] = field(default_factory=Counter)
+    closers: Counter[str] = field(default_factory=Counter)
 
 
 class _Segmenter(HTMLParser):
@@ -188,9 +193,13 @@ class _Segmenter(HTMLParser):
         self._skip: _Skip | None = None
         self._root_lang: str | None = None
         self._top_level = 0
+        self._unterminated = False
+        self._pending_text: list[str] = []  # сусідні text/entity-шматки до склеювання (O(n))
 
     def document(self) -> SegmentedDocument:
-        return SegmentedDocument(tuple(self._parts), tuple(self._segments), self._root_lang)
+        return SegmentedDocument(
+            tuple(self._parts), tuple(self._segments), self._root_lang, self._unterminated
+        )
 
     # --- події парсера -------------------------------------------------------------------
 
@@ -213,12 +222,13 @@ class _Segmenter(HTMLParser):
             if skip.depth == 0:
                 self._end_skip()
             return
-        if skip is not None and not self._open[tag]:
+        if skip is not None and not skip.closers[tag]:
             skip.buffer.append(raw)
             return
         if skip is not None:
-            # Закривається предок незакритого захищеного елемента (`<p><code>ls</p>`): як і
-            # браузер, обмежуємо захищену область батьківським блоком — далі звичайний текст.
+            # Закривається будь-який предок (блочний чи inline), відкритий до незакритого
+            # захищеного елемента (`<p><code>ls</p>`, `<a><code>x</a>`): як і браузер,
+            # завершуємо захищену область — далі звичайний текст.
             self._end_skip()
         if tag in INLINE_TAGS:
             self._append(Token("tag", raw, tag, closing=True))
@@ -256,6 +266,7 @@ class _Segmenter(HTMLParser):
     def close(self) -> None:
         super().close()
         if self._skip is not None:
+            self._unterminated = True
             self._end_skip()
         self._flush()
 
@@ -292,7 +303,7 @@ class _Segmenter(HTMLParser):
                 return
             if not inline:
                 self._flush()
-            self._skip = _Skip(tag, inline, [raw])
+            self._skip = _Skip(tag, inline, [raw], closers=self._open_ancestors())
             return
         raw = self._attribute_slots(raw, tag, attrs, lang)
         if tag in INLINE_TAGS:
@@ -328,24 +339,41 @@ class _Segmenter(HTMLParser):
     def _attribute_slots(
         self, raw: str, tag: str, attrs: list[tuple[str, str | None]], lang: str | None
     ) -> str:
-        for name, value in attrs:
-            if name.lower() not in self._attributes or not value or not value.strip():
+        del attrs  # позиції значень — з токенайзера сирого тегу, не з regex-пошуку по тегу
+        seen: set[str] = set()
+        slots: list[tuple[int, int, int]] = []
+        for name, value_start, value_end in _attribute_values(raw):
+            if name in seen:  # HTML: діє перше входження атрибута, дублікати ігноруються
                 continue
-            pattern = re.compile(
-                rf"(\s{re.escape(name)}\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
-                re.IGNORECASE,
-            )
-            match = pattern.search(raw)
-            if match is None:
+            seen.add(name)
+            value_raw = raw[value_start:value_end]
+            if value_raw[:1] in {'"', "'"}:
+                value_raw = value_raw[1:-1]
+            if name not in self._attributes or not html.unescape(value_raw).strip():
                 continue
-            value_raw = next(group for group in match.groups()[1:] if group is not None)
             index = len(self._segments)
             context_lang = lang or self._context()[1]
             token = Token("text", value_raw)
             self._segments.append(Segment(index, "attribute", tag, context_lang, (token,)))
-            slot = f'{match.group(1)}"{_ATTR_SLOT.format(index)}"'
-            raw = raw[: match.start()] + slot + raw[match.end() :]
+            slots.append((value_start, value_end, index))
+        for value_start, value_end, index in reversed(slots):
+            raw = f'{raw[:value_start]}"{_ATTR_SLOT.format(index)}"{raw[value_end:]}'
         return raw
+
+    def _open_ancestors(self) -> Counter[str]:
+        """Усі відкриті предки: блочний стек + непарні inline-теги поточного run."""
+        self._materialize_text()
+        ancestors = Counter(name for name, _ in self._stack)
+        inline: list[str] = []
+        for token in self._run:
+            if token.kind != "tag" or token.name in VOID_TAGS:
+                continue
+            if not token.closing:
+                inline.append(token.name)
+            elif inline and inline[-1] == token.name:
+                inline.pop()
+        ancestors.update(inline)
+        return ancestors
 
     def _end_skip(self) -> None:
         skip, self._skip = self._skip, None
@@ -361,29 +389,38 @@ class _Segmenter(HTMLParser):
         return self._stack[-1] if self._stack else ("", None)
 
     def _append(self, token: Token) -> None:
+        if token.kind != "text":
+            self._materialize_text()
         if not self._run:
             self._run_context = self._context()
-        if token.kind == "text" and self._run and self._run[-1].kind == "text":
-            token = Token("text", self._run[-1].raw + token.raw)
-            self._run[-1] = token
-            return
         self._run.append(token)
+
+    def _materialize_text(self) -> None:
+        if self._pending_text:
+            raw = "".join(self._pending_text)
+            self._pending_text = []
+            self._append(Token("text", raw))
 
     def _text(self, raw: str) -> None:
         if self._skip is not None:
             self._skip.buffer.append(raw)
+        elif self._pending_text:
+            self._pending_text.append(raw)
+        elif self._run and self._run[-1].kind == "text":
+            self._pending_text = [self._run.pop().raw, raw]
         else:
-            self._append(Token("text", raw))
+            self._pending_text = [raw]
 
     def _opaque(self, raw: str) -> None:
         if self._skip is not None:
             self._skip.buffer.append(raw)
-        elif self._run:
+        elif self._run or self._pending_text:
             self._append(Token("protected", raw))
         else:
             self._parts.append(raw)
 
     def _flush(self) -> None:
+        self._materialize_text()
         run, self._run = self._run, []
         if not run:
             return
@@ -446,6 +483,30 @@ class _Segmenter(HTMLParser):
         self._parts.append(index)
         if tail:
             self._parts.append(tail)
+
+
+_TAG_NAME_RE = re.compile(r"<[^\s/>]+")
+_ATTR_NAME_RE = re.compile(r"[\s/]*([^\s/>=][^\s/>=]*)")
+_ATTR_VALUE_RE = re.compile(r"""\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)""")
+
+
+def _attribute_values(raw: str) -> list[tuple[str, int, int]]:
+    """Послідовний токенайзер атрибутів сирого стартового тегу (як у `html.parser`):
+    (ім'я lowercase, початок, кінець значення разом із лапками). Вміст значень ніколи не
+    читається як ім'я атрибута — на відміну від regex-пошуку по всьому тегу."""
+    match = _TAG_NAME_RE.match(raw)
+    position = match.end() if match else len(raw)
+    result: list[tuple[str, int, int]] = []
+    while position < len(raw):
+        name = _ATTR_NAME_RE.match(raw, position)
+        if name is None:
+            break
+        position = name.end()
+        value = _ATTR_VALUE_RE.match(raw, position)
+        if value is not None:
+            result.append((name.group(1).lower(), value.start(1), value.end(1)))
+            position = value.end()
+    return result
 
 
 def _plain_length(tokens: Iterable[Token]) -> int:

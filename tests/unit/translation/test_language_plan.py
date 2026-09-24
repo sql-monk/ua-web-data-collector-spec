@@ -9,6 +9,7 @@ from tests.unit.translation.fakes import FixedClassifier
 
 from collector.contracts import ContentAccess
 from collector.translation.detection import (
+    SENTINEL_LANGUAGES,
     LinguaClassifier,
     detect_article_language,
     detect_segment_language,
@@ -36,6 +37,12 @@ SAMPLES: dict[str, str] = {
     "ca": "El govern ha anunciat noves mesures per al transport públic a les ciutats.",
     "uk": "Уряд оголосив нову програму підтримки малого бізнесу в регіонах країни.",
 }
+
+
+@pytest.fixture
+def classifier(production_classifier: LinguaClassifier) -> LinguaClassifier:
+    """Цей модуль перевіряє продакшн-набір classifier-а (+ sentinel-мови, R-4)."""
+    return production_classifier
 
 
 def test_language_constants_match_spec_and_user_decision_u2() -> None:
@@ -74,8 +81,81 @@ def test_classifier_detects_core_extra_and_uk(classifier: LinguaClassifier, lang
     assert confidence >= 0.6
 
 
-def test_classifier_is_limited_to_uk_core_and_extra(classifier: LinguaClassifier) -> None:
-    assert classifier.languages == CORE_SOURCE_LANGUAGES | EXTRA_SOURCE_LANGUAGES | {"uk"}
+def test_production_classifier_covers_supported_and_sentinel(classifier: LinguaClassifier) -> None:
+    supported = CORE_SOURCE_LANGUAGES | EXTRA_SOURCE_LANGUAGES | {"uk"}
+    assert classifier.languages == supported | SENTINEL_LANGUAGES
+    assert not SENTINEL_LANGUAGES & supported
+
+
+# Авторські синтетичні речення мов поза 16 + extra (gate 3, R-4): раніше classifier видавав
+# їх за найближчу підтримувану мову (pt → es, nb → nl, bg → ru) без жодного прапорця.
+FOREIGN = {
+    "pt": "A câmara municipal aprovou na terça-feira o orçamento para o próximo ano.",
+    "nb": "Bystyret vedtok tirsdag budsjettet for neste år etter en lang debatt.",
+    "bg": "Общинският съвет прие във вторник бюджета за следващата година.",
+}
+
+
+@pytest.mark.parametrize("language", sorted(FOREIGN), ids=sorted(FOREIGN))
+def test_foreign_language_segment_is_unsupported_not_nearest_supported(
+    classifier: LinguaClassifier, language: str
+) -> None:
+    article = ArticleText(
+        content_access=ContentAccess.FULL,
+        original_language="de",
+        body_html=f"<p>{SAMPLES['de']}</p><p>{FOREIGN[language]}</p>",
+    )
+    plan = plan_article_translation(article, classifier=classifier)
+    foreign = next(p for p in plan.segments if p.segment.text == FOREIGN[language])
+    assert (foreign.language.language, foreign.action) == (language, "unsupported")
+    assert "language_unsupported" in plan.quality_flags
+    assert all(p.segment.text != FOREIGN[language] for p in plan.to_translate)
+
+
+@pytest.mark.parametrize("language", sorted(FOREIGN), ids=sorted(FOREIGN))
+def test_foreign_article_without_metadata_is_unsupported(
+    classifier: LinguaClassifier, language: str
+) -> None:
+    article = ArticleText(
+        content_access=ContentAccess.FULL, body_html=f"<p>{FOREIGN[language]}</p>"
+    )
+    plan = plan_article_translation(article, classifier=classifier)
+    assert plan.article_language.language == language
+    assert plan.to_translate == () and "language_unsupported" in plan.quality_flags
+
+
+def test_close_unsupported_variant_falls_back_to_supported_with_flag() -> None:
+    class BosnianOrCroatian(FixedClassifier):
+        def ranked(self, text: str) -> list[tuple[str, float]]:
+            return [("bs", 0.55), ("hr", 0.45)]
+
+    classifier = BosnianOrCroatian({})
+    decision = detect_segment_language(
+        "Gradsko vijeće u utorak je usvojilo proračun za iduću godinu.",
+        lang_attribute=None,
+        article=detect_article_language(
+            declared="hr", root_lang=None, text="", classifier=classifier
+        ),
+        classifier=classifier,
+        supported=frozenset({"hr"}),
+    )
+    assert (decision.language, decision.uncertain, decision.candidate) == ("hr", True, "bs")
+
+
+@pytest.mark.parametrize("language", sorted(SAMPLES), ids=sorted(SAMPLES))
+def test_production_classifier_keeps_supported_languages_confident(
+    classifier: LinguaClassifier, language: str
+) -> None:
+    decision = detect_segment_language(
+        SAMPLES[language],
+        lang_attribute=None,
+        article=detect_article_language(
+            declared="de", root_lang=None, text="", classifier=classifier
+        ),
+        classifier=classifier,
+        supported=supported_source_languages(),
+    )
+    assert (decision.language, decision.uncertain) == (language, False)
 
 
 def test_article_language_order_metadata_then_lang_then_classifier() -> None:

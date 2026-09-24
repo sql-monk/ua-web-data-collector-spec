@@ -257,3 +257,52 @@ def test_balanced_trailing_parenthesis_stays_in_url_mask() -> None:
     assert urls == ["https://de.wikipedia.org/wiki/Bus_(Verkehr)", "https://example.org/x"]
     result = validate_preservation(masked, _translate(masked))
     assert result.ok and "wiki/Bus_(Verkehr)" in result.html
+
+
+# --- виправлення після gate 3 (R-3, R-8, R-10) ------------------------------------------------
+
+HOSTILE_INPUTS = {
+    "word-no-at": "a" * 60_000,
+    "dotted-no-at": "a." * 30_000,
+    "digits": "1" * 60_000,
+    "grouped-digits": "1 234 " * 10_000,
+    "many-numbers": " ".join(str(i) for i in range(12_000)),
+    "url-tail": "https://example.org/" + "a" * 60_000,
+    "lt-run": "&lt;" * 20_000,
+    "at-run": "@" * 60_000,
+    "minus-run": "-" * 60_000,
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_INPUTS), ids=sorted(HOSTILE_INPUTS))
+def test_preservation_regexes_are_fast_on_large_hostile_input(name: str) -> None:
+    import time
+
+    started = time.perf_counter()
+    masked = _masked(HOSTILE_INPUTS[name])
+    validate_preservation(masked, _translate(masked))
+    assert time.perf_counter() - started < 3.0, name
+
+
+@pytest.mark.parametrize(
+    "translated",
+    ["<" * 60_000, "<!--" * 15_000, "<x" * 30_000, 'x id="1"/>' * 6_000],
+    ids=["lt", "comment-open", "tag-open", "broken-placeholder"],
+)
+def test_validation_is_fast_on_hostile_provider_output(translated: str) -> None:
+    import time
+
+    masked = _masked("Es kamen 5 Gäste.")
+    started = time.perf_counter()
+    assert not validate_preservation(masked, translated).ok
+    assert time.perf_counter() - started < 3.0
+
+
+def test_glossary_term_with_digits_is_not_number_mismatch() -> None:
+    (segment,) = segment_html("<p>Der G7-Gipfel und 3 Minister.</p>").segments
+    masked = mask_segment(segment, (GlossaryEntry("G7", "Велика сімка"),))
+    result = validate_preservation(masked, _translate(masked))
+    assert result.ok, result.issues
+    assert "Велика сімка" in result.html
+    lost = validate_preservation(masked, _translate(masked).replace('<x id="2"/>', "4"))
+    assert "number_mismatch" in lost.issues

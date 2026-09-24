@@ -42,7 +42,7 @@ _CURRENCY = r"(?:€|\$|£|zł|Ft|Kč|lei|kn|CHF|EUR|USD|GBP|PLN|HUF|CZK|RON|SEK
 _NUMBER = rf"\d{{1,3}}(?:[{_GROUP_SEPARATORS}.,]\d{{3}})+(?:[.,]\d+)?(?!\d)|\d+(?:[.,]\d+)?"
 _URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"'«»]+", re.IGNORECASE)
 _URL_TRAILING = ".,;:!?)]}»”’\"'"
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _DATE_RE = re.compile(r"(?<!\d)(?:\d{1,2}[./]\d{1,2}[./]\d{2,4}|\d{4}-\d{2}-\d{2})(?![\d])")
 _AMOUNT_RE = re.compile(
     rf"(?<![\w.,])(?:{_CURRENCY}\s?)?(?:{_NUMBER})(?:\s?(?:%|‰|{_CURRENCY}(?!\w)))?(?!\d)"
@@ -57,7 +57,7 @@ _NUMERIC_PATTERNS: tuple[tuple[re.Pattern[str], PlaceholderKind], ...] = (
     (_DATE_RE, "date"),
     (_AMOUNT_RE, "number"),
 )
-_TAG_RE = re.compile(r"<!--.*?-->|<[^>]*>", re.DOTALL)
+_TAG_RE = re.compile(r"<!--(?:[^-<]|-(?!->))*-->|<[^<>]*>")
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +142,7 @@ def validate_preservation(masked: MaskedSegment, translated: str) -> Preservatio
     if Counter(_tags(restored)) != Counter(_tags(masked.source_html)):
         issues.append("tag_mismatch")
     source_text, restored_text = _visible_text(masked.source_html), _visible_text(restored)
-    if _numbers(source_text) != _numbers(restored_text):
+    if _expected_numbers(masked, source_text) != _numbers(restored_text):
         issues.append("number_mismatch")
     if Counter(_urls(source_text)) != Counter(_urls(restored_text)):
         issues.append("url_mismatch")
@@ -183,9 +183,11 @@ def _mask_text(
     add: Callable[[PlaceholderKind, str, str], str],
 ) -> str:
     spans: list[tuple[int, int, PlaceholderKind, str]] = []
+    taken = bytearray(len(plain))
 
     def claim(start: int, end: int, kind: PlaceholderKind, replacement: str) -> None:
-        if start < end and all(end <= s or start >= e for s, e, _, _ in spans):
+        if start < end and not any(taken[start:end]):
+            taken[start:end] = b"\x01" * (end - start)
             spans.append((start, end, kind, replacement))
 
     for start, end in _url_spans(plain):
@@ -225,12 +227,27 @@ def _urls(text: str) -> list[str]:
 
 def _numbers(text: str) -> Counter[str]:
     """Числа видимого тексту поза URL/e-mail, нормалізовані за форматом."""
-    for start, end in sorted(
-        [*_url_spans(text), *((m.start(), m.end()) for m in _EMAIL_RE.finditer(text))],
-        reverse=True,
-    ):
-        text = text[:start] + " " + text[end:]
-    return Counter(normalize_number(match.group(0)) for match in _BARE_NUMBER_RE.finditer(text))
+    spans = sorted([*_url_spans(text), *((m.start(), m.end()) for m in _EMAIL_RE.finditer(text))])
+    pieces: list[str] = []
+    position = 0
+    for start, end in spans:
+        if start >= position:
+            pieces.append(text[position:start])
+            position = end
+    pieces.append(text[position:])
+    cleaned = " ".join(pieces)
+    return Counter(normalize_number(m.group(0)) for m in _BARE_NUMBER_RE.finditer(cleaned))
+
+
+def _expected_numbers(masked: MaskedSegment, source_text: str) -> Counter[str]:
+    """Числа джерела з урахуванням glossary: термін із цифрами (`G7` → «Велика сімка»)
+    легітимно змінює набір чисел — віднімаємо числа терміна й додаємо числа його форми."""
+    expected = _numbers(source_text)
+    for placeholder in masked.placeholders:
+        if placeholder.kind == "glossary":
+            expected.subtract(_numbers(placeholder.source))
+            expected.update(_numbers(html.unescape(placeholder.replacement)))
+    return +expected
 
 
 def _tags(fragment: str) -> list[str]:

@@ -113,16 +113,37 @@ def _glossary_data() -> dict[str, Any]:
     }
 
 
-def test_default_glossary_loads_and_version_is_content_hash() -> None:
+def test_default_glossary_loads_and_version_is_canonical_content_hash() -> None:
     glossary = load_glossary()
     raw = yaml.safe_load(
         (
             Path(__file__).resolve().parents[3] / "src/collector/translation/glossary/default.yaml"
         ).read_text(encoding="utf-8")
     )
-    assert glossary.version == sha256_hex(canonical_json_bytes(raw))
+    canonical = {
+        "schema": 1,
+        "target_language": "uk",
+        "pairs": {
+            language: [
+                [item["term"], None if item.get("keep") else item["target"]] for item in items
+            ]
+            for language, items in raw["pairs"].items()
+        },
+    }
+    assert glossary.version == sha256_hex(canonical_json_bytes(canonical))
     assert any(entry.term == "Bundestag" for entry in glossary.entries_for("de"))
     assert all(entry.term != "Bundestag" for entry in glossary.entries_for("fr"))
+
+
+def test_glossary_version_ignores_non_semantic_yaml_differences() -> None:
+    noisy = _glossary_data()
+    noisy["updated"] = "2026-09-24"
+    noisy["pairs"]["de"][0]["term"] = "Bundestag  "
+    noisy["pairs"]["de"].append({"term": "Tagesschau", "keep": True})
+    plain = _glossary_data()
+    plain["pairs"]["de"].append({"term": "Tagesschau", "keep": True})
+    noisy["pairs"]["de"][1]["keep"] = True
+    assert parse_glossary(noisy).version == parse_glossary(plain).version
 
 
 def test_changing_one_term_changes_version_and_tm_key() -> None:

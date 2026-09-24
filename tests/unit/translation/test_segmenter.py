@@ -213,3 +213,72 @@ def test_cdata_is_byte_exact_and_conditional_comment_dom_equivalent() -> None:
     conditional = "<p>a <![if !IE]> b <![endif]> c</p>"
     document = segment_html(conditional)
     assert dom_events(reassemble(document, _identity(document))) == dom_events(conditional)
+
+
+# --- виправлення після gate 3 (R-1, R-2, R-5, R-6, R-7) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '<p><a href="#"><code>x</a> Die Regierung hat heute einen Vorschlag vorgelegt.</p>',
+        '<p><b><span translate="no">Name</b> Die Regierung hat heute einen Vorschlag.</p>',
+        "<div><em><kbd>ls</em> Die Regierung hat heute einen Vorschlag.</div>",
+    ],
+)
+def test_unclosed_protected_ends_at_any_open_ancestor(source: str) -> None:
+    document = segment_html(source)
+    assert any("Die Regierung" in s.text for s in document.segments)
+    assert not document.unterminated_protected
+    assert dom_events(reassemble(document, _identity(document))) == dom_events(source)
+
+
+def test_protected_until_end_of_document_is_reported() -> None:
+    document = segment_html("<p>Vorher.</p><code>Rest ohne Ende")
+    assert document.unterminated_protected
+    assert [s.text for s in document.segments] == ["Vorher."]
+
+
+def test_attribute_slot_uses_attribute_position_not_substring() -> None:
+    source = '<p><img data-x="a title=foo" title="Real"> text here</p>'
+    document = segment_html(source, translate_attributes=["title"])
+    attributes = [s for s in document.segments if s.kind == "attribute"]
+    assert [s.text for s in attributes] == ["Real"]
+    translations = _identity(document)
+    translations[attributes[0].index] = "Справжній"
+    out = reassemble(document, translations)
+    assert 'data-x="a title=foo"' in out and 'title="Справжній"' in out
+    assert dom_events(reassemble(document, _identity(document))) == dom_events(source)
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ('<img title="a" title="b">', ["a"]),
+        ("<img title=bare alt='single'>", ["bare", "single"]),
+        ('<img\ttitle = "spaced" disabled alt="x > y">', ["spaced", "x > y"]),
+    ],
+)
+def test_attribute_tokenizer_edge_cases(tag: str, expected: list[str]) -> None:
+    document = segment_html(f"<p>{tag} Text</p>", translate_attributes=["title", "alt"])
+    attributes = [s for s in document.segments if s.kind == "attribute"]
+    assert [s.text for s in attributes] == expected
+    out = reassemble(document, ["П" for _ in document.segments])
+    assert "﷐" not in out and "﷑" not in out
+
+
+def test_phrasing_tags_outside_old_inline_list_do_not_split_sentence() -> None:
+    source = "<p>Hello <big>world</big> and <label>more</label> <tt>x</tt> text</p>"
+    assert [s.html for s in segment_html(source).segments] == [
+        "Hello <big>world</big> and <label>more</label> <tt>x</tt> text"
+    ]
+
+
+def test_many_entities_in_one_block_is_linear() -> None:
+    import time
+
+    source = "<p>" + "a&amp;" * 80_000 + "</p>"
+    started = time.perf_counter()
+    document = segment_html(source)
+    assert time.perf_counter() - started < 2.0
+    assert len(document.segments) == 1

@@ -60,11 +60,15 @@ class FixedClassifier:
         self.calls: list[str] = []
 
     def classify(self, text: str) -> tuple[str | None, float]:
+        ranked = self.ranked(text)
+        return ranked[0] if ranked else (None, 0.0)
+
+    def ranked(self, text: str) -> list[tuple[str, float]]:
         self.calls.append(text)
         for needle, result in self.rules.items():
             if needle in text:
-                return result
-        return (self.default, 0.99) if self.default else (None, 0.0)
+                return [result]
+        return [(self.default, 0.99)] if self.default else []
 
 
 def dom_events(markup: str) -> list[tuple[str, ...]]:

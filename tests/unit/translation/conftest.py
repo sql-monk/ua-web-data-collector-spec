@@ -11,8 +11,17 @@ from collector.translation.languages import TARGET_LANGUAGE, supported_source_la
 
 @pytest.fixture(scope="session")
 def classifier() -> LinguaClassifier:
-    """Справжній offline-classifier: `uk` + 16 основних + default extra (`ru`, `ca`)."""
+    """Offline-classifier, обмежений `uk` + 16 + default extra (формулювання п.3 картки).
+
+    Продакшн-набір (`classifier_languages()`: + sentinel-мови, gate 3 R-4) — фікстура
+    `production_classifier`; модулі планера/pipeline перевизначають `classifier` на неї.
+    """
     return lingua_classifier(supported_source_languages() | {TARGET_LANGUAGE})
+
+
+@pytest.fixture(scope="session")
+def production_classifier() -> LinguaClassifier:
+    return lingua_classifier(None)
 
 
 @pytest.fixture(scope="session")

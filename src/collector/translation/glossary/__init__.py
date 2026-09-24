@@ -2,7 +2,8 @@
 
 Файл (`default.yaml` у цьому пакеті або явний шлях) описує пари `<source_language>` (або
 `"*"` — будь-яка вихідна мова) зі списком записів `{term, target}` (українська форма) чи
-`{term, keep: true}` (do-not-translate). `Glossary.version` — SHA-256 canonical JSON вмісту,
+`{term, keep: true}` (do-not-translate). `Glossary.version` — SHA-256 canonical JSON
+канонізованого змісту (пари «термін → форма» у порядку файлу),
 тож зміна одного терміна дає нову версію і, через TM key, новий переклад. Терміни
 застосовуються маскуванням (`preservation.mask_segment`): до провайдера йде placeholder,
 після — підстановка форми з glossary.
@@ -69,7 +70,19 @@ def parse_glossary(data: object) -> Glossary:
         if len(terms) != len(set(terms)):
             raise ValueError(f"glossary[{language}]: термін повторюється")
         pairs[language] = entries
-    return Glossary(version=canonical_sha256(data), pairs=pairs)
+    # Версія — від канонізованого змісту (терміни після strip, target або do-not-translate), а
+    # не від сирого YAML: `keep: false`, пробіли, порядок ключів і сторонні ключі її не
+    # змінюють. Порядок записів у списку лишається значущим (консервативно, T-8).
+    canonical = {
+        "schema": GLOSSARY_SCHEMA,
+        "target_language": TARGET_LANGUAGE,
+        "pairs": {
+            language: [[entry.term, entry.target] for entry in entries]
+            for language, entries in pairs.items()
+            if entries
+        },
+    }
+    return Glossary(version=canonical_sha256(canonical), pairs=pairs)
 
 
 def load_glossary(path: Path | None = None) -> Glossary:

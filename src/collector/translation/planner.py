@@ -31,8 +31,14 @@ SegmentAction = Literal["translate", "keep", "unsupported"]
 # TODO(WP-01C PR2 п.4): замінити на `collector.contracts.TranslationQualityFlag`, коли
 # контракт з'явиться; значення збігаються з мінімальним набором картки WP-01C, а
 # `language_unsupported` (О-5) WP-01C PR2 додає під тією самою назвою.
+# `untranslated_content` (gate 3, R-1) у контракті ще немає — dependency-запит
+# `docs/plan/deps/WP-04-to-WP-01C.md`.
 QualityFlag = Literal[
-    "preservation_failed", "low_language_confidence", "provider_truncated", "language_unsupported"
+    "preservation_failed",
+    "low_language_confidence",
+    "provider_truncated",
+    "language_unsupported",
+    "untranslated_content",
 ]
 
 BODY_ACCESS: Final = frozenset({ContentAccess.FULL, ContentAccess.PARTIAL})
@@ -73,6 +79,9 @@ class FieldPlan:
 class TranslationPlan:
     article_language: LanguageDecision
     fields: tuple[FieldPlan, ...]
+    # Незакритий захищений елемент тягнувся до кінця документа — частина тексту лишиться
+    # неперекладеною; версія можлива лише з quality flag `untranslated_content`.
+    untranslated_content: bool = False
     target_language: str = TARGET_LANGUAGE
 
     @property
@@ -86,8 +95,10 @@ class TranslationPlan:
     @property
     def not_required(self) -> bool:
         """§5.4: оригінал `uk` і жоден сегмент не визначено як не-`uk`."""
-        return self.article_language.language == TARGET_LANGUAGE and all(
-            planned.action == "keep" for planned in self.segments
+        return (
+            self.article_language.language == TARGET_LANGUAGE
+            and not self.untranslated_content
+            and all(planned.action == "keep" for planned in self.segments)
         )
 
     @property
@@ -97,6 +108,8 @@ class TranslationPlan:
             flags.add("language_unsupported")
         if any(planned.language.uncertain for planned in self.segments):
             flags.add("low_language_confidence")
+        if self.untranslated_content:
+            flags.add("untranslated_content")
         return frozenset(flags)
 
 
@@ -143,6 +156,7 @@ def plan_article_translation(
         text=" ".join(segment.text for _, doc in documents for segment in doc.segments),
         classifier=classifier,
         min_confidence=min_confidence,
+        supported=supported,
     )
     fields: list[FieldPlan] = []
     for name, document in documents:
@@ -157,10 +171,12 @@ def plan_article_translation(
                 classifier=classifier,
                 short_segment_chars=short_segment_chars,
                 min_confidence=min_confidence,
+                supported=supported,
             )
             planned.append(PlannedSegment(name, segment, decision, _action(decision, supported)))
         fields.append(FieldPlan(name, document, tuple(planned)))
-    return TranslationPlan(article_language, tuple(fields))
+    unterminated = any(document.unterminated_protected for _, document in documents)
+    return TranslationPlan(article_language, tuple(fields), untranslated_content=unterminated)
 
 
 def _action(decision: LanguageDecision, supported: frozenset[str]) -> SegmentAction:

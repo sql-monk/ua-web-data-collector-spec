@@ -29,6 +29,12 @@ PARAGRAPHS = [
 ]
 
 
+@pytest.fixture
+def classifier(production_classifier: LinguaClassifier) -> LinguaClassifier:
+    """Цей модуль перевіряє продакшн-набір classifier-а (+ sentinel-мови, R-4)."""
+    return production_classifier
+
+
 def _article(paragraphs: list[str], **overrides: Any) -> ArticleText:
     article = ArticleText(
         content_access=ContentAccess.FULL,
@@ -243,3 +249,26 @@ async def test_mixed_uk_page_sends_exactly_two_foreign_segments(
     # uk-сегменти і заголовок проходять як є.
     assert "<p>Міністерство оголосило" in outcome.body_html and "<p>Так</p>" in outcome.body_html
     assert outcome.title == "Нова програма для громадського транспорту"
+
+
+async def test_unclosed_protected_inside_inline_parent_is_translated(
+    classifier: LinguaClassifier, glossary: Glossary
+) -> None:
+    translator = FakeTranslator()
+    article = _article(
+        [],
+        title=None,
+        body_html='<p><a href="#"><code>x</a> Die Regierung hat heute einen Vorschlag.</p>',
+    )
+    outcome = await _run(article, classifier, glossary, RecordingMemory(), translator)
+    assert any("Die Regierung" in text for text in translator.segments_sent)
+    assert outcome.complete and outcome.quality_flags == frozenset()
+
+
+async def test_protected_to_end_of_document_is_never_complete_without_flag(
+    classifier: LinguaClassifier, glossary: Glossary
+) -> None:
+    article = _article([PARAGRAPHS[0]], title=None)
+    article = replace(article, body_html=f"<p>{PARAGRAPHS[0]}</p><code>{PARAGRAPHS[1]}")
+    outcome = await _run(article, classifier, glossary, RecordingMemory(), FakeTranslator())
+    assert "untranslated_content" in outcome.quality_flags
