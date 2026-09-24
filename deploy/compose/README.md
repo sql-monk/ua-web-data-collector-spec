@@ -126,18 +126,16 @@ exit 1 з іменем файла, без значень. Секрети не п
 `ensure-mongo` отримує `COLLECTOR_MONGO_DATABASE=${MONGO_DB:-collector}`: ролі `--users` дають
 права саме на цю БД, тож вона збігається зі шляхом URI (контракт `WP-01B-to-WP-00.md` п.2).
 Користувачів створює `collector db ensure-mongo --users` (WP-01B PR1) з паролів у цих файлах
-(каталог `/run/secrets`). До merge WP-01B PR1 CLI `--users` не має, тому compose запускає
-розширену команду лише за перемикачем:
+(каталог `/run/secrets`). Після merge WP-01B PR1 повна схема ввімкнена за замовчуванням:
 
 | `COLLECTOR_ENSURE_MONGO_SCHEMA` | Команда `ensure-mongo` |
 |---|---|
-| `0` (типово зараз) | `collector db ensure-mongo` — лише replica set |
-| `1` | `collector db ensure-mongo --validators --indexes --users` |
+| `0` | `collector db ensure-mongo` — лише replica set (явний recovery override) |
+| `1` (типово) | `collector db ensure-mongo --validators --indexes --users` |
 | інше | exit 2 без запуску |
 
-Вартовий `test_ensure_mongo_schema_switch_default_follows_cli_capability` падає, щойно CLI
-отримає `--users`, а типове значення лишиться `0`: хто зливається другим (WP-00 PR5 чи
-WP-01B PR1), той змінює default на `1`.
+Вартовий `test_ensure_mongo_schema_switch_default_follows_cli_capability` тримає default `1`,
+коли CLI має `--users`, щоб clean-host старт не оминав validators та component users.
 
 ### Секрет провайдера перекладу (WP-04)
 
@@ -177,7 +175,7 @@ Base-файл портів не публікує; на shared/production host ov
 | `COLLECTOR_LOG_LEVEL` | `INFO` | рівень structlog у контейнерах |
 | `POSTGRES_DB`, `POSTGRES_USER` | `collector` | ім'я БД/ролі; пароль — лише secret |
 | `MONGO_ROOT_USERNAME` | `collector_root` | root user Mongo; пароль — лише secret |
-| `COLLECTOR_ENSURE_MONGO_SCHEMA` | `0` | `1` → `ensure-mongo --validators --indexes --users` (після WP-01B PR1) |
+| `COLLECTOR_ENSURE_MONGO_SCHEMA` | `1` | `0` → лише replica set; `1` → validators, indexes, users |
 | `COLLECTOR_TRANSLATION_PROVIDER` | `disabled` | провайдер перекладу `translation-worker` (WP-04) |
 | `COLLECTOR_TRANSLATION_PROJECT`, `COLLECTOR_TRANSLATION_LOCATION` | порожньо / `global` | Google Cloud Translation v3 (WP-04) |
 | `MONGO_HOST`, `MONGO_PORT`, `MONGO_DB` | `mongo`/`27017`/`collector` | лише для `init-secrets.sh`: хост/порт/БД у `mongo_uri_*` |

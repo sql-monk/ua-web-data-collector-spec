@@ -386,9 +386,9 @@ services:
     # Ініціалізує single-member replica set (реально, ідемпотентно). WP-00 PR5: перемикач
     # COLLECTOR_ENSURE_MONGO_SCHEMA=1 додає `--validators --indexes --users` (§16.2; `--users` —
     # Mongo-користувачі компонентів §13 з паролями з mongo_uri_*, реалізація CLI — WP-01B PR1).
-    # Типово 0, поки CLI WP-01B не в main: інакше one-shot завершився б кодом стабу і стек не
-    # піднявся. Вартовий у tests/unit/test_compose_config.py падає, щойно CLI отримає `--users`,
-    # а типове значення лишиться 0 (хто зливається другим — вмикає). Невідоме значення — exit 2.
+    # Типово 1 після WP-01B PR1: validators, indexes і per-component users є обов'язковою
+    # частиною clean-host старту. Значення 0 лишається явним аварійним/перехідним override лише
+    # для ініціалізації replica set. Невідоме значення — exit 2.
     # Root монтує лише цей one-shot; mongo_uri_* — лише щоб узяти з них паролі користувачів.
     <<: *collector-runtime
     profiles: [core]
@@ -404,7 +404,7 @@ services:
         esac
     environment:
       <<: *collector-env
-      COLLECTOR_ENSURE_MONGO_SCHEMA: ${COLLECTOR_ENSURE_MONGO_SCHEMA:-0}
+      COLLECTOR_ENSURE_MONGO_SCHEMA: ${COLLECTOR_ENSURE_MONGO_SCHEMA:-1}
       # Domain-БД ролей `--users` (WP-01B); має збігатися зі шляхом URI у mongo_uri_* —
       # init-secrets.sh бере той самий MONGO_DB.
       COLLECTOR_MONGO_DATABASE: ${MONGO_DB:-collector}

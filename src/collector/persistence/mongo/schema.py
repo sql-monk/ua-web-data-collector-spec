@@ -75,8 +75,25 @@ class IndexSpec:
     unique: bool = False
 
     def matches(self, info: Mapping[str, Any]) -> bool:
-        """Чи збігається наявний index (з `index_information()`) за ключами й унікальністю."""
-        return index_keys(info) == self.keys and bool(info.get("unique", False)) == self.unique
+        """Чи збігається index за ключами, unique та всіма семантичними options.
+
+        Маніфест навмисно не використовує sparse/partial/collation/TTL/hidden options. Наявний
+        index із будь-якою з них не еквівалентний звичайному index навіть за тих самих ключів та
+        імені, тому його не можна мовчки приймати як виконаний контракт.
+        """
+        semantic_options = {
+            "sparse",
+            "partialFilterExpression",
+            "collation",
+            "expireAfterSeconds",
+            "hidden",
+            "wildcardProjection",
+        }
+        return (
+            index_keys(info) == self.keys
+            and bool(info.get("unique", False)) == self.unique
+            and not semantic_options.intersection(info)
+        )
 
 
 def index_keys(info: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:

@@ -178,15 +178,33 @@ class ValidatorRecipe:
     snapshot: str
     open_top_level: bool = False
     uuid_id: bool = False
+    required_properties: tuple[str, ...] = ()
 
     def build(self, schema: JsonSchema) -> dict[str, Any]:
         extra = {"_id": {"bsonType": "binData"}} if self.uuid_id else None
-        return mongo_validator(schema, open_top_level=self.open_top_level, extra_properties=extra)
+        validator = mongo_validator(
+            schema, open_top_level=self.open_top_level, extra_properties=extra
+        )
+        body = validator["$jsonSchema"]
+        properties = body.get("properties", {})
+        missing = set(self.required_properties) - set(properties)
+        if missing:
+            msg = f"примусово required поля відсутні у snapshot: {sorted(missing)}"
+            raise ValueError(msg)
+        if self.required_properties:
+            body["required"] = sorted({*body.get("required", []), *self.required_properties})
+        return validator
 
 
 RECIPES: dict[str, ValidatorRecipe] = {
     # Усі `*_current`: базовий контракт §9.2, корінь відкритий для доменних полів WP-07/WP-09.
-    "current_document": ValidatorRecipe("current_document_base.v1.json", open_top_level=True),
+    "current_document": ValidatorRecipe(
+        "current_document_base.v1.json",
+        open_top_level=True,
+        # Pydantic snapshot має default=1 і тому не додає поле до JSON Schema `required`, але
+        # збережений Mongo current document за §9.2 завжди мусить явно нести schema_version.
+        required_properties=("schema_version",),
+    ),
     # PK receipt-а — `_id = projection_task_id` (UUID), §9.2 «PK projection_task_id».
     "applied_projection_receipt": ValidatorRecipe(
         "applied_projection_receipt.v1.json", uuid_id=True

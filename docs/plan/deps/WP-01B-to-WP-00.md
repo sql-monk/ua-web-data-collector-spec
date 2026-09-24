@@ -37,6 +37,5 @@
 - root лише в `ensure-mongo` (як зараз); scheduler, fetch/discovery/browser/parse-worker
   Mongo-секретів не монтують.
 
-До merge WP-00 PR5 compose лишається `collector db ensure-mongo` (лише RS); validators, indexes і
-користувачі застосовуються вручну: `uv run collector db ensure-mongo --validators --indexes`
-(`--users` — з локальним каталогом секретів). Хто зливається другим — робить rebase.
+**Resolved 2026-09-24:** після merge WP-00 PR5 гілка WP-01B PR1 інтегрувала `main`; compose
+типово виконує `collector db ensure-mongo --validators --indexes --users` з Mongo URI secrets.

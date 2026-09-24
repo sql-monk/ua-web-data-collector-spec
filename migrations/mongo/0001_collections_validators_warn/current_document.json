@@ -282,6 +282,7 @@
       "last_seen_at",
       "lineage",
       "projection_version",
+      "schema_version",
       "source",
       "state_hash",
       "time"
