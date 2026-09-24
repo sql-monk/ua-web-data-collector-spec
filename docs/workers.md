@@ -33,13 +33,16 @@
 ## 2. Життєвий цикл процесу
 
 ```text
-boot → register(starting) → readiness → ready ⇄ claim / handle / heartbeat
+boot → login check (§13) → register(starting) → readiness → ready ⇄ claim / handle / heartbeat
                                           │
                        SIGTERM / drain barrier ▼
                                        draining → активні tasks дотягуються в межах
                                        stop_grace_period → stopped → exit 0
 ```
 
+- **login check:** перший запит процесу — `collector.workers.login.verify_component_login`:
+  з'єднання має бути LOGIN-роллю цього компонента без зайвих прав (розділ 7.1). Інакше
+  `RoleLoginError` ще до bootstrap pool, реєстрації і claim, і CLI завершується з exit 1.
 - **boot:** `worker_instance_id` — UUIDv7, згенерований у пам'яті; рядок у `worker_instances`
   містить role, version, deployment/hostname/container metadata і `pool_revision`.
 - **readiness:** `SELECT 1` + `TaskHandler.check_ready()`. Перехід у `ready` повторюється з
@@ -50,7 +53,10 @@ boot → register(starting) → readiness → ready ⇄ claim / handle / heartbe
 - **heartbeat:** один тік оновлює `worker_instances` і продовжує lease **усіх** активних jobs;
   інтервал планується від дедлайну, тому тривалість тіку не накопичує дрейф.
 - **drain:** SIGTERM → `draining`, нові claim заборонені, активні дотягуються; ті, що не
-  вклались у `stop_grace_period`, скасовуються, а їхні lease повертаються в чергу.
+  вклались у `stop_grace_period`, скасовуються, а їхні lease повертаються в чергу через
+  `queue.release`: job одразу `pending`, `attempt` не змінюється (release компенсує інкремент
+  claim), полів помилки й dead letter немає — плановий drain нікого не провалив, тож і job на
+  останній спробі не йде в карантин.
 - **SIGKILL:** fault case. Lease лишається простроченим, і його повертає
   `recover_expired_leases` (тік scheduler-а).
 
@@ -154,7 +160,7 @@ class FetchHandler(TaskHandler):
 
 | Змінна | Типово | Призначення |
 |---|---|---|
-| `COLLECTOR_POSTGRES_DSN[_FILE]` | — | підключення до control plane |
+| `COLLECTOR_POSTGRES_DSN[_FILE]` | — | DSN **власної** LOGIN-ролі компонента (розділ 7.1) |
 | `COLLECTOR_WORKER_LEASE_SECONDS` | `60` | TTL lease job-и |
 | `COLLECTOR_WORKER_HEARTBEAT_SECONDS` | `20` | період heartbeat (≤ ⅓ lease) |
 | `COLLECTOR_WORKER_FENCE_AFTER_SECONDS` | ½ lease | вікно до self-fencing |
@@ -176,6 +182,34 @@ Scheduler:
 | `COLLECTOR_SCHEDULER_LEASE_NAME` | `scheduler` | ім'я advisory lease (`controller` PR3 — інше ім'я, той самий примітив) |
 | `COLLECTOR_SCHEDULER_STALE_AFTER_SECONDS` | `60` | TTL heartbeat, після якого `mark_stale_instances` позначає instance `stale` |
 | `COLLECTOR_SCHEDULER_RECOVER_LIMIT` | `1000` | максимум leases за один прохід `recover_expired_leases` |
+
+### 7.1. Ролі БД (§13)
+
+Кожен runtime-процес ходить у PostgreSQL власною LOGIN-роллю і монтує лише свій Docker secret
+`postgres_dsn_<component>` як `COLLECTOR_POSTGRES_DSN_FILE`. Паролі ролям виставляє
+`collector db roles --with-login` в one-shot `migrate-postgres`; спільний міграційний
+`postgres_dsn` runtime не монтує (тест `tests/unit/test_compose_config.py::
+test_runtime_services_use_only_their_own_login_dsn_13`).
+
+| Процес | Роль БД | Secret |
+|---|---|---|
+| `scheduler`, `maintenance-worker` | `collector_scheduler` | `postgres_dsn_scheduler` |
+| `discovery-`, `fetch-`, `browser-worker` | `collector_fetcher` | `postgres_dsn_fetcher` |
+| `parse-worker` | `collector_parser` | `postgres_dsn_parser` |
+| `projector-worker` | `collector_projector` | `postgres_dsn_projector` |
+| `translation-worker` | `collector_translation` | `postgres_dsn_translation` |
+| `export-worker` | `collector_scheduler` (тимчасово) | `postgres_dsn_scheduler` |
+
+`export-worker` під `collector_scheduler` — тимчасове рішення: runtime-черга пише
+`worker_instances`/`crawl_jobs`/`audit_log`, а read-only `collector_export_ro` цього не може;
+доменне читання даних експортом піде окремим `collector_export_ro`-з'єднанням (ризик у картці
+WP-01D). Мапінг у коді — `collector.workers.roles.DB_ROLE_BY_WORKER_ROLE`.
+
+При старті процес перевіряє (`verify_runtime_login` WP-01A + збіг із мапінгом): не superuser,
+не член `collector_migrate` чи привілейованих вбудованих ролей, і роль саме цього компонента.
+Відмова — `role login: …` у stderr (без DSN і пароля) та exit 1; Docker перезапускатиме
+контейнер, доки DSN не виправлено. Новий `*-worker` у Compose без власного секрету не стартує:
+anchor `x-worker` DSN не містить навмисно.
 
 ## 8. Експлуатація
 

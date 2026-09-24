@@ -403,12 +403,10 @@ def test_postgres_init_revokes_public_on_app_and_service_databases() -> None:
 def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
     compose: dict[str, Any], services: dict[str, dict[str, Any]]
 ) -> None:
-    """DSN отримують лише ті, хто справді ходить у PostgreSQL: one-shot міграцій і runtime.
+    """Міграційний DSN `postgres_dsn` має лише one-shot міграцій (§13).
 
-    WP-01D PR1: `scheduler` (advisory lease + maintenance) і `*-worker` (claim/lease/heartbeat)
-    читають чергу, тому DSN їм потрібен. `api`, stateful і Mongo-one-shot його не бачать.
-    Окремі per-component DSN (§13) чекають на LOGIN-ролі —
-    docs/plan/deps/WP-01D-to-WP-01A.md.
+    WP-01D PR1b: `scheduler` і `*-worker` ходять у PostgreSQL власними LOGIN-ролями
+    (`postgres_dsn_<component>`, див. `test_runtime_services_use_only_their_own_login_dsn_13`).
     """
     assert "postgres_dsn" in compose["secrets"]
     migrate = services["migrate-postgres"]
@@ -427,7 +425,7 @@ def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
         )
     }
     assert migrate["environment"]["COLLECTOR_POSTGRES_DSN_FILE"] == "/run/secrets/postgres_dsn"
-    allowed = {"migrate-postgres", "scheduler"} | WORKERS
+    allowed = {"migrate-postgres"}
     for name, svc in services.items():
         holds_dsn = "postgres_dsn" in [
             s if isinstance(s, str) else s["source"] for s in svc.get("secrets", [])
@@ -436,83 +434,69 @@ def test_postgres_dsn_secret_is_scoped_to_migration_and_queue_consumers(
     assert migrate["command"][-1].endswith("collector db roles --with-login")
 
 
-ROLE_SQL_PATHS = (
-    Path("src") / "collector" / "persistence" / "postgres" / "sql" / "roles.sql",
-    Path("deploy") / "compose" / "postgres" / "init" / "01-roles.sql",
-)
-# `CREATE USER` — це синонім `CREATE ROLE … LOGIN`, тому він теж LOGIN-роль.
-LOGIN_ROLE_SQL = re.compile(
-    r"(?is)\bcreate\s+user\b|\b(?:create|alter)\s+role\b(?:(?!;).)*?\blogin\b"
-)
-
-
 def _strip_sql_comments(sql: str) -> str:
     """Прибрати `--` і `/* */` коментарі: тест має реагувати на SQL, а не на пояснення."""
     without_block = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
     return "\n".join(line.split("--", 1)[0] for line in without_block.splitlines())
 
 
-def test_runtime_dsn_is_a_temporary_deviation_from_13_with_a_tripwire() -> None:
-    """§13 (знахідка F1 gate 2): runtime-процеси тимчасово ходять у PG тим самим DSN, що й
-    міграції, — бо LOGIN-ролі per component ще не існують.
+# §13 + мапінг картки WP-01D PR1b п.1–2: runtime-сервіс → єдиний DSN-секрет його LOGIN-ролі.
+# `export-worker` → scheduler — тимчасове рішення (варіант (а) deps WP-01A→WP-01D §1, ризик у
+# картці WP-01D). `api` (WP-11A) поки DSN не має зовсім.
+RUNTIME_DSN_SECRETS = {
+    "scheduler": "postgres_dsn_scheduler",
+    "maintenance-worker": "postgres_dsn_scheduler",
+    "export-worker": "postgres_dsn_scheduler",
+    "discovery-worker": "postgres_dsn_fetcher",
+    "fetch-worker": "postgres_dsn_fetcher",
+    "browser-worker": "postgres_dsn_fetcher",
+    "parse-worker": "postgres_dsn_parser",
+    "projector-worker": "postgres_dsn_projector",
+    "translation-worker": "postgres_dsn_translation",
+}
 
-    Це навмисно **fail-loud** тест-вартовий, а не документація: щойно в будь-якому SQL-файлі
-    ролей зʼявиться LOGIN-роль (WP-01A PR2, dependency-запит
-    `docs/plan/deps/WP-01D-to-WP-01A.md` §2), він упаде і змусить повернути §13-інваріант —
-    per-role DSN для `scheduler` і `*-worker` замість спільного superuser-секрету
-    `postgres_dsn`.
 
-    Пастки, які знято після пострев'ю (S-2): перевірка більше не залежить від регістру, ловить
-    `CREATE USER` (LOGIN без ключового слова) і `ALTER ROLE … WITH LOGIN`, дивиться **всі**
-    файли ролей (пакет + init-скрипт кластера) і не спрацьовує на слово `LOGIN` у коментарі.
-    `NOLOGIN` не матчиться, бо це одне слово (`\\blogin\\b` до нього не застосовний).
+def _secret_sources(svc: dict[str, Any]) -> list[str]:
+    return [s if isinstance(s, str) else s["source"] for s in svc.get("secrets", [])]
+
+
+def test_runtime_services_use_only_their_own_login_dsn_13(
+    compose: dict[str, Any], services: dict[str, dict[str, Any]]
+) -> None:
+    """§13 «облікові дані БД розділені за компонентами; migration role не використовується
+    runtime-процесами» — позитивний інваріант замість тимчасового вартового PR1 (знахідка F1).
+
+    - жоден сервіс, крім `migrate-postgres`, не монтує міграційний `postgres_dsn`;
+    - кожен runtime-сервіс монтує **рівно один** `postgres_dsn_<component>` за мапінгом і
+      вказує саме на нього в `COLLECTOR_POSTGRES_DSN_FILE`;
+    - жоден інший сервіс (api, stateful, ensure-mongo, gui) per-role DSN runtime не має.
     """
-    checked = 0
-    for relative in ROLE_SQL_PATHS:
-        path = REPO_ROOT / relative
-        if not path.is_file():
+    assert set(RUNTIME_DSN_SECRETS) == {"scheduler"} | WORKERS, "мапінг покриває всі runtime"
+    for name, svc in services.items():
+        sources = _secret_sources(svc)
+        if name != "migrate-postgres":
+            assert "postgres_dsn" not in sources, f"{name}: міграційний DSN у runtime (§13)"
+        dsn_secrets = [s for s in sources if s.startswith("postgres_dsn_")]
+        expected = RUNTIME_DSN_SECRETS.get(name)
+        if expected is None:
+            if name != "migrate-postgres":
+                assert dsn_secrets == [], f"{name}: не runtime, а має {dsn_secrets}"
             continue
-        checked += 1
-        statements = _strip_sql_comments(path.read_text(encoding="utf-8"))
-        assert not LOGIN_ROLE_SQL.search(statements), (
-            f"{relative}: зʼявилися LOGIN-ролі — поверніть §13-інваріант: worker/scheduler "
-            "мають отримати власні per-role DSN, а не спільний secret postgres_dsn "
-            "(docs/plan/deps/WP-01D-to-WP-01A.md §2)"
-        )
-    assert checked == len(ROLE_SQL_PATHS), "файли ролей перейменовано — онови список вартового"
-    deps = REPO_ROOT / "docs" / "plan" / "deps" / "WP-01D-to-WP-01A.md"
-    assert deps.is_file(), "тимчасове відхилення від §13 має лишатись оформленим запитом"
-    assert "LOGIN" in deps.read_text(encoding="utf-8")
+        assert expected in compose["secrets"], f"{expected} не оголошено"
+        assert dsn_secrets == [expected], f"{name}: {dsn_secrets} замість [{expected}]"
+        env = svc.get("environment", {})
+        assert env.get("COLLECTOR_POSTGRES_DSN_FILE") == f"/run/secrets/{expected}", name
+        assert "COLLECTOR_POSTGRES_DSN" not in env, f"{name}: DSN лише через Docker secret"
 
 
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "CREATE ROLE collector_fetch LOGIN PASSWORD 'x';",
-        "create role collector_fetch login password 'x';",
-        "ALTER ROLE collector_fetcher WITH LOGIN;",
-        "CREATE USER collector_fetch PASSWORD 'x';",
-        "create\n  role collector_fetch\n  login;",
-    ],
-)
-def test_login_tripwire_detects_every_way_to_create_a_login_role(sql: str) -> None:
-    """Зонд самого вартового: кожен спосіб завести LOGIN-роль має його спрацювати."""
-    assert LOGIN_ROLE_SQL.search(_strip_sql_comments(sql)), sql
-
-
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "CREATE ROLE collector_fetcher NOLOGIN;",
-        "EXECUTE format('CREATE ROLE %I NOLOGIN', role_name);",
-        "-- CREATE ROLE collector_fetch LOGIN PASSWORD 'x';",
-        "/* приклад: CREATE USER app LOGIN */ CREATE ROLE app NOLOGIN;",
-        "GRANT collector_fetcher TO CURRENT_USER;",
-    ],
-)
-def test_login_tripwire_is_quiet_on_nologin_and_comments(sql: str) -> None:
-    """І не спрацьовує там, де LOGIN-ролі немає: `NOLOGIN`, коментарі, GRANT."""
-    assert not LOGIN_ROLE_SQL.search(_strip_sql_comments(sql)), sql
+def test_worker_anchor_carries_no_dsn_so_a_new_worker_cannot_inherit_one() -> None:
+    """Anchor `x-worker` без `secrets` і без DSN: новий `*-worker`, якому забули вказати власний
+    `postgres_dsn_<component>`, не стартує (config error), а не успадковує чужу роль (§13)."""
+    raw = _load(COMPOSE_PATH)
+    anchor = raw["x-worker"]
+    assert "secrets" not in anchor
+    assert "COLLECTOR_POSTGRES_DSN_FILE" not in anchor["environment"]
+    assert "COLLECTOR_POSTGRES_DSN" not in anchor["environment"]
 
 
 def test_dockerfile_optionally_copies_alembic_and_migrations() -> None:

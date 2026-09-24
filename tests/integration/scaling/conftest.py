@@ -8,6 +8,15 @@ Fixturedef-и при цьому різні (свій у кожному conftest)
 `_share_server_and_template` підміняє `_start_container` і `TemplateState` memoized-обгортками,
 і на процес припадає рівно один контейнер із однією template-БД (знахідка F6 gate 2).
 
+**Runtime — під LOGIN-ролями §13, а не під superuser** (картка WP-01D PR1b): `WorkerRuntime`/
+`SchedulerRuntime` при старті відмовляються працювати під superuser-ом, членом
+`collector_migrate` чи роллю чужого компонента. Тому runtime у тестах отримує sessions своєї ролі
+(`runtime_sessions`, `role_sessions(...)`, `scheduler_engine`/`scheduler_sessions`), а
+`pg_sessions` (superuser) лишається лише для підготовки даних і перевірок стану — так само, як
+оператор/міграції в production. Зразок — фікстури WP-01A `tests/integration/postgres/
+test_role_logins.py`; паролі одноразові й генеруються в рантаймі. Ролі кластерні, тож після тесту
+вони повертаються у NOLOGIN без пароля.
+
 Детермінізм: тести чекають **стану**, а не часу — `wait_for` опитує предикат із коротким кроком
 і падає з описом, якщо стан не настав. Жодного `sleep` на секунди й жодної залежності від
 швидкості машини: lease TTL у тестах короткий, а «прострочення» моделюється явним `now` у
@@ -19,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import importlib.util
+import secrets
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import suppress
@@ -28,13 +38,23 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.engine import URL
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from collector.persistence.postgres.config import PostgresSettings
+from collector.persistence.postgres.engine import create_engine, create_session_factory
+from collector.persistence.postgres.ops import apply_database_roles
 from collector.persistence.postgres.repositories import pools as pools_repo
 from collector.persistence.postgres.repositories import queue as queue_repo
+from collector.persistence.postgres.roles import (
+    RUNTIME_ROLES,
+    dsn_secret_name,
+    load_role_logins,
+)
 from collector.workers.config import WorkerRuntimeConfig
 from collector.workers.handlers import Task, TaskHandler, TaskResult
-from collector.workers.roles import WorkerRole
+from collector.workers.roles import SCHEDULER_DB_ROLE, WorkerRole, db_role_for
 
 pytestmark = pytest.mark.integration
 
@@ -117,6 +137,94 @@ pg_database = _postgres_fixtures.pg_database
 pg_engine = _postgres_fixtures.pg_engine
 pg_sessions = _postgres_fixtures.pg_sessions
 pg_session = _postgres_fixtures.pg_session
+
+
+# --- LOGIN-ролі §13 для runtime ------------------------------------------------------------
+
+
+@pytest.fixture
+async def login_urls(
+    pg_database: PostgresSettings, tmp_path: Path
+) -> AsyncIterator[dict[str, URL]]:
+    """Увімкнути LOGIN усім runtime-ролям тим самим шляхом, що й `db roles --with-login`.
+
+    DSN-секрети з одноразовими паролями пишуться в `tmp_path` і читаються `load_role_logins`;
+    після тесту ролі повертаються у NOLOGIN без пароля (ролі кластерні, спільні для всіх БД).
+    """
+    urls: dict[str, URL] = {}
+    for role in RUNTIME_ROLES:
+        url = pg_database.url.set(username=role, password=secrets.token_hex(24))
+        (tmp_path / dsn_secret_name(role)).write_text(
+            url.render_as_string(hide_password=False) + "\n", encoding="utf-8"
+        )
+        urls[role] = url
+    try:
+        await apply_database_roles(pg_database, logins=load_role_logins(tmp_path))
+        yield urls
+    finally:
+        admin = create_engine(pg_database, pool_size=1, max_overflow=0)
+        try:
+            async with admin.begin() as conn:
+                for role in RUNTIME_ROLES:
+                    await conn.execute(text(f'ALTER ROLE "{role}" WITH NOLOGIN PASSWORD NULL'))
+        finally:
+            await admin.dispose()
+
+
+RoleEngine = Callable[[str], AsyncEngine]
+
+
+@pytest.fixture
+async def role_engine(login_urls: dict[str, URL]) -> AsyncIterator[RoleEngine]:
+    """Фабрика engine під LOGIN-роллю (той самий `create_engine`, що й у CLI runtime)."""
+    engines: dict[str, AsyncEngine] = {}
+
+    def make(role: str) -> AsyncEngine:
+        if role not in engines:
+            engines[role] = create_engine(
+                PostgresSettings(url=login_urls[role]),
+                pool_size=10,
+                max_overflow=6,
+                application_name=f"pytest-{role}",
+            )
+        return engines[role]
+
+    try:
+        yield make
+    finally:
+        for engine in engines.values():
+            await engine.dispose()
+
+
+RoleSessions = Callable[[WorkerRole], async_sessionmaker[AsyncSession]]
+
+
+@pytest.fixture
+def role_sessions(role_engine: RoleEngine) -> RoleSessions:
+    """Sessions під LOGIN-роллю worker-а заданої ролі (мапінг `db_role_for`)."""
+
+    def make(role: WorkerRole) -> async_sessionmaker[AsyncSession]:
+        return create_session_factory(role_engine(db_role_for(role)))
+
+    return make
+
+
+@pytest.fixture
+def runtime_sessions(role_sessions: RoleSessions) -> async_sessionmaker[AsyncSession]:
+    """Sessions runtime ролі `fetch` (default `worker_config`) — `collector_fetcher`."""
+    return role_sessions(WorkerRole.FETCH)
+
+
+@pytest.fixture
+def scheduler_engine(role_engine: RoleEngine) -> AsyncEngine:
+    """Engine scheduler-а під `collector_scheduler` (advisory lease + тік)."""
+    return role_engine(SCHEDULER_DB_ROLE)
+
+
+@pytest.fixture
+def scheduler_sessions(scheduler_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return create_session_factory(scheduler_engine)
+
 
 T0 = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
 # Jobs ставляться в чергу «в минулому», щоб `not_before` не залежав від реального годинника
@@ -296,8 +404,15 @@ def enqueue_jobs(
 
 
 @pytest.fixture
-async def running() -> AsyncIterator[list[asyncio.Task[None]]]:
-    """Реєстр фонових runtime-задач: наприкінці тесту всі гарантовано зупинені."""
+async def running(role_engine: RoleEngine) -> AsyncIterator[list[asyncio.Task[None]]]:
+    """Реєстр фонових runtime-задач: наприкінці тесту всі гарантовано зупинені.
+
+    Залежить від `role_engine` навмисно (code review PR1b, low #2): pytest знімає фікстуру раніше
+    за її залежності, тож runtime скасовується **до** `dispose()` engine-ів і
+    `ALTER ROLE … NOLOGIN` — впалий посередині тест не засмічує логи `heartbeat_failed`/`fenced`
+    через уже вимкнений логін.
+    """
+    del role_engine  # потрібна лише як залежність порядку teardown
     tasks: list[asyncio.Task[None]] = []
     yield tasks
     for task in tasks:

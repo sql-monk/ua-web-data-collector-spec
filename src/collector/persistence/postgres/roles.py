@@ -189,14 +189,34 @@ PRIVILEGED_BUILTIN_ROLES: tuple[str, ...] = (
     "pg_read_server_files",
     "pg_execute_server_program",
     "pg_signal_backend",
+    # WP-01D PR1b gate 3 (S-3): читання/моніторинг поза GRANT-ами `roles.sql` — тексти запитів і
+    # статистика чужих сесій (`pg_read_all_stats`, `pg_stat_scan_tables`, `pg_monitor`, що
+    # включає обидві), усі GUC включно з шляхами/параметрами сервера (`pg_read_all_settings`),
+    # створення підписок логічної реплікації (`pg_create_subscription`), примусовий CHECKPOINT
+    # (`pg_checkpoint`), резервні слоти з'єднань (`pg_use_reserved_connections`) і права власника
+    # БД (`pg_database_owner`). Неіснуючі в поточній версії PostgreSQL імена просто не збігаються.
+    "pg_read_all_stats",
+    "pg_read_all_settings",
+    "pg_stat_scan_tables",
+    "pg_monitor",
+    "pg_create_subscription",
+    "pg_checkpoint",
+    "pg_use_reserved_connections",
+    "pg_database_owner",
 )
-"""Вбудовані ролі, членство в яких дає runtime більше, ніж GRANT-и `roles.sql` (gate 3, S-4)."""
+"""Вбудовані ролі, членство в яких дає runtime більше, ніж GRANT-и `roles.sql` (gate 3, S-4;
+WP-01D PR1b gate 3, S-3)."""
+
+COMPONENT_ROLE_PATTERN = r"collector\_%"
+"""`LIKE`-шаблон ролей §13: runtime-роль не може бути членом **жодної іншої** `collector_*`
+(WP-01D PR1b gate 3, S-3) — `GRANT collector_scheduler TO collector_fetcher` непомітно дав би
+fetcher-у control plane, а `collector_api_ro` — SELECT на все."""
 
 _PRIVILEGED_MEMBERSHIPS = text(
     "SELECT r.rolname FROM pg_roles r "
     "WHERE r.rolname <> :role AND pg_has_role(:role, r.oid, 'MEMBER') "
     "AND (r.rolsuper OR r.rolcreaterole OR r.rolbypassrls OR r.rolcreatedb OR r.rolreplication "
-    "OR r.rolname = ANY(:privileged)) "
+    "OR r.rolname = ANY(:privileged) OR r.rolname LIKE :component_roles) "
     "ORDER BY r.rolname"
 )
 
@@ -205,13 +225,18 @@ async def privileged_memberships(conn: AsyncConnection, role: str) -> list[str]:
     """Ролі (транзитивно), членом яких є `role` і які дають права понад runtime (S-4).
 
     Привілейована — роль з `rolsuper`/`rolcreaterole`/`rolbypassrls`/`rolcreatedb`/
-    `rolreplication` (останні два — gate 4, N-5), `collector_migrate` або
-    одна з `PRIVILEGED_BUILTIN_ROLES`. Для superuser `pg_has_role` істинний для всіх ролей,
-    тож superuser-логін завжди має непорожній результат.
+    `rolreplication` (останні два — gate 4, N-5), `collector_migrate`, будь-яка інша роль
+    `collector_*` (`COMPONENT_ROLE_PATTERN`) або одна з `PRIVILEGED_BUILTIN_ROLES`. Для
+    superuser `pg_has_role` істинний для всіх ролей, тож superuser-логін завжди має непорожній
+    результат.
     """
     rows = await conn.execute(
         _PRIVILEGED_MEMBERSHIPS,
-        {"role": role, "privileged": [MIGRATE_ROLE, *PRIVILEGED_BUILTIN_ROLES]},
+        {
+            "role": role,
+            "privileged": [MIGRATE_ROLE, *PRIVILEGED_BUILTIN_ROLES],
+            "component_roles": COMPONENT_ROLE_PATTERN,
+        },
     )
     return [str(name) for name in rows.scalars()]
 
@@ -272,7 +297,10 @@ def _sqlstate(exc: DBAPIError) -> str:
 async def verify_runtime_login(conn: AsyncConnection) -> str:
     """Перевірка для runtime-процесів (WP-01D): поточний логін — runtime-роль без зайвих прав.
 
-    Вимоги (gate 3, S-4): `current_user` з allowlist `RUNTIME_ROLES`; без `rolsuper`/
+    Вимоги (gate 3, S-4): `session_user` = `current_user` (WP-01D PR1b gate 3, S-2: login
+    привілейованою роллю з default GUC `role` дав би `current_user` = runtime-роль, а
+    `RESET ROLE` повертав би superuser) і `is_superuser` = off; `current_user` з allowlist
+    `RUNTIME_ROLES`; без `rolsuper`/
     `rolcreaterole`/`rolbypassrls`/`rolcreatedb`/`rolreplication` (N-5); без (транзитивного)
     членства в привілейованих ролях
     (`privileged_memberships`, включно з `collector_migrate`). Повертає `current_user`, інакше
@@ -282,7 +310,8 @@ async def verify_runtime_login(conn: AsyncConnection) -> str:
     row = (
         await conn.execute(
             text(
-                "SELECT current_user AS name, r.rolsuper AS superuser, "
+                "SELECT current_user AS name, session_user AS session_name, "
+                "current_setting('is_superuser') AS is_superuser, r.rolsuper AS superuser, "
                 "r.rolcreaterole AS createrole, r.rolbypassrls AS bypassrls, "
                 "r.rolcreatedb AS createdb, r.rolreplication AS replication "
                 "FROM pg_roles r WHERE r.rolname = current_user"
@@ -291,6 +320,13 @@ async def verify_runtime_login(conn: AsyncConnection) -> str:
     ).one()
     name = str(row.name)
     hint = "використайте DSN компонента (postgres_dsn_<component>), §13"
+    if str(row.session_name) != name or row.is_superuser != "off":
+        msg = (
+            f"runtime-підключення: session_user {str(row.session_name)!r} ≠ current_user "
+            f"{name!r} або is_superuser={row.is_superuser}: логін має бути самою runtime-роллю "
+            f"(без SET ROLE / default role); {hint}"
+        )
+        raise RoleLoginError(msg)
     if row.superuser or row.createrole or row.bypassrls or row.createdb or row.replication:
         msg = (
             f"runtime-підключення під {name!r} має атрибути "

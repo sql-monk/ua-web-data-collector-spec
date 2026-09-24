@@ -75,10 +75,44 @@ def default_pool_spec(role: WorkerRole) -> PoolSpec:
     return DEFAULT_POOL_SPECS[role]
 
 
+SCHEDULER_DB_ROLE: Final = "collector_scheduler"
+"""LOGIN-роль БД процесу `collector scheduler` (§13)."""
+
+DB_ROLE_BY_WORKER_ROLE: Final = MappingProxyType(
+    {
+        WorkerRole.DISCOVERY: "collector_fetcher",
+        WorkerRole.FETCH: "collector_fetcher",
+        WorkerRole.BROWSER: "collector_fetcher",
+        WorkerRole.PARSE: "collector_parser",
+        WorkerRole.PROJECTOR: "collector_projector",
+        WorkerRole.TRANSLATION: "collector_translation",
+        # Тимчасово (рішення оркестратора, варіант (а) docs/plan/deps/WP-01A-to-WP-01D.md §1):
+        # runtime-черга export-а пише worker_instances/crawl_jobs/audit_log, а read-only
+        # `collector_export_ro` цього не може. Доменне читання даних експортом додасть власник
+        # експорту окремим `collector_export_ro`-з'єднанням (ризик у картці WP-01D).
+        WorkerRole.EXPORT: SCHEDULER_DB_ROLE,
+        WorkerRole.MAINTENANCE: SCHEDULER_DB_ROLE,
+    }
+)
+"""LOGIN-роль БД кожної ролі worker-а (§13, мапінг картки WP-01D PR1b п.1–2).
+
+Процес перевіряє при старті, що підключився саме цією роллю (`collector.workers.login`):
+DSN чужого компонента або спільний міграційний DSN — помилка конфігурації, а не робочий стан.
+"""
+
+
+def db_role_for(role: WorkerRole) -> str:
+    """LOGIN-роль БД, під якою має працювати worker ролі `role` (§13)."""
+    return DB_ROLE_BY_WORKER_ROLE[role]
+
+
 __all__ = [
+    "DB_ROLE_BY_WORKER_ROLE",
     "DEFAULT_POOL_SPECS",
+    "SCHEDULER_DB_ROLE",
     "PoolSpec",
     "WorkerRole",
+    "db_role_for",
     "default_pool_spec",
     "parse_worker_concurrency",
 ]

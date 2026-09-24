@@ -124,25 +124,26 @@ x-liveness-probe: &liveness-probe
 # Worker pool (§7.5/§7.6): масштабується `--scale`, тому без container_name/ports/volumes;
 # stop_grace_period ≥ 90 с — довший за bounded task shutdown (drain по SIGTERM).
 #
-# WP-01D PR1: команда `collector worker <role>` — реальний runtime (claim/lease/heartbeat/drain),
-# тому worker-у потрібен DSN. Тимчасово це той самий secret `postgres_dsn`, що й у
-# `migrate-postgres`: окремих LOGIN-ролей на компонент ще немає (§13 описує їх як group-ролі
-# NOLOGIN) — запит на них у docs/plan/deps/WP-01D-to-WP-01A.md. Rollback до placeholder-процесу
-# WP-00 без перебудови image: COLLECTOR_WORKER_PLACEHOLDER=1.
+# WP-01D: команда `collector worker <role>` — реальний runtime (claim/lease/heartbeat/drain).
+# DSN (§13, WP-01D PR1b): кожен сервіс монтує ЛИШЕ свій `postgres_dsn_<component>` — LOGIN-роль
+# компонента (`collector db roles --with-login` у migrate-postgres). Тому anchor навмисно без
+# `secrets` і без `COLLECTOR_POSTGRES_DSN_FILE`: сервіс без власного DSN не стартує, а не тихо
+# успадковує чужий. Спільний міграційний `postgres_dsn` runtime не монтує; процес при старті
+# перевіряє, що підключився своєю роллю (`collector.workers.login`), інакше exit 1.
+# Мапінг: discovery/fetch/browser → fetcher; parse → parser; projector → projector;
+# translation → translation; maintenance, export (тимчасово, ризик у картці WP-01D) → scheduler.
+# Rollback до placeholder-процесу WP-00 без перебудови image: COLLECTOR_WORKER_PLACEHOLDER=1.
 x-worker: &worker
   <<: *collector-runtime
   profiles: [workers]
   restart: unless-stopped
   stop_grace_period: 120s
   stop_signal: SIGTERM
-  environment:
+  environment: &worker-env
     <<: *collector-env
-    COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn
     # Drain має вміститись у stop_grace_period контейнера (120 с) із запасом на SIGKILL.
     COLLECTOR_WORKER_STOP_GRACE_SECONDS: "90"
     COLLECTOR_WORKER_PLACEHOLDER: ${COLLECTOR_WORKER_PLACEHOLDER:-0}
-  secrets:
-    - postgres_dsn
   networks:
     - backend
   labels:
@@ -451,10 +452,11 @@ services:
     stop_grace_period: 90s
     environment:
       <<: *collector-env
-      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn
+      # §13: власна LOGIN-роль `collector_scheduler`, не міграційний `postgres_dsn`.
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_scheduler
       COLLECTOR_WORKER_PLACEHOLDER: ${COLLECTOR_WORKER_PLACEHOLDER:-0}
     secrets:
-      - postgres_dsn
+      - postgres_dsn_scheduler
     networks:
       - backend
     labels:
@@ -476,6 +478,11 @@ services:
   discovery-worker:
     <<: *worker
     command: ["collector", "worker", "discovery"]
+    environment:
+      <<: *worker-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_fetcher
+    secrets:
+      - postgres_dsn_fetcher
     networks:
       - backend
       - source-egress
@@ -486,6 +493,11 @@ services:
   fetch-worker:
     <<: *worker
     command: ["collector", "worker", "fetch"]
+    environment:
+      <<: *worker-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_fetcher
+    secrets:
+      - postgres_dsn_fetcher
     networks:
       - backend
       - source-egress
@@ -504,6 +516,11 @@ services:
     # Без network egress (§7.6): лише внутрішня мережа backend.
     <<: *worker
     command: ["collector", "worker", "parse"]
+    environment:
+      <<: *worker-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_parser
+    secrets:
+      - postgres_dsn_parser
     depends_on:
       postgres:
         condition: service_healthy
@@ -518,6 +535,11 @@ services:
   projector-worker:
     <<: *worker
     command: ["collector", "worker", "projector"]
+    environment:
+      <<: *worker-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_projector
+    secrets:
+      - postgres_dsn_projector
     depends_on:
       postgres:
         condition: service_healthy
@@ -534,6 +556,11 @@ services:
   translation-worker:
     <<: *worker
     command: ["collector", "worker", "translation"]
+    environment:
+      <<: *worker-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_translation
+    secrets:
+      - postgres_dsn_translation
     networks:
       - backend
       - provider-egress
@@ -544,6 +571,11 @@ services:
   export-worker:
     <<: *worker
     command: ["collector", "worker", "export"]
+    environment:
+      <<: *worker-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_scheduler
+    secrets:
+      - postgres_dsn_scheduler
     depends_on:
       postgres:
         condition: service_healthy
@@ -562,6 +594,11 @@ services:
   maintenance-worker:
     <<: *worker
     command: ["collector", "worker", "maintenance"]
+    environment:
+      <<: *worker-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_scheduler
+    secrets:
+      - postgres_dsn_scheduler
     deploy:
       <<: *limits-small
       replicas: 1
@@ -580,6 +617,11 @@ services:
     <<: *worker
     profiles: [browser]
     command: ["collector", "worker", "browser"]
+    environment:
+      <<: *worker-env
+      COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_fetcher
+    secrets:
+      - postgres_dsn_fetcher
     networks:
       - backend
       - source-egress

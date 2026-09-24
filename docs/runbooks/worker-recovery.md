@@ -121,9 +121,9 @@ docker compose stop fetch-worker   # усі репліки сервісу; до�
 3. активні tasks завершуються (або скасовуються після
    `COLLECTOR_WORKER_STOP_GRACE_SECONDS`, типово 90 с — менше за Compose
    `stop_grace_period: 120s`, щоб встигнути повернути leases до SIGKILL);
-4. lease незавершених tasks повертаються в чергу (крім job-и на останній спробі — вона лишається
-   `leased` до природної експірації lease, щоб не витратити останню спробу і не заквалити
-   помилковий dead letter — `docs/workers.md` §2, ризик 3 картки WP-01D);
+4. lease незавершених tasks повертаються в чергу через `queue.release` (`worker.lease_released`):
+   job одразу `pending`, `attempt` не змінюється, полів помилки й dead letter немає — і для job-и
+   на останній спробі теж (`docs/workers.md` §2; WP-01D PR1b);
 5. `status=stopped`, процес виходить з кодом 0.
 
 Зупинка займає стільки, скільки треба на дотягування активних tasks (спостережено ~2–4 с при
@@ -243,11 +243,22 @@ COLLECTOR_WORKER_PLACEHOLDER=0 docker compose up -d --no-build   # або зня
    розведені навмисно, `docs/decisions/0006-*.md`) — перевіряйте не healthcheck, а
    `worker_instances.last_heartbeat_at`/логи `worker.heartbeat_failed`/`worker.claim_failed`.
 
+5. **Контейнер перезапускається, рядка в `worker_instances` немає взагалі, у логах
+   `role login: …`.** Процес відмовився працювати під чужою роллю БД (§13, `docs/workers.md`
+   §7.1): змонтовано не той `postgres_dsn_<component>`, міграційний DSN, або роль має зайві
+   права (superuser, член `collector_migrate`). Перевірте, що сервіс монтує свій секрет і що
+   `migrate-postgres` (`collector db roles --with-login`) завершився 0:
+
+   ```bash
+   docker compose logs --no-log-prefix fetch-worker | grep 'role login'
+   docker compose ps -a migrate-postgres
+   ```
+
+   Тимчасовий відкат без БД — `COLLECTOR_WORKER_PLACEHOLDER=1` (розділ 6).
+
 ## Обмеження / не покриває цей runbook
 
 - Масштабування (`replicas`, `PoolController`, `scale_commands`, role-wide drain barrier для
   scale-down) — WP-01D PR3.
 - Compose/Swarm adapters, allowlist controller — WP-01D PR3.
-- Автоматизоване відновлення `worker_instances` після §13-обмеження (спільний DSN міграційної
-  ролі) — окремий ризик картки WP-01D, owner WP-01A PR2, не операційна процедура.
 - Origin rate limiter (`OriginPermitClient`, `origin_rate_permits`) — WP-01D PR2.

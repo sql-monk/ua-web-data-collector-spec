@@ -66,6 +66,8 @@ async def test_two_schedulers_keep_exactly_one_active_and_lease_is_retaken_after
     pg_sessions: async_sessionmaker[AsyncSession],
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    scheduler_engine: AsyncEngine,
+    scheduler_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Рівно один активний; після вбивства його сесії lease знову бере рівно один процес.
 
@@ -80,8 +82,12 @@ async def test_two_schedulers_keep_exactly_one_active_and_lease_is_retaken_after
     """
     calls_a: list[datetime] = []
     calls_b: list[datetime] = []
-    first = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=counting_tick(calls_a))
-    second = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=counting_tick(calls_b))
+    first = SchedulerRuntime(
+        FAST, scheduler_engine, scheduler_sessions, tick=counting_tick(calls_a)
+    )
+    second = SchedulerRuntime(
+        FAST, scheduler_engine, scheduler_sessions, tick=counting_tick(calls_b)
+    )
     start(first, running)
     start(second, running)
 
@@ -137,6 +143,8 @@ async def test_single_scheduler_reacquires_lease_before_planning_again(
     pg_sessions: async_sessionmaker[AsyncSession],
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    scheduler_engine: AsyncEngine,
+    scheduler_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Після втрати lease планування відновлюється лише через нове `try_acquire`."""
     active_flags: list[bool] = []
@@ -145,7 +153,7 @@ async def test_single_scheduler_reacquires_lease_before_planning_again(
     async def tick(session: AsyncSession, now: datetime) -> None:
         active_flags.append(holder[0].is_active)
 
-    runtime = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=tick)
+    runtime = SchedulerRuntime(FAST, scheduler_engine, scheduler_sessions, tick=tick)
     holder.append(runtime)
     task = start(runtime, running)
     await wait_for(lambda: runtime.ticks >= 1, what="перший тік")

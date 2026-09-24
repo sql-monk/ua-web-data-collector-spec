@@ -3,7 +3,7 @@
 Життєвий цикл процесу:
 
 ```text
-boot → register(starting) → readiness → ready ⇄ claim/handle/heartbeat
+boot → verify DB login (§13) → register(starting) → readiness → ready ⇄ claim/handle/heartbeat
                                           │
                        SIGTERM / drain barrier ▼
                                        draining → (активні tasks дотягуються
@@ -26,6 +26,8 @@ boot → register(starting) → readiness → ready ⇄ claim/handle/heartbeat
   зупиняє і `drain_requested_at` у власному рядку `worker_instances`, який ставить
   role-wide барʼєр контролера (PR3). Барʼєр перевіряється і в самій транзакції claim під
   `FOR SHARE`, тож після коміту `mark_draining` жоден claim цього instance нової job не візьме;
+- **власна LOGIN-роль БД** (§13): перший запит `_boot` — `verify_component_login`; superuser,
+  член міграційної ролі чи роль чужого компонента → `RoleLoginError` до реєстрації і claim;
 - **SIGKILL — fault case**: при скасуванні (`asyncio.CancelledError`) runtime не повертає
   leases і не пише `stopped` — саме так поводиться вбитий контейнер; lease підбирає
   `recover_expired_leases` іншого instance після експірації.
@@ -41,9 +43,9 @@ import asyncio
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from time import monotonic
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -72,7 +74,8 @@ from collector.workers.handlers import (
     result_for_exception,
 )
 from collector.workers.liveness import LivenessMarker
-from collector.workers.roles import WorkerRole, default_pool_spec
+from collector.workers.login import verify_component_login
+from collector.workers.roles import WorkerRole, db_role_for, default_pool_spec
 from collector.workers.session import bounded_transaction
 from collector.workers.signals import StopSignalHandlers, install_stop_signal_handlers
 
@@ -81,13 +84,6 @@ if TYPE_CHECKING:
 
     from collector.persistence.postgres.models import CrawlJob
 
-IMMEDIATE_RETRY_POLICY: Final = queue_repo.BackoffPolicy(
-    base=timedelta(0), multiplier=1.0, maximum=timedelta(0), jitter_ratio=0.0
-)
-"""Повернення lease без backoff: job має стати claimable одразу, бо її ніхто не «зіпсував» —
-процес просто не встиг доробити її у межах `stop_grace_period`."""
-
-DRAIN_TIMEOUT_ERROR_CODE = "drain_timeout"
 BOOTSTRAP_REASON = "bootstrap default pool (§7.6)"
 READY_RETRY_ATTEMPTS = 5
 READY_RETRY_BASE_SECONDS = 0.5
@@ -279,6 +275,13 @@ class WorkerRuntime:
         self.request_stop()
 
     async def _boot(self) -> None:
+        # §13: жодного запису (bootstrap pool, реєстрація) і жодного claim під чужою роллю.
+        db_role = await verify_component_login(
+            self._sessions,
+            db_role_for(self.config.role),
+            statement_timeout_ms=self.config.statement_timeout_ms,
+        )
+        self._log.info("worker.db_login", db_role=db_role)
         self._pool = await self._ensure_pool()
         async with self._transaction() as session:
             await pools_repo.register_instance(
@@ -765,53 +768,28 @@ class WorkerRuntime:
             await asyncio.gather(*pending, return_exceptions=True)
 
     async def _release_leases(self) -> None:
-        """Повернути lease незавершених tasks у чергу (claimable одразу, без backoff).
+        """Повернути lease незавершених tasks у чергу через `queue.release` (claimable одразу).
 
-        **Job на останній спробі lease не повертається через `retry`.** Плановий drain нікого
-        не «провалив», а `queue.retry` при `attempt >= max_attempts` переводить job у
-        `quarantined` і пише dead letter `max_attempts` — тобто звичайний scale-down знищував
-        би саме ті jobs, які й так витратили бюджет спроб. Поки в репозиторії WP-01A немає
-        `release(job_id, owner)` (запит: `docs/plan/deps/WP-01D-to-WP-01A.md` §3), такий job
-        лишається `leased` і повертається в чергу тим самим шляхом, що й після SIGKILL —
-        `recover_expired_leases` після експірації lease (§15: «replacement replica підхоплює
-        expired lease»). Ціна — очікування до `lease_seconds`; вигода — жодного хибного
-        карантину і жодного вигаданого dead letter.
+        Плановий drain нікого не «провалив», тому це не `retry`: `release` (WP-01A PR2) не пише
+        полів помилки, не створює dead letter, не карантинить job на останній спробі і
+        компенсує інкремент `attempt`, який зробив claim (deps WP-01A→WP-01D §2, §6).
         """
         now = self._now()
-        for job_id, entry in list(self._active.items()):
-            if entry.task.attempt >= entry.task.max_attempts:
-                self._log.warning(
-                    "worker.lease_left_to_expire",
-                    job_id=str(job_id),
-                    attempt=entry.task.attempt,
-                    max_attempts=entry.task.max_attempts,
-                    lease_seconds=self.config.lease_seconds,
-                    reason="retry on the last attempt would quarantine a job nobody failed",
-                )
-                self._active.pop(job_id, None)
-                continue
+        for job_id in list(self._active):
             try:
                 async with self._transaction() as session:
-                    await queue_repo.retry(
-                        session,
-                        job_id,
-                        self.owner,
-                        error_code=DRAIN_TIMEOUT_ERROR_CODE,
-                        error_message=(
-                            f"lease returned on drain of instance {self.instance_id} "
-                            f"(job_type={entry.task.job_type})"
-                        ),
-                        policy=IMMEDIATE_RETRY_POLICY,
-                        now=now,
-                    )
+                    await queue_repo.release(session, job_id, self.owner, now=now)
             except LeaseNotOwnedError:
                 self._log.info("worker.lease_already_released", job_id=str(job_id))
-            except (SQLAlchemyError, OSError) as exc:
+            except (SQLAlchemyError, OSError, PersistenceError) as exc:
+                # Job лишається `leased` і повернеться через `recover_expired_leases` (§15).
                 self._log.error(
                     "worker.lease_release_failed",
                     job_id=str(job_id),
-                    error=f"{type(exc).__name__}: {exc}"[:300],
+                    error=redact(f"{type(exc).__name__}: {exc}")[:300],
                 )
+            else:
+                self._log.info("worker.lease_released", job_id=str(job_id))
             self._active.pop(job_id, None)
 
     async def _set_status(self, status: str) -> bool:
@@ -855,9 +833,7 @@ def build_runtime(
 
 
 __all__ = [
-    "DRAIN_TIMEOUT_ERROR_CODE",
     "MAX_CLAIM_BACKOFF_SECONDS",
-    "IMMEDIATE_RETRY_POLICY",
     "PoolSnapshot",
     "WorkerRuntime",
     "WorkerRuntimeError",

@@ -75,6 +75,8 @@ async def test_standby_scheduler_does_no_maintenance_while_the_active_one_does(
     enqueue_jobs: EnqueueJobs,
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    scheduler_engine: AsyncEngine,
+    scheduler_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Прострочений lease повертає рівно один процес — той, що тримає advisory lease."""
     await make_pool(concurrency=1)
@@ -86,8 +88,12 @@ async def test_standby_scheduler_does_no_maintenance_while_the_active_one_does(
 
     results_a: list[MaintenanceResult] = []
     results_b: list[MaintenanceResult] = []
-    first = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=recording_maintenance(results_a))
-    second = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=recording_maintenance(results_b))
+    first = SchedulerRuntime(
+        FAST, scheduler_engine, scheduler_sessions, tick=recording_maintenance(results_a)
+    )
+    second = SchedulerRuntime(
+        FAST, scheduler_engine, scheduler_sessions, tick=recording_maintenance(results_b)
+    )
     tasks = [start(first, running), start(second, running)]
 
     await wait_for(lambda: first.is_active or second.is_active, what="хтось узяв lease")
@@ -135,12 +141,18 @@ async def test_graceful_stop_hands_the_lease_over_without_waiting_for_a_ttl(
     pg_sessions: async_sessionmaker[AsyncSession],
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    scheduler_engine: AsyncEngine,
+    scheduler_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """SIGTERM активного → lease вільний одразу (session-scoped lock, без sweeper-а)."""
     calls_a: list[datetime] = []
     calls_b: list[datetime] = []
-    first = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=counting_tick(calls_a))
-    second = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=counting_tick(calls_b))
+    first = SchedulerRuntime(
+        FAST, scheduler_engine, scheduler_sessions, tick=counting_tick(calls_a)
+    )
+    second = SchedulerRuntime(
+        FAST, scheduler_engine, scheduler_sessions, tick=counting_tick(calls_b)
+    )
     first_task = start(first, running)
     await wait_for(lambda: first.is_active, what="перший активний")
     second_task = start(second, running)
@@ -169,6 +181,8 @@ async def test_active_scheduler_ticks_only_while_the_server_confirms_the_lease(
     pg_sessions: async_sessionmaker[AsyncSession],
     wait_for: WaitFor,
     running: list[asyncio.Task[None]],
+    scheduler_engine: AsyncEngine,
+    scheduler_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """Втрата зʼєднання з PG: планування припиняється до повторного `try_acquire`.
 
@@ -176,7 +190,9 @@ async def test_active_scheduler_ticks_only_while_the_server_confirms_the_lease(
     точний еквівалент розриву мережі/kill контейнера з боку сервера.
     """
     calls: list[datetime] = []
-    runtime = SchedulerRuntime(FAST, pg_engine, pg_sessions, tick=counting_tick(calls))
+    runtime = SchedulerRuntime(
+        FAST, scheduler_engine, scheduler_sessions, tick=counting_tick(calls)
+    )
     task = start(runtime, running)
     await wait_for(lambda: runtime.ticks >= 2, what="активний планує")
 
