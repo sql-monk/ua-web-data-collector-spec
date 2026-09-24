@@ -19,7 +19,7 @@ Alembic-ревізії в `migrations/postgres/versions/**` — їх forward-onl
 звірений з обома і з живою схемою (тести `tests/integration/postgres/test_schema_contract.py`,
 `test_metadata.py`, звіти `docs/plan/reports/WP-01A/{implementation,code-review,spec-review}-pr1.md`,
 `docs/plan/reports/WP-01A/{implementation,code-review-pr2-r2,spec-review}-pr2.md` і
-`docs/plan/reports/WP-01A/{implementation,testing}-pr3a.md`). Рішення
+`docs/plan/reports/WP-01A/{implementation,testing,code-review,security,spec-review}-pr3a.md`). Рішення
 поза буквою ТЗ (партиціювання PR2, ідемпотентність `record_parse_result`) — `docs/decisions/
 0007-event-tables-global-unique-over-partitioning.md`.
 
