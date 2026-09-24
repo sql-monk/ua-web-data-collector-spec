@@ -204,6 +204,20 @@ media type береться з `ClassVar media_type` класу події, фо
 `set` залежить від `PYTHONHASHSEED` і `state_hash` різнився б між процесами; детерміноване
 сортування відкинуто — воно мовчки змінювало б порядок, який викликач міг вважати значущим.
 `canonical_json_bytes` для рядка з одиночним сурогатом кидає `CanonicalEncodingError`.
+Ключі об'єктів — строго `str` (`JsonKey`): `bytes`-ключ відхиляється, а не приводиться мовчки
+(інакше `{b"a": 1, "a": 2}` схлопувався б у `{"a": 2}` — CR #1 gate 3).
+
+**Тип числа входить у hash (CR #2 gate 3).** `1` і `1.0` (а також `0.0`/`-0.0`) мають різне
+canonical-представлення, тож дають різний `state_hash`. Integral float **не нормалізується**:
+JSON/BSON round-trip зберігає тип числа (hash стабільний на шляху projector-а), а тиха
+нормалізація змінювала б значення, яке parser навмисно записав як float. Правило для
+parser-ів: поле має один тип у всіх шляхах коду (лічильники/гроші — `int`, виміри — `float`
+або `MeasuredValue`); зміна типу поля — зміна state і дає нову версію.
+
+**`frozen` не заморожує вкладені dict (CR #3 gate 3, accepted, owner WP-01C, 2026-09-24).**
+Блоки `core`/`attributes`/`latest_state`/`values` — звичайні `dict`; мутація після валідації
+обходить межі й інваріант `state_hash`. Правило для споживачів: не мутувати валідовані
+моделі; зміна — через `model_copy(update=...)` з повторною валідацією (`model_validate`).
 Час у блоках — лише рядок у canonical-форматі (`…T12:00:00.000000Z`), гроші — `{"amount_minor": int,
 "currency": str}`. Наслідок: `state_hash` рахується над тими самими значеннями, що й після
 JSON/BSON round-trip, і документ, який пройшов validation при записі, читається назад без
@@ -301,6 +315,22 @@ Hash/size bytes викликач перевіряє до парсингу.
 | `SellerContactObservation` | `contact_observations` | `seller_id` (назва — index §9.2), `source`, 1..64 `ContactValue` (raw + normalized) |
 | `ReviewQuestionRecord` | `product_reviews`, `product_questions` | `record_kind: ReviewQuestionKind`, `parent_item_id`, `source`, `content_version`, `published_at`/`updated_at` (nullable source time), `observed_at`, `projection_task_id`, lineage |
 
+**`state_changed`: version record ≠ receipt для незастосованої task (SR-3 gate 4).** Поле має одну
+назву, але дві семантики:
+
+- `EntityProjectionVersion.state_changed` = `state_hash ≠ previous_state_hash`, де previous — current
+  у момент task, **незалежно** від `applied_to_current`. Для late arrival (порядок `3, 1, 2`: task v1
+  і v2 приходять після v3) version record v1 може мати `state_changed=true`, якщо його hash
+  відрізняється від current v3;
+- `AppliedProjectionReceipt.state_changed` для тієї ж незастосованої task — `false` (current не
+  змінився; `domain.changed` не створюється, `should_emit_domain_changed` = `false`).
+
+Наслідки: WP-01B **не копіює** `state_changed` з receipt у version record (і навпаки) — кожне
+значення обчислюється за власним правилом; скопійоване значення receipt у version record
+validator відхилить (`state_changed має дорівнювати state_hash ≠ previous_state_hash`), і
+транзакція task перерветься. Retention §9.7 («`state_changed=false` старші 90 днів») читає
+семантику version record: late-arriving версія з відмінним hash не компактиться як «незмінна».
+
 **Правило розширення доменними WP.** `ObservedValues`, `SellerContactObservation`,
 `ReviewQuestionRecord` навмисно мінімальні: доменні поля (old price, mileage, promoted, view
 counters; ім'я/роль контакту; author/rating/text/status відгуку) WP-07/WP-09 додають
@@ -323,8 +353,13 @@ dependency-запитом `docs/plan/deps/<WP>-to-WP-01C.md` як **optional** �
   дорівнювати `translation_idempotency_key(article_version_id, target_language, provider,
   model_version, glossary_version)`; body — `body_text` **або** `body_artifact`, або жодного (R-20);
   `translated` вимагає `title`; `pending`/`not_required` не несуть тексту (для `not_required` read
-  API віддає оригінал, §5.4); `cost: Money` з `amount_minor ≥ 0`; `quality_flags` без дублікатів;
-  `created_at` aware UTC.
+  API віддає оригінал, §5.4); `translation_failed` вимагає явний `retry_plan` (≤ 512 символів,
+  §12.1 / WP-04 О-5 — gate coverage відрізняє failed-з-планом), інші статуси його не мають;
+  `target_language` — лише `uk` (`Literal`, §5.4; розширення — minor); межі inline-тексту:
+  `title` ≤ 2048, `lead` ≤ 16 384, `body_text` ≤ 65 536 символів (довший body — `body_artifact`;
+  20 МБ WP-02 — межа сирого HTML, не тексту в рядку PostgreSQL); `cost: Money` з
+  `amount_minor ≥ 0`; `quality_flags` без дублікатів і відсортовані за значенням (однакові
+  canonical bytes); `created_at` aware UTC.
 - `NewsVersionCreatedEvent` (snapshot `schemas/events/news_version_created.v1.json`): outbox-поля
   `event_id`, `event_type="news.version_created"`, `aggregate_id=article_id`,
   `aggregate_version=version_number`, `payload_schema_version=schema_version`; тексти лише як

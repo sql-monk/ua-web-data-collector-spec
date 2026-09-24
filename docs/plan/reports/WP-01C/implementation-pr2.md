@@ -259,3 +259,79 @@ $ uv run pytest -m "(integration or e2e) and not live" -q -rfE
 scaling-тести WP-01D, `docs/plan/reports/WP-01D/flaky-scaling-tests.md`), але це **не
 доведено**; окремо позначаю як неперевірене. Нові тести gate-2 (`test_gate2_fixes.py`, 13) і вся
 група contracts зелені в обох прогонах.
+
+## Fixes after gate 3/4
+
+Gate 3 — approve (`code-review-pr2.md`), gate 4 — accept (`spec-review-pr2.md`). Версія `1.0` не
+злита — правки без bump. Коміти: `816e844` fix (контракт + тести), docs-коміт із цим розділом.
+
+- **SR-1:** `NewsTranslation.retry_plan` (1..512 символів) — обов'язковий для `translation_failed`,
+  заборонений інакше; snapshot `common/news_translation.v1.json` оновлено. Fixture
+  `news_translation.v1.0.json` (status `translated`) лишився валідним без змін; failed-кейс покрито
+  unit-тестами (`test_gate34_fixes.py`).
+- **SR-2:** `target_language: Literal["uk"]` (default `uk`).
+- **SR-3:** `docs/contracts.md` §11.2 — різна семантика `state_changed` у version record і receipt
+  для незастосованої task (3-1-2), WP-01B не копіює значення. Картка WP-01B — оркестратор.
+- **CR #1:** ключі `JsonObject`/`JsonValue` — `JsonKey = Annotated[str, Strict()]`.
+- **CR #2:** задокументовано (не нормалізується) — `docs/contracts.md` §7.
+- **CR #4:** межі `title` 2048 / `lead` 16 384 / `body_text` 65 536; `quality_flags` сортуються.
+- **ADR-0003:** розділ «Amendment 2026-09-24» — `encode_event` для `news.version_created`,
+  формат bytes не змінився.
+- **gitleaks:** fingerprint `9d9f1de…:news_translation.v1.0.json:generic-api-key:28` у
+  `.gitleaksignore` (хибне спрацювання на SHA-256 ключ ідемпотентності; fixture не змінювався,
+  інших fingerprints немає).
+
+### Статуси всіх знахідок PR2
+
+| Джерело | ID | Severity | Статус | Owner | Дата |
+|---|---|---|---|---|---|
+| gate 2 | M-1 set → недетермінований hash | medium | fixed (`4b38b21`) | WP-01C | 2026-09-24 |
+| gate 2 | M-2 розмір/int64 | medium | fixed (`4b38b21`) | WP-01C | 2026-09-24 |
+| gate 2 | L-1 одиночні сурогати | low | fixed (`4b38b21`) | WP-01C | 2026-09-24 |
+| gate 2 | L-2 `source_locale_raw` без межі | low | fixed (`4b38b21`) | WP-01C | 2026-09-24 |
+| gate 2 | I-1 NFC-колізія ключів: модель приймає, canonical відхиляє | info | accepted — поведінка PR1 (ADR-0003, CR-03), помилка виникає до утворення bytes; для bounded-блоків PR2 canonical рахується на валідації, тож там колізія вже відхиляється моделлю | WP-01C | 2026-09-24 |
+| gate 2 | I-2 ADR-0003 без `news.version_created` | info | fixed (amendment) | WP-01C | 2026-09-24 |
+| gate 3 | CR #1 lax-ключі | low | fixed (`816e844`) | WP-01C | 2026-09-24 |
+| gate 3 | CR #2 `1`/`1.0` у `state_hash` | low | documented (`docs/contracts.md` §7), не нормалізується | WP-01C | 2026-09-24 |
+| gate 3 | CR #3 `frozen` не заморожує вкладені dict | low | accepted (патерн PR1; правило «не мутувати» в `docs/contracts.md` §7) | WP-01C | 2026-09-24 |
+| gate 3 | CR #4 межі тексту, порядок `quality_flags` | low | fixed (`816e844`) | WP-01C | 2026-09-24 |
+| gate 4 | SR-1 retry plan | medium | fixed (`816e844`) | WP-01C | 2026-09-24 |
+| gate 4 | SR-2 `target_language` = `uk` | low | fixed (`816e844`) | WP-01C | 2026-09-24 |
+| gate 4 | SR-3 семантика `state_changed` | medium | fixed (docs §11.2); картка WP-01B PR2 | WP-01C / оркестратор | 2026-09-24 |
+| реалізатор | `AppliedProjectionReceipt` без `_id` | risk | open — рішення WP-01B PR1/PR2 при генерації validator-а; поле в контракті — dependency-запит (minor) | WP-01B | 2026-09-24 |
+| реалізатор | межі `BoundedJsonObject` не застосовано до `CurrentDocumentBase` | risk | accepted — посилення злитого PR1 = major; projector успадковує межі payload-а | WP-01C | 2026-09-24 |
+| реалізатор | межа 256 елементів масиву для vehicle equipment | risk | accepted — розширення сумісне (minor) за вимірами WP-07 | WP-07 → WP-01C | 2026-09-24 |
+| реалізатор | `target_language` не `uk` | risk | closed — SR-2 | WP-01C | 2026-09-24 |
+| реалізатор | ADR-0003 не оновлено | risk | closed — amendment | WP-01C | 2026-09-24 |
+| gate 2 run | 2 неатрибутовані падіння повного прогону під навантаженням | test | accepted — повтор усього набору зелений; відомі timing-флейки (PR1 resolution scaling, WP-01D scaling) | WP-01C / WP-01D | 2026-09-24 |
+
+### Команди (фінальний раунд)
+
+```text
+$ uv run ruff check .
+All checks passed!
+$ uv run ruff format --check .
+285 files already formatted
+$ uv run mypy src
+Success: no issues found in 81 source files
+$ uv run collector contracts export --check
+schemas up to date: schemas
+exit=0
+$ uv run pytest tests/unit/contracts tests/contract -q
+674 passed in 95.83s (0:01:35)
+$ gitleaks git --log-opts="main..HEAD" --redact .
+1:13PM INF scanned ~281279 bytes (281.28 KB) in 1.37s
+1:13PM INF no leaks found
+$ uv run pre-commit run --all-files
+fix end of files.........................................................Passed
+trim trailing whitespace.................................................Passed
+check yaml...............................................................Passed
+check toml...............................................................Passed
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+detect private key.......................................................Passed
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+Detect hardcoded secrets.................................................Passed
+markdownlint-cli2........................................................Passed
+```
