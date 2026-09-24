@@ -194,6 +194,13 @@ async def test_stale_tasks_lists_long_leased_and_long_claimable_with_keyset(
     assert pages == sorted(tasks)
 
 
+async def test_stale_tasks_rejects_negative_age_before_sql(pg_session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="older_than"):
+        await reconciliation.list_stale_projection_tasks(
+            pg_session, older_than=timedelta(microseconds=-1), now=T0
+        )
+
+
 async def test_quarantined_task_blocks_completeness_but_not_drift_counter(
     pg_session: AsyncSession,
 ) -> None:

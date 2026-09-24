@@ -388,6 +388,17 @@ async def test_route_failure_does_not_override_unsupported_and_validates_input(
             await sources.record_route_failure(
                 pg_session, route.id, actor="w", reason="x", threshold=0, now=T0
             )
+        for invalid_duration in (timedelta(0), timedelta(microseconds=-1)):
+            with pytest.raises(ValueError, match="circuit_open_for"):
+                await sources.record_route_failure(
+                    pg_session,
+                    route.id,
+                    actor="w",
+                    reason="x",
+                    threshold=1,
+                    circuit_open_for=invalid_duration,
+                    now=T0,
+                )
 
 
 async def test_concurrent_route_failures_are_not_lost(

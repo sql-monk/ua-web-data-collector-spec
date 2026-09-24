@@ -60,6 +60,9 @@ async def list_stale_projection_tasks(
     if limit < 1:
         msg = "limit має бути >= 1"
         raise ValueError(msg)
+    if older_than < timedelta(0):
+        msg = "older_than не може бути від'ємним"
+        raise ValueError(msg)
     cutoff = resolve_now(now) - older_than
     stmt = (
         select(ProjectionTask)

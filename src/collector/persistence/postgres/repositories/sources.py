@@ -475,6 +475,9 @@ async def record_route_failure(
     if threshold < 1:
         msg = "threshold має бути >= 1"
         raise ValueError(msg)
+    if circuit_open_for is not None and circuit_open_for <= timedelta(0):
+        msg = "circuit_open_for має бути додатним"
+        raise ValueError(msg)
     current = resolve_now(now)
     counted = (
         await session.execute(

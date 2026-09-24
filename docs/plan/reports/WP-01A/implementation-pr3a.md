@@ -379,6 +379,19 @@ markdownlint-cli2........................................................Passed
 цільових PostgreSQL integration tests passed. Повний PostgreSQL-набір і всі repository gates
 повторюються перед PR після code/spec review.
 
+## Виправлення після gate 3
+
+Джерело: `docs/plan/reports/WP-01A/code-review-pr3a.md`.
+
+| Знахідка | Виправлення | Доказ |
+|---|---|---|
+| CR-1 medium — від'ємний `older_than` робив свіжі tasks stale | `list_stale_projection_tasks` відхиляє від'ємний поріг до SQL | `test_stale_tasks_rejects_negative_age_before_sql` |
+| CR-2 medium — недодатний `circuit_open_for` відкривав уже спливлий circuit | Явна перевірка `circuit_open_for > 0` для не-`None`; `None` зберігає безстроковий circuit | `test_route_failure_does_not_override_unsupported_and_validates_input` (0 та −1 мкс) |
+| CR-3 low — `next_attempt_at` допускав naive `now` у backoff-гілці | Helper завжди викликає `require_aware_utc`, незалежно від `not_before` | `test_next_attempt_at_rejects_naive_now_without_explicit_not_before` |
+
+Re-review: **approved**. Цільовий unit + PostgreSQL integration прогін — `26 passed in
+24.06s`.
+
 ## Dependency-запити
 
 Нових немає. Оновлено відповідь `docs/plan/deps/WP-01A-to-WP-01D.md`: §7 (N-2) — PG-частину

@@ -112,9 +112,10 @@ def next_attempt_at(
 ) -> datetime:
     """Час наступної спроби для `retry`: явний `not_before` (стиснутий до `now`) або
     `now + BackoffPolicy.delay_for(attempt)` — див. docstring `retry`."""
+    current = require_aware_utc(now, parameter="now")
     if not_before is not None:
-        return clamp_not_before(not_before, now)
-    return now + (policy or BackoffPolicy()).delay_for(attempt, rng or random.SystemRandom())
+        return clamp_not_before(not_before, current)
+    return current + (policy or BackoffPolicy()).delay_for(attempt, rng or random.SystemRandom())
 
 
 async def enqueue(session: AsyncSession, job: NewJob, *, now: datetime | None = None) -> CrawlJob:
