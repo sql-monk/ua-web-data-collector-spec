@@ -1,4 +1,4 @@
-# Fetch core (`collector.fetch`) — чернетка PR1
+# Fetch core (`collector.fetch`) — PR1
 
 Owner: WP-02. Спільний fetch layer §7.1: жоден адаптер не створює власного HTTP-клієнта (§11).
 HTTP-клієнт — `httpx` згідно з [ADR-0008](../../../docs/decisions/0008-fetch-core-on-httpx-not-scrapy.md)
@@ -73,7 +73,11 @@ Guard/SSRF-відмова → `error_code="policy_blocked"`, конкретна 
   як `application/gzip` без `Content-Encoding`; raw bytes зберігаються стиснутими.
 - Media (`image/*`, `video/*`, `audio/*`) при `COLLECTOR_FETCH_MEDIA_BINARIES=0` (default, Q-002)
   — обрив після заголовків, `media_binary_skipped`, `content_access=metadata_only`.
-- Timeout: connect 10 с, read 30 с, total 60 с на весь fetch (override з manifest для sitemap).
+- Timeout: connect 10 с, read 30 с, total 60 с на весь fetch. Sitemap override дозволений,
+  лише якщо виданий permit lease покриває весь override із запасом 1 с; інакше fetch повертає
+  retryable `permit_lease_too_short` до TCP connect.
+- Кожен gzip/deflate/brotli stream мусить завершитися валідним EOF/footer; truncation дає
+  quarantined `content_decoding_error`, навіть якщо decoder уже видав видимий текст.
 
 ## Класифікація і retry (§10, §5.5)
 
@@ -104,3 +108,6 @@ letter. Виконання (`not_before`) — PR2 через runtime WP-01D і `
 `PgOriginPermits` — окремі короткі транзакції над `limiter.acquire_permit`/`release_permit`/
 `block_origin` WP-01A. Прибрати після WP-01D PR2 (`OriginPermitClient`); вартовий —
 `tests/unit/fetch/test_permits_adapter_tripwire.py`.
+
+Для manifest `total_timeout=N` runtime створює `PgOriginPermits(..., lease_seconds>N+1)`.
+Автоматично продовжувати lease під час активного HTTP без fencing заборонено.
