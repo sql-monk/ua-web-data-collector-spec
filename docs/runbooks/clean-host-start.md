@@ -89,7 +89,7 @@ owner WP-00 / оператор, 2026-09-24).
 ### MinIO, MongoDB і провайдер перекладу: облікові дані компонентів (WP-00 PR5)
 
 Той самий `init-secrets.sh` генерує ще шість `minio_<component>` (`access_key=collector-<component>`
-+ випадковий 40-hex `secret_key`), чотири `mongo_uri_<component>` (власний пароль кожному) і
+і випадковий 40-hex `secret_key`), чотири `mongo_uri_<component>` (власний пароль кожному) і
 створює **порожній** `google_translation_credentials` (credential провайдера перекладу вписує
 оператор; порожній = переклад вимкнено). На хості до PR5 повторний запуск лише додасть ці файли.
 Формати, мапа споживачів і ротація — `deploy/compose/README.md`, розділ «Секрети».
