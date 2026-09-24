@@ -392,6 +392,17 @@ markdownlint-cli2........................................................Passed
 Re-review: **approved**. Цільовий unit + PostgreSQL integration прогін — `26 passed in
 24.06s`.
 
+Фінальний повний прогін після gates, з обов'язковим Docker-контуром PostgreSQL:
+
+```text
+$ COLLECTOR_TEST_REQUIRE_DOCKER=1 uv run pytest -m "not live" -q
+3496 passed, 23 skipped, 9 warnings in 1080.07s (0:18:00)
+```
+
+Усі 23 skip — GUI runtime E2E без піднятого `core,workers,gui` стека (22) і Windows-only
+loopback asyncio case (1). PostgreSQL integration не міг бути пропущений через
+`COLLECTOR_TEST_REQUIRE_DOCKER=1` та repository skip-guard.
+
 ## Dependency-запити
 
 Нових немає. Оновлено відповідь `docs/plan/deps/WP-01A-to-WP-01D.md`: §7 (N-2) — PG-частину

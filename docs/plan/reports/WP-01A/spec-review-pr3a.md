@@ -21,7 +21,7 @@
 | 8 | Retry budget query за source/time window | `artifacts.count_retries_since`; partition/timezone boundary tests | evidenced |
 | 9 | Reconciler stale/completeness queries, keyset, без `OFFSET` | `reconciliation.py`; stale/quarantine/watermark matrix tests | evidenced |
 | 10 | Мінімальні GRANT-и і негативні перевірки чужих ролей | `sql/roles.sql`; `test_pr3a_roles.py`, migration/roles adversarial tests | evidenced |
-| AC-1 | Локальні тести зелені без прихованого skip | testing report: 255 PostgreSQL + 29 adversarial; skip guard; після gate 3 — 26 targeted | evidenced |
+| AC-1 | Локальні тести зелені без прихованого skip | testing report: 255 PostgreSQL + 29 adversarial; після gates повний `not live`: 3496 passed / 23 очікувані GUI/Windows skips; PostgreSQL fail-on-skip guard | evidenced |
 | AC-2 | `alembic check`, upgrade/downgrade/upgrade | implementation/testing reports, migration adversarial test | evidenced |
 | AC-3 | `docs/persistence/postgres.md` доповнено | схема, операції, N-2, purge, preflight, fencing, reconciler, roles | evidenced |
 | AC-4 | Dependency §7 | PG-частина реалізована; файл прямо лишає повне `resolved` до WP-01B PR3 | evidenced for PR3a / transferred consumer |
