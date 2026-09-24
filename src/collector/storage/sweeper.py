@@ -5,12 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from collector.persistence.postgres.errors import StaleClaimError
 from collector.persistence.postgres.repositories import artifacts
 from collector.storage.store import ArtifactStore
+
+if TYPE_CHECKING:
+    from collector.fetch.metrics import FetchMetrics
 
 BucketForKey = Callable[[str], str]
 
@@ -33,6 +37,7 @@ async def sweep_orphans(
     lease_seconds: int = 120,
     limit: int = 1000,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    metrics: FetchMetrics | None = None,
 ) -> SweepReport:
     """Delete only after sweeper reacquires each candidate with a fresh fencing generation.
 
@@ -73,6 +78,8 @@ async def sweep_orphans(
                     owner=owner,
                     now=clock(),
                 )
+    if metrics is not None:
+        metrics.observe_orphans(len(candidates))
     return SweepReport(len(candidates), tuple(deleted), tuple(skipped))
 
 

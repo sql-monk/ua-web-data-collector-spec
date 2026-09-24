@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
@@ -53,8 +54,21 @@ class StubFetcher:
         return self.result
 
 
+class SequenceFetcher(StubFetcher):
+    def __init__(self, *results: FetchResult) -> None:
+        super().__init__(results[-1])
+        self.results = list(results)
+
+    async def fetch(self, request: FetchRequest) -> FetchResult:
+        self.requests.append(request)
+        return self.results.pop(0)
+
+
 async def seed(
-    sessions: async_sessionmaker[AsyncSession], *, state: SourceState = SourceState.ENABLED
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    state: SourceState = SourceState.ENABLED,
+    policy: sources.PolicySnapshot = POLICY,
 ) -> tuple[object, object]:
     async with sessions() as session, session.begin():
         source = await sources.create_source(
@@ -68,7 +82,7 @@ async def seed(
         await sources.add_policy_version(
             session,
             source.id,
-            POLICY,
+            policy,
             expected_revision=source.revision,
             actor="test",
             reason="seed",
@@ -81,7 +95,10 @@ async def seed(
 
 
 def build_handler(
-    sessions: async_sessionmaker[AsyncSession], fetcher: StubFetcher
+    sessions: async_sessionmaker[AsyncSession],
+    fetcher: StubFetcher,
+    *,
+    robots_ttl: timedelta = timedelta(hours=24),
 ) -> tuple[FetchHandler, FakeArtifactStore]:
     store = FakeArtifactStore(buckets={"raw"})
     context = HandlerContext(
@@ -98,6 +115,8 @@ def build_handler(
             cast(SafeFetcher, fetcher),
             uploader,
             cast(ArtifactStore, store),
+            robots_ttl=robots_ttl,
+            user_agent="UAWebDataCollector/test",
         ),
         store,
     )
@@ -115,6 +134,86 @@ def task(source_id: object, route_id: object) -> Task:
         run_id=None,
         source_id=source_id,  # type: ignore[arg-type]
     )
+
+
+async def test_robots_job_snapshots_once_within_ttl_and_never_enqueues_parse(
+    pg_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    source, route = await seed(pg_sessions)
+    robots_body = b"User-agent: *\nDisallow: /private\n"
+    fetcher = StubFetcher(
+        FetchResult(
+            FetchDecision(FetchOutcome.SUCCESS, ContentAccess.FULL),
+            "https://news.example.test/robots.txt",
+            final_url="https://news.example.test/robots.txt",
+            status=200,
+            body=robots_body,
+            decoded_bytes=len(robots_body),
+            media_type="text/plain",
+        )
+    )
+    handler, store = build_handler(pg_sessions, fetcher)
+    robots_task = task(source.id, route.id)  # type: ignore[attr-defined]
+    robots_task = Task(
+        job_id=robots_task.job_id,
+        job_type=robots_task.job_type,
+        args={**robots_task.args, "request_kind": "robots"},
+        attempt=robots_task.attempt,
+        max_attempts=robots_task.max_attempts,
+        priority=robots_task.priority,
+        not_before=robots_task.not_before,
+        run_id=robots_task.run_id,
+        source_id=robots_task.source_id,
+    )
+
+    assert (await handler.handle(robots_task)).disposition == "complete"
+    assert (await handler.handle(robots_task)).disposition == "complete"
+    assert len(fetcher.requests) == 1
+    assert fetcher.requests[0].url == "https://news.example.test/robots.txt"
+    assert len(store.put_calls) == 1
+    async with pg_sessions() as session:
+        fetch = (await session.execute(select(Fetch))).scalar_one()
+        assert fetch.request_variant == "robots"
+        assert await session.scalar(select(func.count()).select_from(CrawlJob)) == 0
+
+
+async def test_respect_policy_snapshots_robots_then_blocks_page_without_request(
+    pg_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    source, route = await seed(pg_sessions, policy=replace(POLICY, robots_policy="respect"))
+    robots_body = b"User-agent: *\nDisallow: /article/\n"
+    fetcher = SequenceFetcher(
+        FetchResult(
+            FetchDecision(FetchOutcome.SUCCESS, ContentAccess.FULL),
+            "https://news.example.test/robots.txt",
+            final_url="https://news.example.test/robots.txt",
+            status=200,
+            body=robots_body,
+            decoded_bytes=len(robots_body),
+            media_type="text/plain",
+        ),
+        FetchResult(
+            FetchDecision(FetchOutcome.SUCCESS, ContentAccess.FULL),
+            URL,
+            final_url=URL,
+            status=200,
+            body=b"must not be requested",
+        ),
+    )
+    handler, _ = build_handler(pg_sessions, fetcher)
+
+    result = await handler.handle(task(source.id, route.id))  # type: ignore[attr-defined]
+
+    assert result.disposition == "quarantine"
+    assert result.error_code == "policy_blocked"
+    assert [request.request_kind for request in fetcher.requests] == ["robots"]
+    async with pg_sessions() as session:
+        rows = (await session.execute(select(Fetch).order_by(Fetch.created_at))).scalars().all()
+        assert len(rows) == 2
+        assert rows[0].request_variant == "robots"
+        assert rows[0].raw_sha256 is not None
+        assert rows[1].error_code == "policy_blocked"
+        assert await session.scalar(select(func.count()).select_from(CrawlJob)) == 0
 
 
 async def test_success_uploads_raw_and_atomically_enqueues_parse(
