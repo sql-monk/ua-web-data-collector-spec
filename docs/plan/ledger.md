@@ -16,7 +16,7 @@
 | WP-00 | PR4 role DSN secrets | `wp/00-4-role-dsn-secrets` | merged ae63917 (PR #7) | CI green 6/6; testing pass, code review approve (3'), security approve, spec review accept | половина блокера pilot §13 (deps `WP-01A-to-WP-00.md` §4, §6); друга половина — WP-01D PR1b; L-2: REVOKE лише при першому initdb (ручний крок у runbook) |
 | WP-00 | PR5 object store secrets | `wp/00-5-object-store-secrets` | ready — наступна партія | — | передумова хвилі 1: MinIO per-role, Mongo per-component URI, секрет перекладу |
 | WP-01C | — | `wp/01c-contracts` | merged 1f2fbc8 (PR #1) | docs done; ADR-0003/0004; CI green | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
-| WP-01C | PR2 payload/news contracts | `wp/01c-2-payload-news-contracts` | in_progress | — | передумова хвилі 1: WP-01B PR2, WP-01A PR3b, WP-04 PR2 |
+| WP-01C | PR2 payload/news contracts | `wp/01c-2-payload-news-contracts` | merged 8fde7c7 (PR #9) | CI green 6/6; testing pass, code review approve, spec review accept | розблоковує WP-01B PR2, WP-01A PR3b, WP-04 PR2; ADR-0003 поправка; `.gitleaksignore` +1 fingerprint |
 
 ## Хвиля 1
 

@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "Грошове значення без float: `amount_minor` у мінімальних одиницях + `currency` (§5.1).",
+      "properties": {
+        "amount_minor": {
+          "description": "Сума в мінімальних одиницях валюти (копійки, центи); лише int (§5.1).",
+          "title": "Amount Minor",
+          "type": "integer"
+        },
+        "currency": {
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount_minor",
+        "currency"
+      ],
+      "title": "Money",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/common/observed_values.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Спостережені значення offer/listing snapshot (§5.2, §5.3): ціна, наявність, решта bounded.\n\n`observed_at` не дублюється: час спостереження — `SystemTime.observed_at` payload-а\n(одне джерело правди). Доменні поля (old price, mileage, promoted, view counters) до\nтипізації WP-07/WP-09 лежать у `values`.",
+  "properties": {
+    "availability": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Наявність/stock text як нормалізовано адаптером.",
+      "title": "Availability"
+    },
+    "price": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Money"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "values": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "description": "Інші observed значення (bounded, §9.2).",
+      "title": "Values",
+      "type": "object"
+    }
+  },
+  "title": "ObservedValues",
+  "type": "object",
+  "x-contract-version": "1.0"
+}
