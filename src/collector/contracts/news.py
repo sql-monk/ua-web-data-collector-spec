@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Annotated, ClassVar, Final, Literal
 from uuid import UUID
 
-from pydantic import Field, StringConstraints, model_validator
+from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from collector.contracts._base import SchemaVersion, VersionedDocument
 from collector.contracts.artifacts import ArtifactRef
@@ -32,6 +32,16 @@ LanguageCode = Annotated[str, StringConstraints(pattern=LANGUAGE_CODE_PATTERN, m
 """BCP 47-подібний код мови з lowercase primary subtag (`uk`, `de`, `pt-BR`, `und`)."""
 
 VersionLabel = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+
+MAX_TRANSLATED_TITLE_CHARS: Final = 2_048
+MAX_TRANSLATED_LEAD_CHARS: Final = 16_384
+MAX_TRANSLATED_BODY_TEXT_CHARS: Final = 65_536
+"""Inline body перекладу ≤ 64 Ki символів (як `MAX_JSON_STRING_CHARS`); довший — `body_artifact`.
+
+Сирий body обмежений 20 МБ (WP-02, `COLLECTOR_FETCH_MAX_BODY_BYTES`) — це межа HTML, не тексту;
+inline-текст живе в рядку PostgreSQL/повідомленні, тож межа свідомо на порядки менша.
+"""
+MAX_RETRY_PLAN_CHARS: Final = 512
 
 BODY_REQUIRED_ACCESS: Final = frozenset({ContentAccess.FULL})
 BODY_FORBIDDEN_ACCESS: Final = frozenset(
@@ -100,7 +110,8 @@ class NewsTranslation(VersionedDocument):
 
     Інваріанти статусу: `translated` вимагає `title`; `pending`/`not_required` не несуть
     перекладеного тексту (для `not_required` read API віддає оригінал без повторного
-    зберігання, §5.4).
+    зберігання, §5.4); `translation_failed` вимагає `retry_plan` (§12.1), інші статуси — ні.
+    `quality_flags` зберігаються у відсортованому порядку (однакові canonical bytes).
     """
 
     contract_version = "1.0"
@@ -108,7 +119,9 @@ class NewsTranslation(VersionedDocument):
 
     article_id: UUID
     article_version_id: UUID
-    target_language: LanguageCode = Field(description="Цільова мова; у v1 — `uk` (§5.4).")
+    target_language: Literal["uk"] = Field(
+        default="uk", description="Цільова мова — лише `uk` (§5.4); розширення — minor."
+    )
     source_language: LanguageCode | None = Field(
         default=None, description="Мова оригіналу статті (article-level), якщо відома."
     )
@@ -117,15 +130,36 @@ class NewsTranslation(VersionedDocument):
     glossary_version: VersionLabel
     source_content_hash: Sha256Hex
     status: TranslationStatus
-    title: str | None = None
-    lead: str | None = None
-    body_text: str | None = None
+    title: Annotated[str, StringConstraints(max_length=MAX_TRANSLATED_TITLE_CHARS)] | None = None
+    lead: Annotated[str, StringConstraints(max_length=MAX_TRANSLATED_LEAD_CHARS)] | None = None
+    body_text: (
+        Annotated[str, StringConstraints(max_length=MAX_TRANSLATED_BODY_TEXT_CHARS)] | None
+    ) = Field(default=None, description="Inline body; довший за межу — `body_artifact`.")
     body_artifact: ArtifactRef | None = None
-    quality_flags: list[TranslationQualityFlag] = Field(default_factory=list)
+    quality_flags: list[TranslationQualityFlag] = Field(
+        default_factory=list, description="Без дублікатів; канонічний порядок — за значенням."
+    )
+    retry_plan: (
+        Annotated[str, StringConstraints(min_length=1, max_length=MAX_RETRY_PLAN_CHARS)] | None
+    ) = Field(
+        default=None,
+        description=(
+            "Явний retry plan (§12.1, WP-04 О-5): обов'язковий для `translation_failed`, "
+            "заборонений для інших статусів."
+        ),
+    )
     character_count: int = Field(default=0, ge=0, description="Символи, надіслані провайдеру.")
     cost: Money | None = Field(default=None, description="Вартість (`amount_minor` ≥ 0).")
     translation_idempotency_key: Sha256Hex
     created_at: UtcDatetime
+
+    @field_validator("quality_flags", mode="after")
+    @classmethod
+    def _canonical_flags(cls, flags: list[TranslationQualityFlag]) -> list[TranslationQualityFlag]:
+        if len(set(flags)) != len(flags):
+            msg = "quality_flags містять дублікати"
+            raise ValueError(msg)
+        return sorted(flags, key=lambda flag: flag.value)
 
     @model_validator(mode="after")
     def _consistent(self) -> NewsTranslation:
@@ -142,9 +176,6 @@ class NewsTranslation(VersionedDocument):
         if self.body_text is not None and self.body_artifact is not None:
             msg = "body_text і body_artifact взаємовиключні"
             raise ValueError(msg)
-        if len(set(self.quality_flags)) != len(self.quality_flags):
-            msg = "quality_flags містять дублікати"
-            raise ValueError(msg)
         if self.cost is not None and self.cost.amount_minor < 0:
             msg = "cost.amount_minor не може бути від'ємним"
             raise ValueError(msg)
@@ -152,6 +183,10 @@ class NewsTranslation(VersionedDocument):
         has_text = any(value is not None for value in texts)
         if self.status is TranslationStatus.TRANSLATED and self.title is None:
             msg = "status=translated вимагає перекладений title"
+            raise ValueError(msg)
+        failed = self.status is TranslationStatus.TRANSLATION_FAILED
+        if failed != (self.retry_plan is not None):
+            msg = "retry_plan обов'язковий для translation_failed і заборонений інакше (§12.1)"
             raise ValueError(msg)
         if self.status in {TranslationStatus.PENDING, TranslationStatus.NOT_REQUIRED} and has_text:
             msg = f"status={self.status} не несе перекладеного тексту"

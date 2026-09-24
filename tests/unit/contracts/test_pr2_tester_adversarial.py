@@ -282,6 +282,7 @@ def test_failed_translation_with_language_unsupported_is_valid_without_text() ->
             lead=None,
             body_artifact=None,
             quality_flags=["language_unsupported"],
+            retry_plan="add language to EXTRA_SOURCE_LANGUAGES + golden pair",
             cost=None,
             character_count=0,
         )
@@ -336,7 +337,6 @@ def test_substituted_translation_key_components_rejected() -> None:
         ("provider", "deepl"),
         ("model_version", "nmt-2"),
         ("glossary_version", "0" * 64),
-        ("target_language", "en"),
         ("article_version_id", str(RECORD_ID)),
     ):
         with pytest.raises(ValidationError, match="translation_idempotency_key"):

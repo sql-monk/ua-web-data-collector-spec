@@ -140,8 +140,10 @@ def test_failed_translation_with_flags() -> None:
         title=None,
         lead=None,
         body_artifact=None,
-        quality_flags=["language_unsupported", "preservation_failed"],
+        quality_flags=["preservation_failed", "language_unsupported"],
+        retry_plan="add language to EXTRA_SOURCE_LANGUAGES + golden pair",
     )
+    assert record.quality_flags == sorted(record.quality_flags, key=lambda f: f.value)
     assert TranslationQualityFlag.LANGUAGE_UNSUPPORTED in record.quality_flags
     with pytest.raises(ValidationError, match="дублікати"):
         translation(quality_flags=["provider_truncated", "provider_truncated"])

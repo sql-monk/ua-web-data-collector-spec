@@ -98,7 +98,7 @@
   "$id": "https://ua-collector.local/schemas/common/news_translation.v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Immutable версія перекладу статті (§5.4, `news_translations`).\n\nЗміна оригіналу → нова версія перекладу (інший `source_content_hash`/`article_version_id`);\nстарий переклад не перезаписується. `translation_idempotency_key` має дорівнювати\n`translation_idempotency_key(article_version_id, target_language, provider, model_version,\nglossary_version)` (§9.3 п.7). Body — inline `body_text` **або** `body_artifact`, або\nжодного (nullable, R-20).\n\nІнваріанти статусу: `translated` вимагає `title`; `pending`/`not_required` не несуть\nперекладеного тексту (для `not_required` read API віддає оригінал без повторного\nзберігання, §5.4).",
+  "description": "Immutable версія перекладу статті (§5.4, `news_translations`).\n\nЗміна оригіналу → нова версія перекладу (інший `source_content_hash`/`article_version_id`);\nстарий переклад не перезаписується. `translation_idempotency_key` має дорівнювати\n`translation_idempotency_key(article_version_id, target_language, provider, model_version,\nglossary_version)` (§9.3 п.7). Body — inline `body_text` **або** `body_artifact`, або\nжодного (nullable, R-20).\n\nІнваріанти статусу: `translated` вимагає `title`; `pending`/`not_required` не несуть\nперекладеного тексту (для `not_required` read API віддає оригінал без повторного\nзберігання, §5.4); `translation_failed` вимагає `retry_plan` (§12.1), інші статуси — ні.\n`quality_flags` зберігаються у відсортованому порядку (однакові canonical bytes).",
   "properties": {
     "article_id": {
       "format": "uuid",
@@ -124,6 +124,7 @@
     "body_text": {
       "anyOf": [
         {
+          "maxLength": 65536,
           "type": "string"
         },
         {
@@ -131,6 +132,7 @@
         }
       ],
       "default": null,
+      "description": "Inline body; довший за межу — `body_artifact`.",
       "title": "Body Text"
     },
     "character_count": {
@@ -166,6 +168,7 @@
     "lead": {
       "anyOf": [
         {
+          "maxLength": 16384,
           "type": "string"
         },
         {
@@ -188,11 +191,27 @@
       "type": "string"
     },
     "quality_flags": {
+      "description": "Без дублікатів; канонічний порядок — за значенням.",
       "items": {
         "$ref": "#/$defs/TranslationQualityFlag"
       },
       "title": "Quality Flags",
       "type": "array"
+    },
+    "retry_plan": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Явний retry plan (§12.1, WP-04 О-5): обов'язковий для `translation_failed`, заборонений для інших статусів.",
+      "title": "Retry Plan"
     },
     "schema_version": {
       "default": "1.0",
@@ -224,15 +243,16 @@
       "$ref": "#/$defs/TranslationStatus"
     },
     "target_language": {
-      "description": "Цільова мова; у v1 — `uk` (§5.4).",
-      "maxLength": 35,
-      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "const": "uk",
+      "default": "uk",
+      "description": "Цільова мова — лише `uk` (§5.4); розширення — minor.",
       "title": "Target Language",
       "type": "string"
     },
     "title": {
       "anyOf": [
         {
+          "maxLength": 2048,
           "type": "string"
         },
         {
@@ -257,7 +277,6 @@
     "provider",
     "source_content_hash",
     "status",
-    "target_language",
     "translation_idempotency_key"
   ],
   "title": "NewsTranslation",

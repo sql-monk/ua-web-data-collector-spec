@@ -52,7 +52,10 @@ JsonScalar = (
 )
 """Strict JSON-скаляр: `datetime`/`Decimal`/`UUID`/`bytes` і NaN/inf відхиляються (CR-01)."""
 
-type JsonValue = JsonScalar | Annotated[list[JsonValue], Strict()] | dict[str, JsonValue]
+JsonKey = Annotated[str, Strict()]
+"""Ключ JSON-об'єкта — лише `str`; `bytes`-ключ не приводиться мовчки (колізія `b"a"`/`"a"`)."""
+
+type JsonValue = JsonScalar | Annotated[list[JsonValue], Strict()] | dict[JsonKey, JsonValue]
 """Рекурсивне strict-JSON значення — те, що без втрат переживає JSON/BSON round-trip.
 
 Масив — лише `list` (`Strict()`): `set`/`frozenset`/`tuple` відхиляються, а не мовчки
@@ -60,7 +63,7 @@ type JsonValue = JsonScalar | Annotated[list[JsonValue], Strict()] | dict[str, J
 bytes різнилися б між процесами (gate 2 M-1). Порядок елементів — відповідальність викликача.
 """
 
-JsonObject = dict[str, JsonValue]
+JsonObject = dict[JsonKey, JsonValue]
 """Bounded strict-JSON об'єкт (`core`, `attributes`, `latest_state`, event payload)."""
 
 MAX_JSON_DEPTH: Final = 8
