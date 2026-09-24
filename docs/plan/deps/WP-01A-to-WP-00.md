@@ -5,7 +5,7 @@
 | Від | WP-01A PR1 (`wp/01a-1-control-queue`) |
 | До | WP-00 (owner `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `docker-compose.yml`/`Dockerfile` PR2) |
 | Файли | `tests/unit/test_cli.py`, `tests/unit/test_cli_adversarial.py`, `tests/unit/test_foundation_config.py`, а після rebase на WP-00 PR2 ще `tests/unit/test_cli_compose_commands.py`, `tests/unit/test_health_adversarial.py`, `tests/unit/test_compose_config.py` (змінено в branch WP-01A за прецедентом WP-01C), `docker-compose.yml` (запит), `Dockerfile` (запит) |
-| Стан | п.1 — **resolved**: підтверджено оркестратором на gate 2 як owner-рішення (звіт `docs/plan/reports/WP-01A/testing-pr1.md`, знахідка L-3); п.2–3 — open, для WP-00 PR2; п.4 (WP-01A PR2: DSN-секрети per component) — open |
+| Стан | п.1 — **resolved**: підтверджено оркестратором на gate 2 як owner-рішення (звіт `docs/plan/reports/WP-01A/testing-pr1.md`, знахідка L-3); п.2–3 — open, для WP-00 PR2; п.4 (WP-01A PR2: DSN-секрети per component) і п.6 (REVOKE PUBLIC) — **resolved** у WP-00 PR4 (PR #7, `ae63917`) |
 
 ## 1. CLI-контракт: `db migrate` більше не стаб, група `db` має підкоманду `roles`
 
@@ -87,7 +87,7 @@ cwd/пакета. Image має або `COPY alembic.ini migrations/ /app/` (з `
 `ENV COLLECTOR_ALEMBIC_INI=/app/alembic.ini` з відповідним `COPY`; `migrations/postgres`
 резолвиться відносно каталогу `alembic.ini`.
 
-## 4. PR2 (`wp/01a-2-artifacts-projection`): DSN-секрети per component і `db roles --with-login` — open
+## 4. PR2 (`wp/01a-2-artifacts-projection`): DSN-секрети per component і `db roles --with-login` — resolved (WP-00 PR4, PR #7)
 
 Контекст: dependency `docs/plan/deps/WP-01D-to-WP-01A.md` §2 (F1 gate 2 WP-01D — усі runtime-процеси
 ходять у PostgreSQL superuser-роллю міграцій). WP-01A PR2 зробив свою частину: команда
@@ -131,7 +131,7 @@ cwd/пакета. Image має або `COPY alembic.ini migrations/ /app/` (з `
 переписано, щоб значення будувалося в рантаймі. Від WP-00 дій не потрібно. **Resolved by
 orchestrator.**
 
-## 6. `REVOKE CONNECT, TEMP ON DATABASE … FROM PUBLIC` — open (security-pr2.md I-2)
+## 6. `REVOKE CONNECT, TEMP ON DATABASE … FROM PUBLIC` — resolved (WP-00 PR4, PR #7; security-pr2.md I-2)
 
 `security-pr2.md` I-2: усі PostgreSQL-ролі за замовчуванням мають `CONNECT`/`TEMP` на будь-яку
 БД кластера через членство в `PUBLIC` (кластерний default, не рішення WP-01A). Ролі WP-01A
