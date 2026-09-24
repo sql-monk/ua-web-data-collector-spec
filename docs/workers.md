@@ -95,15 +95,36 @@ boot → login check (§13) → register(starting) → readiness → ready ⇄ c
 ## 5. Контракт `TaskHandler`
 
 ```python
-from collector.workers.handlers import Task, TaskHandler, TaskResult
+from datetime import timedelta
+
+from collector.workers.handlers import (
+    HandlerContext,
+    RetrySchedule,
+    Task,
+    TaskHandler,
+    TaskResult,
+)
+
+SPEC_10 = RetrySchedule(
+    (timedelta(seconds=5), timedelta(seconds=30), timedelta(minutes=2), timedelta(minutes=10)),
+    jitter_ratio=0.2,
+)
 
 
 class FetchHandler(TaskHandler):
+    def __init__(self, context: HandlerContext) -> None:
+        self._sessions = context.sessions  # той самий pool, що в runtime
+        self._owner = context.owner  # owner permits / upload claims
+
     @property
     def job_types(self) -> tuple[str, ...]:
         return ("fetch.http",)  # типи jobs, які claim-ить ця роль
 
-    async def check_ready(self) -> None: ...  # readiness-перевірка залежностей ролі (необов'язково)
+    @property
+    def retry_schedule(self) -> RetrySchedule | None:
+        return SPEC_10  # None — дефолтний BackoffPolicy черги
+
+    async def check_ready(self) -> None: ...  # readiness-перевірка залежностей (необов'язково)
 
     async def handle(self, task: Task) -> TaskResult:
         ...
@@ -118,8 +139,8 @@ class FetchHandler(TaskHandler):
    heartbeat (lease спливає), fencing (нікому рахувати час) і drain (task не скасовується).
    Runtime перевіряє це на boot (`check_handler_contract`) і логує `worker.event_loop_stalled`,
    якщо сторож прокидається пізно.
-2. **Handler не пише статус job-и.** `complete`/`retry`/`quarantine` записує runtime у своїй
-   транзакції за поверненим `TaskResult`.
+2. **Handler не пише статус job-и.** Статус записує runtime у своїй транзакції за поверненим
+   `TaskResult` (розділ 5.1).
 3. **Помилки:** будь-який виняток → retry з кодом `handler_error`; `PermanentTaskError` →
    карантин + dead letter. Тексти винятків проходять `redact()` (credentials у URL,
    `token/api_key/password/...`), але класти секрети в повідомлення все одно не можна (§13).
@@ -128,33 +149,157 @@ class FetchHandler(TaskHandler):
 5. **Скасовуваність:** `handle` має коректно реагувати на `asyncio.CancelledError` (drain-timeout,
    fencing) — закривати з'єднання і не залишати часткових зовнішніх ефектів без ідемпотентного
    ключа.
+6. **Не відкривайте другого pool-у** під тим самим DSN: беріть `HandlerContext.sessions`.
 
-### Як додати handler
+### 5.1. `TaskResult`: що записує runtime
 
-1. Реалізуйте `TaskHandler` у своєму WP (наприклад `collector/fetch/handler.py`).
-2. Зареєструйте фабрику в реєстрі при імпорті модуля своєї ролі:
+| Результат | Коли | Що робить runtime (одна транзакція) |
+|---|---|---|
+| `TaskResult.success(output=None)` | робота зроблена | `complete`; для `projection_tasks` — ack receipt (5.4) |
+| `TaskResult.retryable(code, msg, not_before=None)` | тимчасова помилка | `retry`: `not_before = max(now + затримка, not_before)`; після `max_attempts` — карантин + dead letter |
+| `TaskResult.permanent(code, msg)` | повторювати безглуздо | карантин + dead letter |
+| `TaskResult.deferred(until, code)` | «ще не час»: limiter відмовив, source paused, бюджет вичерпано | `release(not_before=until)`: `attempt` не змінюється, полів помилки й dead letter немає; лог `worker.task_deferred` з `error_code` (без тексту задачі) |
+
+- **Затримка retry.** `TaskHandler.retry_schedule` — таблиця затримок за номером спроби
+  (`delays[min(attempt, len) - 1]` + jitter у `[0, delay × jitter_ratio]`), для fetch — §10
+  5 с / 30 с / 2 хв / 10 хв. `None` — дефолтний `BackoffPolicy` черги (30 с × 2 до 6 год +
+  20 % jitter), тобто поведінка до PR1c. `max_attempts` — властивість job-и: її ставить
+  планувальник домену при enqueue (fetch — 4, §10), runtime не перевизначає.
+- **`not_before`** у `retryable` — лише **нижня межа** (напр. `Retry-After`); розклад її не
+  зменшує, але й вона не скорочує розклад.
+- **Clamp.** `until`/`not_before` у минулому → `now`; далі за
+  `COLLECTOR_WORKER_MAX_DEFER_SECONDS` (типово 24 год) від `now` → стеля з warning
+  `worker.not_before_clamped`. Timezone-naive момент `TaskResult` відхиляє одразу.
+- `defer` не приймає `error_message` (його нікуди записати), `output` дозволений лише для
+  `success`, `not_before` — лише для `retry`/`defer`.
+
+### 5.2. Як додати handler: реєстр і `HandlerContext`
+
+1. Реалізуйте `TaskHandler` у модулі своєї ролі і зареєструйте фабрику **при імпорті модуля**:
 
    ```python
    from collector.workers.handlers import HANDLER_FACTORIES
    from collector.workers.roles import WorkerRole
 
-   HANDLER_FACTORIES[WorkerRole.FETCH] = lambda role: FetchHandler()
+   HANDLER_FACTORIES[WorkerRole.FETCH] = FetchHandler  # фабрика: HandlerContext -> handler
    ```
 
-3. Ролі без запису працюють на `NoopHandler` (claim-ить `job_type == role`, одразу успіх) —
-   контейнер не падає, pool просто порожній.
+2. Runtime імпортує модуль ролі **ліниво** на boot за статичною мапою
+   `collector.workers.registry.ROLE_HANDLER_MODULES`:
+
+   | Роль | Модуль | Owner |
+   |---|---|---|
+   | `fetch` | `collector.fetch.handler` | WP-02 |
+   | `browser` | `collector.fetch.browser` | WP-02 |
+   | `translation` | `collector.translation.handler` | WP-04 |
+   | `projector` | `collector.workers.projector` | WP-01B |
+
+   Нову роль у мапі (WP-03 discovery, WP-05 parse, WP-11A export) додає WP-01D за
+   dependency-запитом.
+3. Фабрика отримує `HandlerContext(role, sessions, worker_instance_id, clock, env)`:
+   `sessions` — **той самий** `async_sessionmaker`, що в runtime (одна LOGIN-роль, один pool);
+   `owner = str(worker_instance_id)` — той самий рядок, що `lease_owner` jobs цього instance,
+   тож ним ідентифікуються upload claims і origin permits.
+4. Правила реєстру — жодного мовчазного `NoopHandler`, крім одного випадку:
+
+   | Ситуація на boot | Результат |
+   |---|---|
+   | модуля ролі (або його пакета) ще немає в образі | `NoopHandler` + warning `worker.handler_module_missing`; контейнер живий, pool порожній |
+   | модуль кидає `ImportError` чи будь-який виняток під час імпорту (зламаний модуль, бракує залежності) | `HandlerRegistryError`, процес завершується ненульовим кодом |
+   | модуль імпортувався, але не зареєстрував `HANDLER_FACTORIES[role]` | `HandlerRegistryError`, exit ≠ 0 |
+   | фабрика повернула не `TaskHandler` і не непорожній список `HandlerBinding`, або handler порушує контракт | `HandlerRegistryError`/`TypeError`, exit ≠ 0 |
+
+   `COLLECTOR_WORKER_PLACEHOLDER=1` обходить імпорт повністю (placeholder-процес стартує до
+   runtime).
+
+### 5.3. Кілька прив'язок ролі (`HandlerBinding`)
+
+Фабрика може повернути не один handler, а список `HandlerBinding(backend, handler)`: кожна
+прив'язка — handler на своїй черзі (`collector.workers.backends`):
+
+| Backend | Таблиця | `job_types` handler-а — це | `Task` |
+|---|---|---|---|
+| `CRAWL_JOBS` | `crawl_jobs` | `job_type` | знімок job-и |
+| `PROJECTION_TASKS` | `projection_tasks` | `target_collection` | `job_id = task_id`, `job_type = target_collection`, `args`: `task_id`, `entity_uuid`, `projection_version`, `target_collection`, `target_schema_version`, `artifact_id`, `parse_key`; `source_id = None` |
+
+Для `projector` (рішення оркестратора WP-01B п.1): одна фабрика в
+`collector.workers.projector` повертає `ProjectorHandler` на `PROJECTION_TASKS` і handler-и
+`projection.reconcile`/`projection.compact` на `CRAWL_JOBS` (reconciler і compactor працюють під
+`collector_projector`, scheduler лише ставить task у чергу). Одна фабрика на роль — тому, що дві
+незалежні фабрики однієї ролі не мали б порядку і перетирали б одна одну.
+
+- Слоти `desired_concurrency` **спільні** для всіх прив'язок ролі.
+- Claim по прив'язках — **round-robin**: обхід починається з прив'язки, наступної за тією, що
+  claim-ила останньою. При `desired_concurrency=1` і двох непорожніх чергах вони чергуються —
+  жодна не голодує.
+- Дві прив'язки однієї черги з перетином `job_types` відхиляються на boot.
+
+### 5.4. Ack у report-транзакції (`projection_tasks`)
+
+Projector повертає `TaskResult.success(output=receipt)` (`AppliedProjectionReceipt`; якщо подія
+`domain.changed` лежить artifact-ом — `ProjectionAck(receipt, event)`).
+`PROJECTION_TASKS.complete` викликає `acknowledge_projection(session, task_id, receipt,
+owner=<instance>)` **у тій самій транзакції**, що й звіт runtime-у: ack, `GREATEST` confirmed
+version, task `succeeded` і `domain.changed` з bytes receipt комітяться разом або ніяк. Чужий
+lease (`LeaseNotOwnedError`) → `worker.lease_lost`, ack не виконано; `ConflictError` та інші
+помилки → `worker.report_failed`, транзакцію відкочено, lease спливає, і task повертає
+`recover_expired_projection_leases`. Output, що не є receipt (або будь-який output для
+`crawl_jobs`) → карантин з `error_code="invalid_handler_output"`.
 
 ## 6. Scheduler (singleton)
 
 `collector scheduler` бере session-scoped advisory lock у PostgreSQL. Другий процес не падає і
 не стає активним — він чекає; втрата lock-а (kill, failover) негайно зупиняє планування до
-нового `try_acquire`. Дефолтний тік — `recover_expired_leases` + `mark_stale_instances`.
+нового `try_acquire`.
+
+**Тіки.** Активний scheduler виконує композицію тіків, кожен зі своїм інтервалом:
+
+| Тік | Що робить | Інтервал |
+|---|---|---|
+| `maintenance` (вбудований) | `recover_expired_leases` (`crawl_jobs`), `recover_expired_projection_leases` (`projection_tasks`), `mark_stale_instances` — одна транзакція | `COLLECTOR_SCHEDULER_TICK_SECONDS` |
+| `projection.reconcile` | `collector.workers.reconciler:schedule` (WP-01B) — лише enqueue задачі `projection.reconcile` | 300 с |
+| `projection.compact` | `collector.workers.compactor:schedule` (WP-01B) — лише enqueue задачі `projection.compact` | 3600 с |
+| `outbox.publish` | `collector.workers.publisher:tick` (WP-01B, N-2) | 5 с; **вимкнений**, доки `COLLECTOR_OUTBOX_PUBLISHER_ENABLED` не `1` |
+
+Доменні тіки перелічені в `collector.workers.registry.DOMAIN_TICKS` і імпортуються ліниво з тими
+самими правилами, що й handler-и: модуля немає → warning `scheduler.tick_module_missing`, тік
+пропускається; модуль зламаний або `attr` не `async def` → `HandlerRegistryError`, scheduler не
+стартує. Новий доменний тік — dependency-запитом до WP-01D.
+
+Сигнатура доменного тіку:
+
+```python
+from collector.workers.scheduler import TickContext
+
+
+async def schedule(ctx: TickContext) -> None:
+    window = int(ctx.now.timestamp()) // 300
+    async with ctx.transaction() as session:  # statement_timeout, як у всіх транзакціях runtime
+        await queue.enqueue(
+            session,
+            NewJob(
+                job_type="projection.reconcile", idempotency_key=f"projection.reconcile:{window}"
+            ),
+            now=ctx.now,
+        )
+```
+
+`TickContext` дає `sessions`, `now`, `transaction()` і `lease_is_ours()` (серверна перевірка
+lease). Тік сам відкриває транзакції: publisher робить коротку транзакцію → доставку поза
+транзакцією → коротку транзакцію, тож «одна транзакція на тік» йому не підходить; перед
+не-ідемпотентним кроком довгого тіку перевіряйте `await ctx.lease_is_ours()`.
+
+**Ізоляція.** Виняток або перевищення `timeout_seconds` одного тіку логується як
+`scheduler.tick_failed` (`tick=<name>`) і не зупиняє решту тіків і не відпускає lease. Перед
+кожним доменним тіком lease перевіряється ще раз.
 
 **Тік мусить бути ідемпотентним.** Перевірка lease і сам тік ідуть різними з'єднаннями, тому
 теоретичне перекриття двох тіків можливе; доменне планування зобов'язане мати власний ключ
-ідемпотентності (§9.3 п.3), а не покладатися на lease. Це залишковий ризик, прийнятий свідомо —
-обґрунтування і owner подальшого закриття: `docs/decisions/0006-worker-lease-fencing-and-liveness.md`
-(«Residual risks», п. 1).
+ідемпотентності (§9.3 п.3 — дискримінатор вікна часу в `idempotency_key`), а не покладатися на
+lease. Контракт поширюється на всі доменні тіки (тест
+`tests/integration/scaling/test_scheduler_ticks.py::test_two_schedulers_with_the_same_domain_tick_enqueue_no_duplicates`).
+Це залишковий ризик, прийнятий свідомо — обґрунтування і owner подальшого закриття:
+`docs/decisions/0006-worker-lease-fencing-and-liveness.md` («Residual risks», п. 1).
 
 ## 7. Конфігурація (env)
 
