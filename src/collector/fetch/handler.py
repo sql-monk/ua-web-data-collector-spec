@@ -19,9 +19,9 @@ from collector.fetch.permits import PgOriginPermits
 from collector.fetch.urls import UrlError, normalize_url
 from collector.persistence.postgres.repositories import artifacts, queue, sources
 from collector.storage import (
+    ArtifactStore,
     ClaimedUploader,
-    S3ArtifactStore,
-    StorageSettings,
+    LazyS3ArtifactStore,
     StoredObject,
     UploadBusyError,
     raw_object_key,
@@ -63,7 +63,7 @@ class FetchHandler(TaskHandler):
         context: HandlerContext,
         fetcher: SafeFetcher,
         uploader: ClaimedUploader,
-        store: S3ArtifactStore,
+        store: ArtifactStore,
         *,
         raw_bucket: str = DEFAULT_RAW_BUCKET,
     ) -> None:
@@ -279,8 +279,7 @@ class FetchHandler(TaskHandler):
 
 
 def create_fetch_handler(context: HandlerContext) -> FetchHandler:
-    settings = StorageSettings.from_env(context.env)
-    store = S3ArtifactStore(settings)
+    store = LazyS3ArtifactStore(context.env)
     permits = PgOriginPermits(context.sessions, owner_instance=context.owner)
     fetcher = SafeFetcher(config=FetchConfig.from_env(context.env), permits=permits)
     uploader = ClaimedUploader(

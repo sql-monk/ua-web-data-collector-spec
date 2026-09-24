@@ -24,7 +24,7 @@ from collector.fetch.client import FetchRequest, FetchResult, SafeFetcher
 from collector.fetch.handler import FetchHandler
 from collector.persistence.postgres.models import CrawlJob, Fetch, RawObject, SourceRoute
 from collector.persistence.postgres.repositories import artifacts, sources
-from collector.storage import ClaimedUploader, S3ArtifactStore
+from collector.storage import ArtifactStore, ClaimedUploader
 from collector.storage.testing import FakeArtifactStore
 from collector.workers.handlers import HandlerContext, Task
 from collector.workers.roles import WorkerRole
@@ -97,7 +97,7 @@ def build_handler(
             context,
             cast(SafeFetcher, fetcher),
             uploader,
-            cast(S3ArtifactStore, store),
+            cast(ArtifactStore, store),
         ),
         store,
     )

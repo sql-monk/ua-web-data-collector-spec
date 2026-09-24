@@ -14,6 +14,7 @@ from collector.storage import (
     ArtifactNotFoundError,
     ArtifactStore,
     ArtifactTooLargeError,
+    LazyS3ArtifactStore,
     S3Credentials,
     StorageConfigError,
     StorageSettings,
@@ -116,6 +117,13 @@ async def test_put_rejects_wrong_digest_before_write() -> None:
     with pytest.raises(ArtifactIntegrityError):
         await store.put("raw", "x", b"body", sha256="0" * 64, media_type="text/plain")
     assert store.put_calls == []
+
+
+async def test_lazy_store_defers_missing_credentials_until_readiness() -> None:
+    store = LazyS3ArtifactStore({})
+    assert isinstance(store, ArtifactStore)
+    with pytest.raises(StorageConfigError, match="COLLECTOR_MINIO_CREDENTIALS_FILE"):
+        await store.check_ready("raw")
 
 
 @pytest.mark.parametrize(
