@@ -265,3 +265,15 @@ anti-skip працює, мутації ловляться. Дві medium-зна�
 не блокують конкретних тестів картки, але суперечать принципам «не тихий пропуск» і
 «числа 100%». Рекомендую виправити їх у fix-up цього PR або записати як обов'язковий пункт PR2
 (strict-xfail тести вже на місці й почервоніють після виправлення — тоді прибрати `xfail`).
+
+## Дотестування після fix-up `0c7a5d2`
+
+- T-4: застарілий strict-xfail `test_url_with_trailing_parenthesis_is_preserved` замінено
+  adversarial-тестами під нову поведінку (збалансована `)` входить у URL-placeholder):
+  `test_balanced_parenthesis_url_is_masked_whole_and_restored[balanced,nested]`,
+  `test_unbalanced_trailing_parenthesis_stays_text_and_passes`,
+  `test_translator_losing_or_moving_url_parenthesis_is_detected[*]` (8 мутацій: дроп/дубль/зламані
+  лапки/escape placeholder-а, URL перенабрано без `)`, `)` перенесено, частина в дужках загублена,
+  зайвий перенабраний URL). Мутація `preservation.py` (прибрано виняток для збалансованої `)`)
+  → `2 failed, 51 passed` — червоний; після `git checkout` зелено.
+  `uv run pytest tests/unit/translation` → `1542 passed in 11.87s`, xfail/skip — 0.

@@ -189,7 +189,7 @@ def test_swapping_two_numeric_placeholders_is_accepted_as_reordering() -> None:
     assert validate_preservation(masked, _swap_first_two_ids(masked.text)).ok
 
 
-# --- знайдені дефекти (strict xfail) -----------------------------------------------------------
+# --- регресії знахідок T-3, T-4 (виправлено в 0c7a5d2) ----------------------------------------
 
 
 @pytest.mark.parametrize("minus", ["\N{MINUS SIGN}", "-"], ids=["U+2212", "hyphen"])
@@ -199,12 +199,62 @@ def test_dropped_minus_sign_is_detected(minus: str) -> None:
     assert not validate_preservation(masked, corrupted).ok
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding T-4: закривальна `)` URL (Wikipedia-стиль) відрізається від URL-маски; "
-    "перекладач, що губить `)`, ламає URL непомітно",
+# --- T-4 (виправлено в 0c7a5d2): збалансована `)` — частина URL-placeholder-а -------------------
+
+WIKI_URL = "https://de.wikipedia.org/wiki/Bus_(Verkehr)"
+NESTED_URL = "https://de.wikipedia.org/wiki/A_(B_(C))"
+
+
+def _url_placeholder(masked: MaskedSegment) -> str:
+    placeholder = next(p for p in masked.placeholders if p.kind == "url")
+    return f'<x id="{placeholder.id}"/>'
+
+
+@pytest.mark.parametrize("url", [WIKI_URL, NESTED_URL], ids=["balanced", "nested"])
+def test_balanced_parenthesis_url_is_masked_whole_and_restored(url: str) -> None:
+    masked = _mask(f"<p>Siehe {url} jetzt.</p>")
+    assert [p.source for p in masked.placeholders if p.kind == "url"] == [url]
+    assert ")" not in masked.text  # до перекладача дужка URL не доходить
+    result = validate_preservation(masked, "Дивіться " + _url_placeholder(masked) + " зараз.")
+    assert result.ok, result.issues
+    assert url in result.html
+
+
+def test_unbalanced_trailing_parenthesis_stays_text_and_passes() -> None:
+    masked = _mask("<p>Mehr Details (siehe https://example.org/info) folgen.</p>")
+    assert [p.source for p in masked.placeholders if p.kind == "url"] == [
+        "https://example.org/info"
+    ]
+    translated = "Більше деталей (див. " + _url_placeholder(masked) + ") згодом."
+    result = validate_preservation(masked, translated)
+    assert result.ok, result.issues
+    assert "(див. https://example.org/info)" in result.html
+
+
+URL_PAREN_CORRUPTIONS: list[tuple[str, Callable[[str, str], str]]] = [
+    ("drop_url_placeholder", lambda t, ph: t.replace(ph, "")),
+    ("url_retyped_without_paren", lambda t, ph: t.replace(ph, WIKI_URL[:-1])),
+    ("paren_moved_after_space", lambda t, ph: t.replace(ph, WIKI_URL[:-1] + " )")),
+    ("paren_part_dropped", lambda t, ph: t.replace(ph, "https://de.wikipedia.org/wiki/Bus_")),
+    ("placeholder_plus_retyped_url", lambda t, ph: t + " " + WIKI_URL),
+    ("placeholder_duplicated", lambda t, ph: t + " " + ph),
+    ("placeholder_broken_quotes", lambda t, ph: t.replace(ph, ph.replace('"', "'"))),
+    (
+        "placeholder_escaped",
+        lambda t, ph: t.replace(ph, ph.replace("<", "&lt;").replace(">", "&gt;")),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "corrupt"), URL_PAREN_CORRUPTIONS, ids=[n for n, _ in URL_PAREN_CORRUPTIONS]
 )
-def test_url_with_trailing_parenthesis_is_preserved() -> None:
-    masked = _mask("<p>Siehe https://de.wikipedia.org/wiki/Bus_(Verkehr) jetzt.</p>")
-    corrupted = ("УКР " + masked.text).replace(")", "")
-    assert not validate_preservation(masked, corrupted).ok
+def test_translator_losing_or_moving_url_parenthesis_is_detected(
+    name: str, corrupt: Callable[[str, str], str]
+) -> None:
+    masked = _mask(f"<p>Siehe {WIKI_URL} jetzt.</p>")
+    placeholder = _url_placeholder(masked)
+    good = "Дивіться " + placeholder + " зараз."
+    assert validate_preservation(masked, good).ok
+    result = validate_preservation(masked, corrupt(good, placeholder))
+    assert not result.ok, name
