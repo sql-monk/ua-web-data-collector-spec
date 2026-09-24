@@ -2,6 +2,12 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "RawReadiness",
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketLocation"],
+      "Resource": ["arn:aws:s3:::raw"]
+    },
+    {
       "Sid": "RawWriteOnceNoDelete",
       "Effect": "Allow",
       "Action": ["s3:PutObject", "s3:GetObject"],

@@ -56,25 +56,46 @@ HEX48 = re.compile(r"^[0-9a-f]{48}$")
 
 # Таблиця картки WP-00 PR5, п.1: компонент → {(bucket, дія)}. S3 не має окремої дії Head:
 # HeadObject авторизується як s3:GetObject, тому «Head» у таблиці = GetObject.
-GET, PUT, DELETE, LIST = "s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"
+GET, PUT, DELETE, LIST, LOCATION = (
+    "s3:GetObject",
+    "s3:PutObject",
+    "s3:DeleteObject",
+    "s3:ListBucket",
+    "s3:GetBucketLocation",
+)
 EXPECTED_PERMISSIONS: dict[str, set[tuple[str, str]]] = {
-    "fetcher": {("raw", PUT), ("raw", GET)},
-    "parser": {("raw", GET), ("normalized", PUT), ("normalized", GET)},
+    "fetcher": {("raw", PUT), ("raw", GET), ("raw", LOCATION)},
+    "parser": {
+        ("raw", GET),
+        ("raw", LOCATION),
+        ("normalized", PUT),
+        ("normalized", GET),
+        ("normalized", LOCATION),
+    },
     "projector": {
         ("normalized", GET),
+        ("normalized", LOCATION),
         ("events", PUT),
         ("events", GET),
+        ("events", LOCATION),
         ("archive", PUT),
         ("archive", GET),
         ("archive", DELETE),
+        ("archive", LOCATION),
     },
-    "translation": {("normalized", GET), ("translated", PUT), ("translated", GET)},
+    "translation": {
+        ("normalized", GET),
+        ("normalized", LOCATION),
+        ("translated", PUT),
+        ("translated", GET),
+        ("translated", LOCATION),
+    },
     "maintenance": {
         (bucket, action)
         for bucket in ("raw", "normalized", "events", "translated")
-        for action in (LIST, GET, DELETE)
+        for action in (LIST, LOCATION, GET, DELETE)
     },
-    "readonly": {(bucket, GET) for bucket in BUCKETS},
+    "readonly": {(bucket, action) for bucket in BUCKETS for action in (GET, LOCATION)},
 }
 
 
@@ -244,8 +265,8 @@ def _effective(policy: dict[str, Any]) -> set[tuple[str, str]]:
                 match = re.fullmatch(r"arn:aws:s3:::([a-z]+)(/\*)?", resource)
                 assert match, resource
                 bucket, objects = match.groups()
-                # ListBucket — дія над bucket-ом, решта — над об'єктами.
-                assert bool(objects) == (action != LIST), (action, resource)
+                # ListBucket/GetBucketLocation — дії над bucket-ом, решта — над об'єктами.
+                assert bool(objects) == (action not in {LIST, LOCATION}), (action, resource)
                 granted.add((bucket, action))
     return granted
 

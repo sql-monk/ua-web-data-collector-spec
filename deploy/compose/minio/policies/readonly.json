@@ -2,6 +2,18 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "BucketReadiness",
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketLocation"],
+      "Resource": [
+        "arn:aws:s3:::raw",
+        "arn:aws:s3:::normalized",
+        "arn:aws:s3:::archive",
+        "arn:aws:s3:::translated",
+        "arn:aws:s3:::events"
+      ]
+    },
+    {
       "Sid": "ReadAllBuckets",
       "Effect": "Allow",
       "Action": ["s3:GetObject"],

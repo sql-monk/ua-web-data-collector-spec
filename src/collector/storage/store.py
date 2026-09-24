@@ -288,7 +288,10 @@ class S3ArtifactStore:
         if not bucket:
             raise ValueError("bucket має бути непорожнім")
         async with self._client() as client:
-            await client.head_bucket(Bucket=bucket)
+            # HeadBucket requires s3:ListBucket, which would let producers enumerate every
+            # content-addressed key. GetBucketLocation proves endpoint, credentials and bucket
+            # access with a narrower bucket-level permission.
+            await client.get_bucket_location(Bucket=bucket)
 
 
 class LazyS3ArtifactStore:
