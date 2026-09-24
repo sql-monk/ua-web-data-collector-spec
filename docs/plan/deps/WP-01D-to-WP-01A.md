@@ -119,3 +119,53 @@ worker і scheduler задають його від свого вікна self-fe
 
 Прохання до WP-01A: прийняти зміну як свою (рев'ю у наступному PR WP-01A); за потреби винести
 перелік дозволених членств у явний allowlist.
+
+## 7. PR1c (`wp/01d-1c-handler-plumbing`): очікувані сигнатури WP-01A PR3a — звірка при rebase
+
+Джерело: `docs/plan/cards/WP-01D.md` PR1c п.1, п.2, п.5; `docs/plan/cards/WP-01A.md` PR3a п.1, п.7.
+На момент написання PR1c у гілці `wp/01a-3a-queue-outbox-preflight` ще немає комітів, тож PR1c
+написано проти **задокументованого** інтерфейсу. Нових таблиць/колонок PR1c не потребує.
+
+### 7.1. Як runtime викликає PR3a (`src/collector/workers/backends.py`)
+
+До rebase виклики типізовані через `cast` до Protocol-ів `_Pr3a*` (без `# type: ignore`); після
+rebase `cast` прибирається, а тести з маркером `NEEDS_PR3A` (`xfail(strict=True)`) почнуть давати
+XPASS і червоніти, доки маркер не знято.
+
+| Виклик runtime | Очікувана сигнатура PR3a | Для чого |
+|---|---|---|
+| `queue.retry(session, job_id, owner, *, error_code, error_message, policy=IMMEDIATE_POLICY, not_before=<t>, now=)` | `retry(..., policy: BackoffPolicy \| None = None, not_before: datetime \| None = None, ...)` | retry з нижньою межею / табличним розкладом |
+| `queue.release(session, job_id, owner, *, not_before=<until>, now=)` | `release(job_id, owner, *, not_before: datetime \| None = None, now=None)` | `TaskResult.deferred` |
+| `retry_projection_task(..., policy=IMMEDIATE_POLICY, not_before=<t>, now=)` | те саме, що `queue.retry` | retry projection task |
+| `release_projection_task(session, task_id, owner, *, not_before=<until>, now=)` | те саме, що `queue.release` | defer projection task |
+| `acknowledge_projection(session, task_id, receipt, *, event=, owner=<instance>, now=)` | `acknowledge_projection(..., owner: str \| None = None)` | ack у report-транзакції з fencing |
+
+Коли `not_before` не задано (retry без розкладу і без нижньої межі, плановий drain-`release`),
+runtime викликає репозиторій **без** нових аргументів — поведінка до PR1c, і вона працює вже зараз.
+
+### 7.2. Семантика, на яку спирається runtime (прохання зафіксувати в docstring PR3a)
+
+1. **`retry(not_before=t)`**: runtime сам обчислює `t = max(now + затримка, нижня межа handler-а)`
+   і передає `policy=IMMEDIATE_POLICY` (`BackoffPolicy(base=0, jitter_ratio=0)`). Обидві семантики,
+   дозволені карткою PR3a п.1 («`max(now + backoff, not_before)`» або «саме `not_before`»), дають
+   тоді рівно `t` — прохання не додавати третьої (наприклад, `not_before + backoff`).
+   `attempt >= max_attempts` → карантин + dead letter **незалежно** від `not_before`.
+2. **`release(not_before=until)`**: `not_before = until` (runtime уже обрізав `until < now` до `now`
+   і стелю `COLLECTOR_WORKER_MAX_DEFER_SECONDS`), `attempt = GREATEST(attempt - 1, 0)`, без полів
+   помилки, без dead letter — як поточний `release`.
+3. **`acknowledge_projection(owner=...)`**: перевірка lease — **до** будь-якого запису (ack, confirmed
+   version, change event, outbox); чужий/відсутній lease → `LeaseNotOwnedError`. Runtime трактує її
+   як `worker.lease_lost` (тест `test_lost_lease_blocks_the_ack_and_the_next_owner_acks_exactly_once`).
+
+Розбіжність сигнатур чи семантики після злиття PR3a — WP-01D правка в `backends.py` (власний файл),
+без змін у WP-01A.
+
+### 7.3. Побажання (низький пріоритет, не блокує PR1c)
+
+`quarantine_projection_task(session, task_id, *, error_code, ...)` — операторський виклик без
+перевірки lease. Worker-у потрібен карантин **власником**: зараз `ProjectionTasksBackend.quarantine`
+спершу викликає `heartbeat_projection_task(owner)` у тій самій транзакції (row lock +
+`LeaseNotOwnedError` для чужого lease), потім `quarantine_projection_task`. Працює коректно (тест
+`test_projection_quarantine_is_fenced_by_the_lease_owner`), але чистіше мати
+`quarantine_projection_task(..., owner: str | None = None)` з `_lock_owned`, як у `queue.quarantine`.
+Якщо PR3a це додасть — backend перейде на нього без зміни поведінки.

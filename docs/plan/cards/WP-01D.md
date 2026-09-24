@@ -5,7 +5,7 @@
 | Owner | wp-implementer (єдиний owner worker runtime і orchestration adapters) |
 | Branch | `wp/01d-1-worker-runtime`, `wp/01d-1b-runtime-role-dsn`, `wp/01d-1c-handler-plumbing` (передумова хвилі 1, 2026-09-24), `wp/01d-2-limiter-runtime`, `wp/01d-3-drain-adapters` |
 | Worktree | `.worktrees/wp-01d` |
-| Залежить від | WP-00 (усі три PR) `merged`, WP-01A PR1 `merged` |
+| Залежить від | WP-00 (усі три PR) `merged`, WP-01A PR1 і PR3a `merged` |
 | Розблоковує | WP-02, WP-03, WP-04 (runtime workers), WP-11C (екран Workers), WP-12 |
 | Розмір | L → три PR одного owner |
 | Розділи ТЗ | §7.5 (scaling, Compose/Swarm), §7.6 (повністю), §13 (без Docker socket, allowlist controller), §15 (capacity ceiling), §16.1 п.15, §16.3 (scale/drain/kill пункти), FR-031—FR-033, FR-035 |
@@ -79,9 +79,11 @@ Unit compose (п.1, п.4); unit/integration: runtime під superuser DSN або
 Передумова хвилі 1 (рішення оркестратора, 2026-09-24): збирає dependency-запити чернеток
 WP-01B (§«Як projector-worker підключається до runtime WP-01D» п.2 (а)–(г)), WP-02 (запит до
 WP-01D п.1–3) і WP-04 (запит до WP-01D п.3а–3б). Worktree `.worktrees/wp-01d-1c`. Стартує
-одразу (U-3); **merge — після WP-01A PR3a** (новий `not_before` у `queue.retry`,
+одразу (U-3); dependency **WP-01A PR3a merged у PR #12** (новий `not_before` у `queue.retry`,
 `queue.release(..., not_before=)` і їхні аналоги для `projection_tasks`, fencing у
 `acknowledge_projection` — див. `WP-01A.md` PR3a п.1, п.7).
+
+**Статус:** реалізовано й синхронізовано з PR3a; gate 2–5 пройдено локально, очікує PR/CI.
 
 **Розблоковує:** WP-02 PR2 (п.1–4), WP-04 PR2 (п.1, п.3, п.4), WP-01B PR3 (п.3–6).
 

@@ -33,17 +33,25 @@ boot → verify DB login (§13) → register(starting) → readiness → ready �
   `recover_expired_leases` іншого instance після експірації.
 
 Транзакційні межі: claim — окрема транзакція (row locks звільняються одразу після commit);
-звіт про кожну task — окрема транзакція; heartbeat instance + продовження leases активних
-tasks — одна транзакція на тік.
+звіт про кожну task — окрема транзакція (для `projection_tasks` ack — у ній же); heartbeat
+instance + продовження leases активних tasks — одна транзакція на тік.
+
+PR1c: handler-и ролі приходять із `collector.workers.registry` (lazy import доменного модуля,
+фабрика отримує `HandlerContext`); роль може мати кілька прив'язок `HandlerBinding` до різних
+черг (`collector.workers.backends`) зі спільними слотами і round-robin claim; `TaskResult`
+підтримує `defer` (без спалювання спроби), `retry` з нижньою межею `not_before` і табличний
+`retry_schedule` handler-а.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import os
+import random
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from time import monotonic
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -63,18 +71,20 @@ from collector.persistence.postgres.errors import (
 from collector.persistence.postgres.models import WorkerInstance
 from collector.persistence.postgres.repositories import pools as pools_repo
 from collector.persistence.postgres.repositories import queue as queue_repo
+from collector.workers.backends import InvalidHandlerOutputError
 from collector.workers.config import WorkerRuntimeConfig
 from collector.workers.handlers import (
+    HandlerBinding,
+    HandlerContext,
     Task,
     TaskHandler,
     TaskResult,
-    check_handler_contract,
     redact,
-    resolve_handler,
     result_for_exception,
 )
 from collector.workers.liveness import LivenessMarker
 from collector.workers.login import verify_component_login
+from collector.workers.registry import as_bindings, load_role_bindings
 from collector.workers.roles import WorkerRole, db_role_for, default_pool_spec
 from collector.workers.session import bounded_transaction
 from collector.workers.signals import StopSignalHandlers, install_stop_signal_handlers
@@ -82,35 +92,22 @@ from collector.workers.signals import StopSignalHandlers, install_stop_signal_ha
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-    from collector.persistence.postgres.models import CrawlJob
-
 BOOTSTRAP_REASON = "bootstrap default pool (§7.6)"
 READY_RETRY_ATTEMPTS = 5
 READY_RETRY_BASE_SECONDS = 0.5
 MAX_CLAIM_BACKOFF_SECONDS = 30.0
+DEFAULT_BACKOFF = queue_repo.BackoffPolicy()
+"""Затримка retry для handler-а без `retry_schedule` — та сама, що дефолт черги (до PR1c)."""
 
 
 class WorkerRuntimeError(RuntimeError):
     """Runtime не може працювати коректно і має завершитись (boot не вдався тощо)."""
 
 
-def _task_from_job(job: CrawlJob) -> Task:
-    return Task(
-        job_id=job.job_id,
-        job_type=job.job_type,
-        args=dict(job.args),
-        attempt=job.attempt,
-        max_attempts=job.max_attempts,
-        priority=job.priority,
-        not_before=job.not_before,
-        run_id=job.run_id,
-        source_id=job.source_id,
-    )
-
-
 @dataclass(slots=True)
 class _ActiveTask:
     task: Task
+    binding: HandlerBinding
     handle: asyncio.Task[None]
 
 
@@ -129,16 +126,36 @@ class WorkerRuntime:
         self,
         config: WorkerRuntimeConfig,
         sessions: async_sessionmaker[AsyncSession],
-        handler: TaskHandler | None = None,
+        handler: TaskHandler | Sequence[HandlerBinding] | None = None,
         *,
         clock: Callable[[], datetime] = utcnow,
+        environ: Mapping[str, str] | None = None,
+        rng: random.Random | None = None,
     ) -> None:
+        """`handler=None` — прив'язки ролі з реєстру (`collector.workers.registry`).
+
+        Фабрика ролі отримує `HandlerContext` з тими самими `sessions` і `instance_id`, що й
+        runtime. Зламаний доменний модуль або незареєстрована фабрика → `HandlerRegistryError`
+        тут, тобто ще до реєстрації instance (boot падає ненульовим кодом).
+        """
         self.config = config
         self.instance_id = new_entity_id()
-        self.handler = handler if handler is not None else resolve_handler(config.role)
-        check_handler_contract(self.handler)
         self._sessions = sessions
         self._clock = clock
+        self.handler_context = HandlerContext(
+            role=config.role,
+            sessions=sessions,
+            worker_instance_id=self.instance_id,
+            clock=clock,
+            env=os.environ if environ is None else environ,
+        )
+        self.bindings: tuple[HandlerBinding, ...] = (
+            load_role_bindings(self.handler_context)
+            if handler is None
+            else as_bindings(handler, role=config.role)
+        )
+        self._rng = rng if rng is not None else random.SystemRandom()
+        self._next_binding = 0
         self._log = get_logger(f"collector.worker.{config.role.value}").bind(
             instance_id=str(self.instance_id), role=config.role.value
         )
@@ -162,8 +179,17 @@ class WorkerRuntime:
         self.heartbeats = 0
         self.lost_leases = 0
         self.fences = 0
+        # Завершені спроби звіту (успішні й ні) — тести чекають на них, а не на час.
+        self.reports = 0
+        self.report_failures = 0
+        self.claims_by_backend: dict[str, int] = {}
 
     # --- стан для тестів і логів -------------------------------------------------------------
+
+    @property
+    def handler(self) -> TaskHandler:
+        """Handler першої прив'язки (для ролі з однією прив'язкою — єдиний)."""
+        return self.bindings[0].handler
 
     @property
     def owner(self) -> str:
@@ -301,7 +327,10 @@ class WorkerRuntime:
             status="starting",
             desired_concurrency=self._pool.desired_concurrency,
             pool_revision=self._pool.revision,
-            job_types=list(self.handler.job_types),
+            bindings=[
+                f"{binding.backend.name}:{','.join(binding.handler.job_types)}"
+                for binding in self.bindings
+            ],
         )
         await self._check_ready()
         await self._become_ready()
@@ -380,7 +409,8 @@ class WorkerRuntime:
         """Readiness §7.5: БД відповідає і доменні залежності ролі готові."""
         async with self._sessions() as session:
             await session.execute(text("SELECT 1"))
-        await self.handler.check_ready()
+        for binding in self.bindings:
+            await binding.handler.check_ready()
 
     async def _claim_loop(self) -> None:
         while not self._stop.is_set():
@@ -397,19 +427,37 @@ class WorkerRuntime:
                 await asyncio.sleep(0)
 
     async def _claim(self, limit: int) -> int:
+        """Claim до `limit` tasks з прив'язок ролі за round-robin (слоти спільні).
+
+        Обхід починається з прив'язки, наступної за тією, що claim-ила останньою: при
+        `desired_concurrency=1` і двох завжди непорожніх чергах вони чергуються і жодна не
+        голодує (PR1c п.5). Усі claim-и одного проходу — в одній транзакції з барʼєром drain.
+        """
+        claimed: list[tuple[Task, HandlerBinding]] = []
         try:
             async with self._transaction() as session:
                 if not await self._claim_allowed(session):
                     return 0
-                jobs = await queue_repo.claim(
-                    session,
-                    self.handler.job_types,
-                    self.owner,
-                    self.config.lease_seconds,
-                    limit=limit,
-                    now=self._now(),
-                )
-                tasks = [_task_from_job(job) for job in jobs]
+                now = self._now()
+                count = len(self.bindings)
+                start = self._next_binding
+                for offset in range(count):
+                    remaining = limit - len(claimed)
+                    if remaining <= 0:
+                        break
+                    index = (start + offset) % count
+                    binding = self.bindings[index]
+                    tasks = await binding.backend.claim(
+                        session,
+                        binding.handler.job_types,
+                        self.owner,
+                        self.config.lease_seconds,
+                        limit=remaining,
+                        now=now,
+                    )
+                    if tasks:
+                        self._next_binding = (index + 1) % count
+                        claimed.extend((task, binding) for task in tasks)
         except (SQLAlchemyError, OSError, PersistenceError) as exc:
             # Backoff, щоб мертву базу не опитував кожен worker раз на секунду (L-7 код-рев'ю).
             self._claim_failures += 1
@@ -428,20 +476,23 @@ class WorkerRuntime:
             # Fence піднявся, поки claim був у базі. Запуск цих tasks означав би роботу без
             # підтвердженого lease, яку сторож уже не скасує (він спрацьовує раз на fence):
             # lease лишається спливати і job повертає `recover_expired_leases`.
-            for task in tasks:
+            for task, binding in claimed:
                 self.lost_leases += 1
                 self._log.warning(
                     "worker.lease_left_to_expire",
                     job_id=str(task.job_id),
+                    queue=binding.backend.name,
                     reason="claimed while fenced",
                     lease_seconds=self.config.lease_seconds,
                 )
             return 0
-        for task in tasks:
-            self._start(task)
-        if tasks:
-            self._log.info("worker.claimed", count=len(tasks), active_tasks=len(self._active))
-        return len(tasks)
+        for task, binding in claimed:
+            name = binding.backend.name
+            self.claims_by_backend[name] = self.claims_by_backend.get(name, 0) + 1
+            self._start(task, binding)
+        if claimed:
+            self._log.info("worker.claimed", count=len(claimed), active_tasks=len(self._active))
+        return len(claimed)
 
     async def _claim_allowed(self, session: AsyncSession) -> bool:
         """Перевірити барʼєр drain у власному рядку instance **в тій самій транзакції**, що й claim.
@@ -467,15 +518,17 @@ class WorkerRuntime:
             return False
         return bool(row.status == "ready")
 
-    def _start(self, task: Task) -> None:
-        handle = asyncio.create_task(self._execute(task), name=f"worker-task-{task.job_id}")
-        self._active[task.job_id] = _ActiveTask(task=task, handle=handle)
+    def _start(self, task: Task, binding: HandlerBinding) -> None:
+        handle = asyncio.create_task(
+            self._execute(task, binding), name=f"worker-task-{task.job_id}"
+        )
+        self._active[task.job_id] = _ActiveTask(task=task, binding=binding, handle=handle)
 
-    async def _execute(self, task: Task) -> None:
+    async def _execute(self, task: Task, binding: HandlerBinding) -> None:
         cancelled = False
         try:
             try:
-                result = await self.handler.handle(task)
+                result = await binding.handler.handle(task)
             except asyncio.CancelledError:
                 cancelled = True
                 raise
@@ -486,7 +539,7 @@ class WorkerRuntime:
                     error=redact(f"{type(exc).__name__}: {exc}")[:300],
                 )
                 result = result_for_exception(exc)
-            await self._report(task, result)
+            await self._report(task, binding, result)
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -496,23 +549,46 @@ class WorkerRuntime:
                 self._active.pop(task.job_id, None)
             self._wakeup.set()
 
-    async def _report(self, task: Task, result: TaskResult) -> None:
+    async def _report(self, task: Task, binding: HandlerBinding, result: TaskResult) -> None:
+        """Записати результат task у її черзі — одна транзакція (для projection — разом з ack)."""
+        backend = binding.backend
+        if result.disposition == "complete":
+            try:
+                backend.check_output(result.output)
+            except InvalidHandlerOutputError as exc:
+                message = redact(str(exc))
+                self._log.error(
+                    "worker.invalid_handler_output",
+                    job_id=str(task.job_id),
+                    queue=backend.name,
+                    error=message,
+                )
+                result = TaskResult.permanent("invalid_handler_output", message)
         now = self._now()
+        details: dict[str, object] = {}
         try:
             async with self._transaction() as session:
                 if result.disposition == "complete":
-                    await queue_repo.complete(session, task.job_id, self.owner, now=now)
+                    await backend.complete(session, task, self.owner, result.output, now=now)
                 elif result.disposition == "retry":
-                    await queue_repo.retry(
+                    not_before = self._retry_not_before(task, binding, result, now)
+                    details["status"] = await backend.retry(
                         session,
                         task.job_id,
                         self.owner,
                         error_code=result.error_code or "unknown",
                         error_message=result.error_message,
+                        not_before=not_before,
                         now=now,
                     )
+                    if not_before is not None:
+                        details["not_before"] = not_before.isoformat()
+                elif result.disposition == "defer":
+                    until = self._defer_until(task, result, now)
+                    await backend.defer(session, task.job_id, self.owner, until=until, now=now)
+                    details["until"] = until.isoformat()
                 else:
-                    await queue_repo.quarantine(
+                    await backend.quarantine(
                         session,
                         task.job_id,
                         self.owner,
@@ -523,19 +599,88 @@ class WorkerRuntime:
         except LeaseNotOwnedError:
             # Lease забрав `recover_expired_leases` (або оператор) — результат уже не наш.
             self.lost_leases += 1
-            self._log.warning("worker.lease_lost", job_id=str(task.job_id), phase="report")
-        except (SQLAlchemyError, OSError, PersistenceError) as exc:
-            # Будь-яка інша помилка persistence (`ConflictError`, `InvalidTransitionError`, …)
-            # раніше вилітала з task і зникала у GC без жодного рядка в логах (L-4 код-рев'ю).
+            self._log.warning(
+                "worker.lease_lost", job_id=str(task.job_id), queue=backend.name, phase="report"
+            )
+        except Exception as exc:  # noqa: BLE001 — жодна помилка звіту не має зникнути в GC
+            # Будь-яка інша помилка (`ConflictError` ack, `InvalidTransitionError`, помилка
+            # backend-а) раніше вилітала з task без жодного рядка в логах (L-4 код-рев'ю).
+            # Lease лишається спливати, job повертає `recover_expired_leases`.
+            self.report_failures += 1
             self._log.error(
                 "worker.report_failed",
                 job_id=str(task.job_id),
-                error=redact(f"{type(exc).__name__}: {exc}"),
+                queue=backend.name,
+                disposition=result.disposition,
+                error=redact(f"{type(exc).__name__}: {exc}")[:300],
             )
         else:
+            if result.disposition == "defer":
+                # Без тексту задачі (§13): лише ідентифікатор, код і момент.
+                self._log.info(
+                    "worker.task_deferred",
+                    job_id=str(task.job_id),
+                    queue=backend.name,
+                    error_code=result.error_code,
+                    until=details["until"],
+                )
             self._log.info(
-                "worker.task_done", job_id=str(task.job_id), disposition=result.disposition
+                "worker.task_done",
+                job_id=str(task.job_id),
+                queue=backend.name,
+                disposition=result.disposition,
+                **details,
             )
+        finally:
+            self.reports += 1
+
+    def _retry_not_before(
+        self, task: Task, binding: HandlerBinding, result: TaskResult, now: datetime
+    ) -> datetime | None:
+        """`not_before` наступної спроби: `max(now + затримка, нижня межа handler-а)`.
+
+        Затримка — з `retry_schedule` handler-а (таблиця §10) або дефолтний `BackoffPolicy`.
+        `None` — ні розкладу, ні нижньої межі: черга рахує backoff сама, як до PR1c.
+        """
+        schedule = binding.handler.retry_schedule
+        if schedule is None and result.not_before is None:
+            return None
+        delay = (
+            schedule.delay(task.attempt, self._rng)
+            if schedule is not None
+            else DEFAULT_BACKOFF.delay_for(task.attempt, self._rng)
+        )
+        lower = (
+            self._clamp_not_before(result.not_before, now, task=task, what="retry")
+            if result.not_before is not None
+            else now
+        )
+        return max(now + delay, lower)
+
+    def _defer_until(self, task: Task, result: TaskResult, now: datetime) -> datetime:
+        if result.not_before is None:  # pragma: no cover — TaskResult.__post_init__ гарантує
+            msg = "defer без until"
+            raise ValueError(msg)
+        return self._clamp_not_before(result.not_before, now, task=task, what="defer")
+
+    def _clamp_not_before(
+        self, value: datetime, now: datetime, *, task: Task, what: str
+    ) -> datetime:
+        """Момент у минулому → `now`; далі за `max_defer_seconds` → стеля з warning."""
+        if value < now:
+            return now
+        ceiling = now + timedelta(seconds=self.config.max_defer_seconds)
+        if value > ceiling:
+            self._log.warning(
+                "worker.not_before_clamped",
+                job_id=str(task.job_id),
+                kind=what,
+                requested=value.isoformat(),
+                clamped_to=ceiling.isoformat(),
+                max_defer_seconds=self.config.max_defer_seconds,
+            )
+            return ceiling
+        return value
 
     # --- heartbeat ---------------------------------------------------------------------------
 
@@ -585,7 +730,7 @@ class WorkerRuntime:
         """Один тік: instance heartbeat + продовження lease активних tasks + читання pool."""
         now = self._now()
         lost: list[UUID] = []
-        active = list(self._active)
+        active = [(job_id, entry.binding.backend) for job_id, entry in self._active.items()]
         snapshot = self._pool
         drain_requested = self._drain_barrier
         try:
@@ -610,9 +755,9 @@ class WorkerRuntime:
                     now=now,
                 )
                 drain_requested = instance.drain_requested_at is not None
-                for job_id in active:
+                for job_id, backend in active:
                     try:
-                        await queue_repo.heartbeat(
+                        await backend.heartbeat(
                             session, job_id, self.owner, self.config.lease_seconds, now=now
                         )
                     except LeaseNotOwnedError:
@@ -768,17 +913,17 @@ class WorkerRuntime:
             await asyncio.gather(*pending, return_exceptions=True)
 
     async def _release_leases(self) -> None:
-        """Повернути lease незавершених tasks у чергу через `queue.release` (claimable одразу).
+        """Повернути lease незавершених tasks у їхню чергу через `release` (claimable одразу).
 
         Плановий drain нікого не «провалив», тому це не `retry`: `release` (WP-01A PR2) не пише
         полів помилки, не створює dead letter, не карантинить job на останній спробі і
         компенсує інкремент `attempt`, який зробив claim (deps WP-01A→WP-01D §2, §6).
         """
         now = self._now()
-        for job_id in list(self._active):
+        for job_id, entry in list(self._active.items()):
             try:
                 async with self._transaction() as session:
-                    await queue_repo.release(session, job_id, self.owner, now=now)
+                    await entry.binding.backend.release(session, job_id, self.owner, now=now)
             except LeaseNotOwnedError:
                 self._log.info("worker.lease_already_released", job_id=str(job_id))
             except (SQLAlchemyError, OSError, PersistenceError) as exc:
