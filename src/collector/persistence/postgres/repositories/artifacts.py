@@ -142,7 +142,7 @@ async def latest_validators(
     ).one_or_none()
     if row is None:
         return None
-    etag, last_modified, fetched_at = row.tuple()
+    etag, last_modified, fetched_at = row._tuple()
     return Validators(etag=etag, last_modified=last_modified, fetched_at=fetched_at)
 
 

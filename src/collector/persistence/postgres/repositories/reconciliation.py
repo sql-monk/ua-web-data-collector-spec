@@ -173,9 +173,9 @@ async def projection_completeness(
         tasks = tasks.where(ProjectionTask.created_at < created_before)
         events = events.where(OutboxEvent.created_at < created_before)
     open_count, oldest_open, quarantined_count, oldest_quarantined = (
-        (await session.execute(tasks)).one().tuple()
+        (await session.execute(tasks)).one()._tuple()
     )
-    unpublished, oldest_unpublished = (await session.execute(events)).one().tuple()
+    unpublished, oldest_unpublished = (await session.execute(events)).one()._tuple()
     return ProjectionCompleteness(
         open_tasks=int(open_count),
         oldest_open_task_created_at=oldest_open,

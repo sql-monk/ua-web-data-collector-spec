@@ -107,7 +107,7 @@ async def get_fetch_preflight(
     ).one_or_none()
     if row is None:
         return None
-    source, route, version = row.tuple()
+    source, route, version = row._tuple()
     return FetchPreflight(
         source_pk=source.id,
         source_id=source.source_id,
@@ -491,7 +491,7 @@ async def record_route_failure(
     if counted is None:
         msg = f"route {route_id} не знайдено"
         raise NotFoundError(msg)
-    failures, state, revision = counted.tuple()
+    failures, state, revision = counted._tuple()
     if failures < threshold or state not in CIRCUIT_OPENABLE_ROUTE_STATES:
         return RouteState(state)
     open_until = current + circuit_open_for if circuit_open_for is not None else None
