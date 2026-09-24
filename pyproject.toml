@@ -17,6 +17,9 @@ dependencies = [
   # idna, phonenumbers, pyyaml — WP-01C shared contracts (§9.3 п.8 нормалізація контактів;
   # read-only loader docs/research/source-registry.yaml для валідації source_id).
   "idna>=3.10",
+  # lingua-language-detector — WP-04 детекція мови по сегментах (§8, §12.2; offline-моделі у wheel,
+  # набір мов обмежується uk + 16 + extra, collector.translation.languages).
+  "lingua-language-detector>=2.1",
   "phonenumbers>=9.0",
   "pydantic>=2.11,<3",
   # pymongo — `collector db ensure-mongo` (replica set init) і health `hello` (WP-00 PR2;
