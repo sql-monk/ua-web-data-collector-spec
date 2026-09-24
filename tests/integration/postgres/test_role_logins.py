@@ -18,14 +18,11 @@ NOLOGIN без пароля — інші тести бачать початко�
 from __future__ import annotations
 
 import secrets
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 import asyncpg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.engine import URL
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
@@ -38,71 +35,23 @@ from collector.persistence.postgres.roles import (
     MIGRATE_ROLE,
     RUNTIME_ROLES,
     RoleLoginError,
-    dsn_secret_name,
     load_role_logins,
     verify_runtime_login,
 )
 
-from .conftest import FIXED_NOW, make_entity, receipt, record
+from .conftest import (
+    FIXED_NOW,
+    Logins,
+    RoleEngine,
+    make_entity,
+    receipt,
+    record,
+    write_role_secrets,
+)
 
 pytestmark = pytest.mark.integration
 
 T0 = FIXED_NOW
-
-
-@dataclass(frozen=True, slots=True)
-class Logins:
-    database: PostgresSettings
-    secrets_dir: Path
-    urls: dict[str, URL]
-
-
-RoleEngine = Callable[[str], Awaitable[AsyncEngine]]
-
-
-async def _reset_logins(admin: AsyncEngine) -> None:
-    async with admin.connect() as conn:
-        for role in RUNTIME_ROLES:
-            await conn.execute(text(f'ALTER ROLE "{role}" WITH NOLOGIN PASSWORD NULL'))
-
-
-def _write_secrets(database: PostgresSettings, directory: Path) -> dict[str, URL]:
-    urls: dict[str, URL] = {}
-    for role in RUNTIME_ROLES:
-        url = database.url.set(username=role, password=secrets.token_hex(24))
-        (directory / dsn_secret_name(role)).write_text(
-            url.render_as_string(hide_password=False) + "\n", encoding="utf-8"
-        )
-        urls[role] = url
-    return urls
-
-
-@pytest.fixture
-async def logins(pg_database: PostgresSettings, tmp_path: Path) -> AsyncIterator[Logins]:
-    admin = create_async_engine(pg_database.url, isolation_level="AUTOCOMMIT", poolclass=None)
-    urls = _write_secrets(pg_database, tmp_path)
-    try:
-        await apply_database_roles(pg_database, logins=load_role_logins(tmp_path))
-        yield Logins(database=pg_database, secrets_dir=tmp_path, urls=urls)
-    finally:
-        await _reset_logins(admin)
-        await admin.dispose()
-
-
-@pytest.fixture
-async def role_engine(logins: Logins) -> AsyncIterator[RoleEngine]:
-    engines: list[AsyncEngine] = []
-
-    async def make(role: str) -> AsyncEngine:
-        engine = create_async_engine(logins.urls[role], poolclass=None)
-        engines.append(engine)
-        return engine
-
-    try:
-        yield make
-    finally:
-        for engine in engines:
-            await engine.dispose()
 
 
 async def _denied(engine: AsyncEngine, statement: str) -> None:
@@ -114,7 +63,7 @@ async def _denied(engine: AsyncEngine, statement: str) -> None:
 async def test_runtime_roles_cannot_log_in_before_with_login(
     pg_database: PostgresSettings, tmp_path: Path
 ) -> None:
-    urls = _write_secrets(pg_database, tmp_path)
+    urls = write_role_secrets(pg_database, tmp_path)
     engine = create_async_engine(urls["collector_fetcher"], poolclass=None)
     try:
         # `trust` (CI) → «not permitted to log in»; `scram` → пароля в ролі ще немає.
