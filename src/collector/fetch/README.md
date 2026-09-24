@@ -29,11 +29,15 @@ store, upload claim, robots snapshot і `FetchHandler` — PR2; browser worker �
 fetcher = SafeFetcher(
     config=FetchConfig.from_env(),
     permits=PgOriginPermits(sessions, owner_instance=worker_instance_id),
-    guard=RouteGuard(allowed_patterns=manifest_allowed, denied_patterns=manifest_denied,
-                     denylist=GlobalDenylist(config.denylist_file)),
+    guard=RouteGuard(
+        allowed_patterns=manifest_allowed,
+        denied_patterns=manifest_denied,
+        denylist=GlobalDenylist(config.denylist_file),
+    ),
 )
-result = await fetcher.fetch(FetchRequest(url, request_kind="page", job_id=task.job_id,
-                                          if_none_match=etag))
+result = await fetcher.fetch(
+    FetchRequest(url, request_kind="page", job_id=task.job_id, if_none_match=etag)
+)
 ```
 
 `fetch()` не кидає винятків для мережевих/політичних відмов — усе в `result.decision`
@@ -85,8 +89,8 @@ Guard/SSRF-відмова → `error_code="policy_blocked"`, конкретна 
 | guard/SSRF | permanent | unknown | `policy_blocked` |
 
 `plan_retry`: максимум 4 спроби, backoff 5 с / 30 с / 2 хв (+ jitter до 20 %; крок 10 хв —
-лише якщо `max_attempts` > 4), не менше за `Retry-After`; після 4-ї спроби або permanent — dead letter. Виконання (`not_before`) — PR2 через
-runtime WP-01D і `queue.retry` WP-01A. `Retry-After`: секунди або HTTP-date, clamp
+лише якщо `max_attempts` > 4), не менше за `Retry-After`; після 4-ї спроби або permanent — dead
+letter. Виконання (`not_before`) — PR2 через runtime WP-01D і `queue.retry` WP-01A. `Retry-After`: секунди або HTTP-date, clamp
 `[5 с, 24 год]`, відсутній/сміттєвий/від'ємний → 10 хв.
 
 ## Anonymous-only (Q-007) і логи
