@@ -263,6 +263,10 @@ def test_ensure_mongo_mounts_root_and_all_component_uris(
 ) -> None:
     svc = services["ensure-mongo"]
     assert _secret_names(svc) == {"mongo_root_password", *MONGO_SECRETS}
+    # WP-01B-to-WP-00 п.2: ролі `--users` дають права на COLLECTOR_MONGO_DATABASE, тож БД має
+    # збігатися зі шляхом URI, який init-secrets.sh будує з того самого MONGO_DB.
+    assert svc["environment"]["COLLECTOR_MONGO_DATABASE"] == "${MONGO_DB:-collector}"
+    assert "COLLECTOR_MONGO_USER_SECRETS_DIR" not in svc["environment"]  # типовий /run/secrets
     assert svc["environment"]["COLLECTOR_MONGO_ROOT_PASSWORD_FILE"] == (
         "/run/secrets/mongo_root_password"  # noqa: S105 — шлях до secret, не значення
     )

@@ -399,6 +399,9 @@ services:
     environment:
       <<: *collector-env
       COLLECTOR_ENSURE_MONGO_SCHEMA: ${COLLECTOR_ENSURE_MONGO_SCHEMA:-0}
+      # Domain-БД ролей `--users` (WP-01B); має збігатися зі шляхом URI у mongo_uri_* —
+      # init-secrets.sh бере той самий MONGO_DB.
+      COLLECTOR_MONGO_DATABASE: ${MONGO_DB:-collector}
       COLLECTOR_MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-collector_root}
       COLLECTOR_MONGO_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
     secrets:

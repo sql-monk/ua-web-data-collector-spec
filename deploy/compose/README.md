@@ -122,6 +122,8 @@ exit 1 з іменем файла, без значень. Секрети не п
 `mongo_uri_<component>` — URI з власним паролем:
 `mongodb://collector_<component>:<48 hex>@mongo:27017/collector?replicaSet=rs0&authSource=admin`
 (хост/порт/БД — `MONGO_HOST`, `MONGO_PORT`, `MONGO_DB` при запуску `init-secrets.sh`).
+`ensure-mongo` отримує `COLLECTOR_MONGO_DATABASE=${MONGO_DB:-collector}`: ролі `--users` дають
+права саме на цю БД, тож вона збігається зі шляхом URI (контракт `WP-01B-to-WP-00.md` п.2).
 Користувачів створює `collector db ensure-mongo --users` (WP-01B PR1) з паролів у цих файлах
 (каталог `/run/secrets`). До merge WP-01B PR1 CLI `--users` не має, тому compose запускає
 розширену команду лише за перемикачем:
