@@ -19,7 +19,7 @@ from email.utils import parsedate_to_datetime
 from collector.contracts.enums import ContentAccess, FetchOutcome
 
 RETRYABLE_STATUSES = frozenset({408, 425, 500, 502, 503, 504})
-RETRYABLE_ERRORS = frozenset({"timeout", "network_error", "dns_error"})
+RETRYABLE_ERRORS = frozenset({"timeout", "network_error", "dns_error", "permit_lease_too_short"})
 QUARANTINE_ERRORS = frozenset({"body_too_large", "decompression_bomb", "content_decoding_error"})
 RETRY_AFTER_DEFAULT = timedelta(minutes=10)
 RETRY_AFTER_MIN = timedelta(seconds=5)

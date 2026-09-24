@@ -301,7 +301,12 @@ async def test_hanging_stream_hits_asyncio_total_timeout(make_fetcher) -> None:
     assert result.decision.error_code == "timeout"
 
 
-async def test_sitemap_total_timeout_override_from_manifest(make_fetcher, network, clock) -> None:
+async def test_sitemap_total_timeout_override_from_manifest(
+    make_fetcher, network, clock, permits
+) -> None:
+    # Manifest override дозволений лише коли runtime просить permit, що покриває це вікно.
+    permits.lease_seconds = 310
+
     def drip() -> Iterator[bytes]:
         for _ in range(200):
             clock.advance(1.0)

@@ -53,6 +53,7 @@ from collector.workers.handlers import redact
 RequestKind = Literal["page", "sitemap", "robots", "api"]
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 MEDIA_PREFIXES = ("image/", "video/", "audio/")
+PERMIT_EXPIRY_MARGIN_SECONDS = 1.0
 SAFE_RESPONSE_HEADERS = (
     "content-type",
     "content-length",
@@ -215,6 +216,14 @@ class SafeFetcher:
                 if isinstance(granted, Denied):
                     return self._denied(request, hops, granted, redirected=hop > 0)
                 held[origin] = granted
+            permit = held[origin]
+            # Permit мусить покривати весь залишок logical fetch. Інакше manifest timeout
+            # (напр. великий sitemap) переживе lease, інша replica отримає slot і R-53 буде
+            # порушено. Відмовляємо до connect; runtime може повторити з довшим fenced lease.
+            lease_left = (permit.lease_expires_at - self._now()).total_seconds()
+            fetch_left = max(deadline - self._clock(), 0.0)
+            if lease_left < fetch_left + PERMIT_EXPIRY_MARGIN_SECONDS:
+                return self._failed(request, hops, classify_error("permit_lease_too_short"), None)
             response = await client.send(
                 httpx.Request("GET", guarded.url, headers=self._headers(request, hop)),
                 stream=True,

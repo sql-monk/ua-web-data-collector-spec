@@ -11,6 +11,7 @@ import gzip
 import zlib
 from collections.abc import Iterator
 
+import brotli
 import pytest
 from fetch_fakes import PUBLIC_IP, FakeResolver, http_response, static
 
@@ -37,6 +38,29 @@ def _gzip_zeros(size: int) -> bytes:
     step = 8 * MIB
     parts = [compressor.compress(bytes(min(step, size - s))) for s in range(0, size, step)]
     return b"".join(parts) + compressor.flush()
+
+
+@pytest.mark.parametrize(
+    ("encoding", "truncated"),
+    [
+        ("gzip", gzip.compress(b"complete visible payload")[:-8]),
+        ("deflate", zlib.compress(b"complete visible payload")[:-2]),
+        ("br", brotli.compress(b"complete visible payload")[:-1]),
+    ],
+)
+async def test_truncated_compressed_stream_is_not_accepted_as_full(
+    make_fetcher, network, encoding: str, truncated: bytes
+) -> None:
+    """CR-2: decoder output без підтвердженого EOF — corruption, не success/full."""
+    network.routes[(PUBLIC_IP, 80)] = static(
+        200, truncated, {"Content-Encoding": encoding, "Content-Type": "text/plain"}
+    )
+
+    result = await make_fetcher(_resolver()).fetch(FetchRequest(URL))
+
+    assert result.decision.error_code == "content_decoding_error"
+    assert result.decision.quarantine
+    assert result.body is None
 
 
 def _chunked_encoding(pieces: Iterator[bytes]) -> Iterator[bytes]:

@@ -286,3 +286,15 @@ Success: no issues found in 87 source files
 
 `uv run pre-commit run --all-files`: усі hooks `Passed` (end-of-file, trailing whitespace, yaml,
 toml, large files, merge conflict, private key, ruff check, ruff format, gitleaks, markdownlint).
+
+## Fixes after gate 3
+
+Джерело: `docs/plan/reports/WP-02/code-review-pr1.md`.
+
+| Знахідка | Виправлення | Доказ |
+|---|---|---|
+| CR-1 high — manifest total-timeout міг пережити 90-секундний permit lease | Перед connect порівнюється весь залишок logical fetch із `lease_expires_at` + 1 с margin. Замалий lease → retryable `permit_lease_too_short`, без TCP. Для sitemap override runtime задає відповідно довший `lease_seconds` | `test_timeout_override_must_fit_inside_permit_lease`; існуючий `test_sitemap_total_timeout_override_from_manifest` тепер явно видає lease 310 с для override 300 с |
+| CR-2 medium — truncated compressed stream приймався як success | `Decoder.finish()` вимагає zlib/gzip/deflate EOF і brotli `is_finished`; checksum/footer truncation → `content_decoding_error`, quarantine | `test_truncated_compressed_stream_is_not_accepted_as_full[gzip,deflate,br]` |
+
+Після виправлень: 392 unit/security tests і 9 PostgreSQL integration tests passed; mypy strict,
+ruff/format і всі pre-commit hooks зелені. Попередні gate-2 тести не змінювались.

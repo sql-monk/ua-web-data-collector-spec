@@ -190,13 +190,14 @@ class FakePermits:
     released: list[Permit] = field(default_factory=list)
     blocks: list[tuple[str, datetime, str]] = field(default_factory=list)
     live: dict[uuid.UUID, Permit] = field(default_factory=dict)
+    lease_seconds: int = 90
 
     async def acquire(self, origin: str, job_id: uuid.UUID | None) -> Permit | Denied:
         if self.known is not None and origin not in self.known:
             return Denied("unknown_origin")
         if origin in self.deny:
             return self.deny[origin]
-        permit = Permit(uuid.uuid4(), origin, T0 + timedelta(seconds=90))
+        permit = Permit(uuid.uuid4(), origin, T0 + timedelta(seconds=self.lease_seconds))
         self.acquired.append(origin)
         self.live[permit.permit_id] = permit
         return permit

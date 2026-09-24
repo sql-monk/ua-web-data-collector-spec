@@ -155,6 +155,20 @@ async def test_permit_is_taken_before_connect_and_released_after(
     assert len(permits.released) == 1 and permits.live == {}
 
 
+async def test_timeout_override_must_fit_inside_permit_lease(
+    make_fetcher, network, permits
+) -> None:
+    """CR-1: sitemap override не може пережити leased global concurrency slot."""
+    network.routes[(PUBLIC_IP, 80)] = static(200, b"must-not-connect")
+
+    result = await make_fetcher(_resolver()).fetch(FetchRequest(URL, total_timeout=120.0))
+
+    assert result.decision.error_code == "permit_lease_too_short"
+    assert result.decision.outcome is FetchOutcome.RETRYABLE
+    assert network.connects == [] and network.requests == []
+    assert len(permits.released) == 1 and permits.live == {}
+
+
 async def test_exception_during_body_releases_permit(make_fetcher, network, permits) -> None:
     def broken():
         yield b"partial"
