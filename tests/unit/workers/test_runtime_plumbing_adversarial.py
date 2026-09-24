@@ -578,3 +578,49 @@ async def test_lease_lost_mid_pass_stops_the_remaining_domain_ticks() -> None:
     assert maintenance == ["run"]
     assert order == [], "без lease доменний тік не виконується"
     assert not scheduler.is_active and scheduler.lease_losses == 1
+
+
+async def test_cancelled_lease_check_keeps_connection_lock_until_query_finishes() -> None:
+    """`shield` не має відпускати lock, доки detached запит ще використовує connection."""
+
+    class SlowLease:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.active = 0
+            self.max_active = 0
+            self.first_started = asyncio.Event()
+            self.finish_first = asyncio.Event()
+
+        async def is_held(self) -> bool:
+            self.calls += 1
+            call = self.calls
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                if call == 1:
+                    self.first_started.set()
+                    await self.finish_first.wait()
+                return True
+            finally:
+                self.active -= 1
+
+    scheduler = make_scheduler(maintenance=[])
+    lease = SlowLease()
+    scheduler.lease = cast("Any", lease)
+
+    first = asyncio.create_task(scheduler._lease_held())  # noqa: SLF001
+    await lease.first_started.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    second = asyncio.create_task(scheduler._lease_held())  # noqa: SLF001
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert lease.calls == 1
+    assert not second.done()
+
+    lease.finish_first.set()
+    assert await second is True
+    assert lease.calls == 2
+    assert lease.max_active == 1

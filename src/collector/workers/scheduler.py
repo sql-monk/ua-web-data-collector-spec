@@ -274,7 +274,11 @@ class SchedulerRuntime:
             self._active = False
             self.activated.clear()
             self.liveness.remove()
-            await self.lease.release()
+            # A timed-out domain tick may have been cancelled while its shielded server-side
+            # ownership check is still finishing.  Reuse the same lock so `release()` never
+            # races that query on AdvisoryLease's single retained connection.
+            async with self._lease_check:
+                await self.lease.release()
             signals.restore()
             self._log.info("scheduler.stopped", ticks=self.ticks, activations=self.activations)
 
@@ -302,9 +306,39 @@ class SchedulerRuntime:
         return True
 
     async def _lease_held(self) -> bool:
-        """Серверна перевірка lease під lock-ом; `shield` — timeout тіку не рве запит навпіл."""
-        async with self._lease_check:
-            return await asyncio.shield(self.lease.is_held())
+        """Серверна перевірка lease без паралельних запитів на retained connection.
+
+        `shield` не скасовує серверний запит разом із timeout доменного тіку. Тому lock має
+        лишатися зайнятим і після скасування caller-а — аж поки внутрішня task справді не
+        завершиться. Інакше наступна перевірка або `release()` отримали б asyncpg
+        ``another operation is in progress`` на тому самому з'єднанні.
+        """
+        await self._lease_check.acquire()
+        check = asyncio.create_task(self.lease.is_held(), name="scheduler-lease-check")
+        release_in_callback = False
+        try:
+            return await asyncio.shield(check)
+        except asyncio.CancelledError:
+            release_in_callback = True
+            check.add_done_callback(self._finish_cancelled_lease_check)
+            raise
+        finally:
+            if not release_in_callback:
+                self._lease_check.release()
+
+    def _finish_cancelled_lease_check(self, check: asyncio.Task[bool]) -> None:
+        """Забрати результат detached check і передати lock наступному користувачу."""
+        try:
+            check.result()
+        except (Exception, asyncio.CancelledError) as exc:
+            # Caller уже отримав cancellation; результат тут потрібен лише щоб task exception
+            # не лишився необробленим. Наступний цикл виконає свіжу ownership-перевірку.
+            self._log.debug(
+                "scheduler.cancelled_lease_check_finished",
+                error=redact(f"{type(exc).__name__}: {exc}")[:300],
+            )
+        finally:
+            self._lease_check.release()
 
     async def _still_active(self) -> bool:
         if await self._lease_held():
