@@ -3,7 +3,7 @@
 | Поле | Значення |
 |---|---|
 | Owner | wp-implementer (єдиний owner worker runtime і orchestration adapters) |
-| Branch | `wp/01d-1-worker-runtime`, `wp/01d-2-limiter-runtime`, `wp/01d-3-drain-adapters` |
+| Branch | `wp/01d-1-worker-runtime`, `wp/01d-1b-runtime-role-dsn`, `wp/01d-1c-handler-plumbing` (передумова хвилі 1, 2026-09-24), `wp/01d-2-limiter-runtime`, `wp/01d-3-drain-adapters` |
 | Worktree | `.worktrees/wp-01d` |
 | Залежить від | WP-00 (усі три PR) `merged`, WP-01A PR1 `merged` |
 | Розблоковує | WP-02, WP-03, WP-04 (runtime workers), WP-11C (екран Workers), WP-12 |
@@ -71,6 +71,154 @@ Unit compose (п.1, п.4); unit/integration: runtime під superuser DSN або
 ### Acceptance
 
 Після `init-secrets.sh` + `docker compose --profile core --profile workers up -d --wait` усі runtime-процеси підключені не-superuser ролями (`SELECT usename, usesuper FROM pg_stat_activity JOIN pg_user ...` у звіті); тест-вартовий прибрано, позитивний тест §13 зелений.
+
+---
+
+## PR1c — `wp/01d-1c-handler-plumbing`: runtime-передумови для доменних handler-ів хвилі 1
+
+Передумова хвилі 1 (рішення оркестратора, 2026-09-24): збирає dependency-запити чернеток
+WP-01B (§«Як projector-worker підключається до runtime WP-01D» п.2 (а)–(г)), WP-02 (запит до
+WP-01D п.1–3) і WP-04 (запит до WP-01D п.3а–3б). Worktree `.worktrees/wp-01d-1c`. Стартує
+одразу (U-3); **merge — після WP-01A PR3a** (новий `not_before` у `queue.retry`,
+`queue.release(..., not_before=)` і їхні аналоги для `projection_tasks`, fencing у
+`acknowledge_projection` — див. `WP-01A.md` PR3a п.1, п.7).
+
+**Розблоковує:** WP-02 PR2 (п.1–4), WP-04 PR2 (п.1, п.3, п.4), WP-01B PR3 (п.3–6).
+
+### Факти з коду (перевірено 2026-09-24)
+
+- `TaskResult` (`src/collector/workers/handlers.py`) має лише `disposition ∈ {complete, retry,
+  quarantine}`, `error_code`, `error_message`; немає `not_before`, немає `defer`, немає
+  результату для report-транзакції.
+- `WorkerRuntime._report` (`runtime.py`) викликає `queue_repo.retry(...)` **без** `policy` →
+  дефолт `BackoffPolicy()` = 30 с × 2 до 6 год + jitter 20 % (`repositories/queue.py`); таблиця
+  §10 (5 с / 30 с / 2 хв / 10 хв) не експоненційна і цим типом не виражається.
+- `WorkerRuntime._claim` і `_report` жорстко працюють із `crawl_jobs` через `queue_repo`;
+  `Task` — знімок `CrawlJob` (`_task_from_job`).
+- `HandlerFactory = Callable[[WorkerRole], TaskHandler]`; `HANDLER_FACTORIES` наповнюється «при
+  імпорті модуля ролі», але жоден код не імпортує доменних модулів — `resolve_handler` завжди
+  повертає `NoopHandler`. Handler не отримує ні `async_sessionmaker`, ні `worker_instance_id`.
+- `SchedulerRuntime` бере один `tick` (дефолт `make_maintenance_tick`: `recover_expired_leases`,
+  `mark_stale_instances`); `recover_expired_projection_leases` ніхто не викликає; тік має
+  сигнатуру `(session, now)`, тобто працює всередині однієї транзакції.
+
+### Owned files
+
+`src/collector/workers/{handlers,runtime,scheduler,config}.py`, нові
+`src/collector/workers/{registry,backends}.py`, `tests/unit/workers/**` (нові й зачеплені),
+`tests/integration/scaling/**`, `docs/plan/reports/WP-01D/*-pr1c.md`; етап 5 — `docs/workers.md`
+§5–§6.
+
+Forbidden: `src/collector/persistence/**` (потрібні зміни — WP-01A PR3a), доменні модулі
+(`collector.fetch`, `collector.translation`, `collector/workers/{projector,reconciler,compactor,
+publisher}.py`), `docker-compose.yml` (нові секрети/env воркерів — WP-00 PR5 за винятком
+оркестратора), `src/collector/contracts/**`.
+
+### Вимоги
+
+1. **`not_before` і `defer` без спалювання спроби (WP-02 п.1–2, WP-04 п.3а).**
+   `TaskResult.retryable(error_code, error_message=None, *, not_before=None)` — нижня межа для
+   наступної спроби (наприклад, з `Retry-After`); нова disposition `defer`:
+   `TaskResult.deferred(until, error_code)` → runtime повертає job через
+   `queue.release(..., not_before=until)` (WP-01A PR3a): `attempt` не змінюється (компенсація
+   інкременту claim, як у плановому drain), поля помилки не пишуться, dead letter не
+   створюється. `until` у минулому → `now`; `until` далі за конфігурований максимум
+   (`COLLECTOR_WORKER_MAX_DEFER_SECONDS`, default 24 год) → clamp з warning. Лог
+   `worker.task_deferred` з `error_code`, без тексту задачі.
+2. **Retry policy за таблицею §10, яку передає handler.** `TaskHandler.retry_schedule` (property,
+   default `None` → поточний `BackoffPolicy()` без зміни поведінки для наявних ролей) повертає
+   `RetrySchedule(delays: tuple[timedelta, ...], jitter_ratio)` — затримка для спроби `n` =
+   `delays[min(n, len) - 1]` + jitter, обмежений зверху; runtime обчислює
+   `not_before = max(now + schedule.delay(attempt), result.not_before or now)` і викликає
+   `queue.retry(..., not_before=...)`. `max_attempts` лишається властивістю job-и (ставить
+   планувальник домену при enqueue, для fetch — 4, §10); runtime його не перевизначає.
+3. **Реєстр доменних handler-ів з lazy import за `WorkerRole`** — `collector/workers/registry.py`:
+   статична мапа роль → dotted-path модуля, що при імпорті реєструє фабрику:
+   `FETCH → collector.fetch.handler`, `BROWSER → collector.fetch.browser`,
+   `TRANSLATION → collector.translation.handler`, `PROJECTOR → collector.workers.projector`
+   (+ `collector.workers.reconciler`, `collector.workers.compactor` — див. п.5). Нові записи
+   (WP-03 discovery, WP-05 parse, WP-11A export) — dependency-запитом до WP-01D.
+   `resolve_handler` імпортує модуль ролі: `ModuleNotFoundError` **саме цього** модуля (модуля
+   ще немає в `main`) → `NoopHandler` + warning `worker.handler_module_missing`; будь-який інший
+   `ImportError`/виняток під час імпорту або модуль імпортувався, але фабрику не зареєстрував →
+   boot падає ненульовим кодом (без мовчазного Noop). `COLLECTOR_WORKER_PLACEHOLDER=1` як і
+   раніше обходить імпорт.
+4. **Передача контексту у фабрику (WP-02 п.3).** `HandlerFactory = Callable[[HandlerContext],
+   TaskHandler]`, `HandlerContext(role, sessions: async_sessionmaker[AsyncSession],
+   worker_instance_id, clock, env)`; handler не відкриває другого пулу під тим самим DSN і
+   використовує `worker_instance_id` як `owner` upload claims/permits. Сумісність: фабрики
+   старої форми в `tests/**` мігрують у цьому PR; `NoopHandler` не змінюється.
+5. **Queue backend для `projection_tasks` (WP-01B п.(а)–(б)).** `collector/workers/backends.py`:
+   Protocol `QueueBackend` (`claim`, `heartbeat`, `complete`, `retry`, `defer`, `quarantine`,
+   `release`, `recover_expired`) і дві реалізації — `CrawlJobsBackend` (поточна поведінка через
+   `repositories/queue.py`) і `ProjectionTasksBackend` (через `repositories/projection.py`:
+   `claim_projection_tasks`/`heartbeat_projection_task`/`retry_projection_task`/
+   `release_projection_task`/`quarantine_projection_task`/`recover_expired_projection_leases`).
+   Роль може мати **кілька прив'язок** `HandlerBinding(backend, handler)`: для `projector` —
+   `ProjectionTasksBackend` + `ProjectorHandler` і `CrawlJobsBackend` + handler-и
+   reconcile/compact (`job_types` `projection.reconcile`, `projection.compact`; рішення
+   оркестратора WP-01B п.1 — reconciler і compactor працюють під `collector_projector`, а
+   scheduler лише ставить task у чергу). Слоти `desired_concurrency` спільні для всіх
+   прив'язок ролі; claim по прив'язках — round-robin, щоб одна черга не голодувала іншу.
+   **Ack у report-транзакції:** `TaskResult.success(output=...)`; для `ProjectionTasksBackend`
+   `complete` = `acknowledge_projection(session, task_id, receipt, owner=self.owner)` у тій
+   самій транзакції, що й звіт (task → `succeeded` робить сам ack; `output` не
+   `AppliedProjectionReceipt` → `quarantine` з `error_code="invalid_handler_output"`).
+   `LeaseNotOwnedError`/`ConflictError` від ack обробляються як у `_report` сьогодні
+   (lease_lost / report_failed) — без повторної серіалізації event bytes.
+   `Task` для projection: `job_id = task_id`, `job_type = target_collection`, `args` — поля
+   `ProjectionCommand` (entity, version, artifact ref), `source_id = None`.
+6. **Реєстр тіків scheduler-а (WP-01B п.(г)).** `SchedulerRuntime` виконує композицію тіків:
+   вбудований maintenance (`recover_expired_leases`, `mark_stale_instances`) **плюс**
+   `recover_expired_projection_leases` (роль `collector_scheduler` має column UPDATE на
+   `projection_tasks`, `roles.sql`), і доменні тіки з мапи lazy import (як п.3): WP-01B
+   `collector.workers.reconciler:schedule` / `collector.workers.compactor:schedule` (лише
+   `queue.enqueue` задач `projection.reconcile`/`projection.compact` з ідемпотентним ключем
+   від вікна часу), `collector.workers.publisher:tick` (N-2, вимкнений за замовчуванням). Нова
+   сигнатура доменного тіку — `async def tick(ctx: TickContext)` з `sessions`, `now`,
+   `lease_is_ours()` (publisher робить коротку транзакцію → доставку поза транзакцією →
+   коротку транзакцію, тож одна транзакція на тік не підходить). Кожен тік має власний інтервал,
+   власну транзакцію(ї) і ізольований від інших: виняток одного тіку логується
+   (`scheduler.tick_failed`, `tick=<name>`) і не зупиняє решту та lease. Контракт
+   ідемпотентності тіку (`docs/workers.md` §6) поширюється на доменні тіки.
+
+### Тести
+
+- Unit `TaskResult`: `deferred` без `error_code` → `ValueError`; `not_before` лише для `retry`;
+  `output` лише для `complete`.
+- Integration (PostgreSQL 18, LOGIN-ролі як у PR1b): handler повертає `deferred(now+10 хв)` →
+  job `pending`, `attempt` той самий, `last_error_*` не змінені, `not_before` = until; п'ять
+  `deferred` поспіль на job з `max_attempts=4` → **жодного** dead letter; `retryable(not_before=
+  now+2 год)` при `retry_schedule` 5 с → `not_before ≥ now+2 год`; `retry_schedule`
+  (5 с/30 с/2 хв/10 хв, jitter 0) → чотири послідовні retry дають рівно ці затримки, 4-та
+  невдача з `max_attempts=4` → `quarantined` + dead letter; без `retry_schedule` — поточний
+  `BackoffPolicy` (регресія).
+- Реєстр: модуль ролі відсутній → `NoopHandler` + warning; модуль кидає `ImportError`
+  всередині → boot exit ≠ 0; модуль імпортується, але не реєструє фабрику → boot exit ≠ 0;
+  фабрика отримує `HandlerContext` з тим самим `sessions`, що runtime (ідентичність об'єкта), і
+  `worker_instance_id` зареєстрованого instance.
+- Projection backend (PostgreSQL, роль `collector_projector`): fake `ProjectorHandler` повертає
+  receipt → ack, task `succeeded`, `projection_acknowledgements` 1 рядок — в **одній**
+  транзакції (fault-seam між ack і commit → жодного часткового запису); lease забрали до report
+  → ack не виконано (`lease_lost`), повторний claim іншим instance → ack рівно один; retry /
+  defer / quarantine / drain-release для projection task працюють як для `crawl_jobs`;
+  дві прив'язки (`projection_tasks` + `crawl_jobs` `projection.reconcile`) з
+  `desired_concurrency=1` → обидві черги обслуговуються (жодна не голодує 10 циклів поспіль).
+- Scheduler: `recover_expired_projection_leases` у дефолтному тіку повертає прострочений task у
+  чергу; доменний тік, що кидає, не зупиняє maintenance-тік і не відпускає lease; два
+  scheduler-и з однаковими доменними тіками (перекриття, вартовий
+  `test_maintenance_tick_is_safe_when_two_schedulers_overlap`) → жодного дубля enqueue.
+- Регресія: весь `tests/integration/scaling/**` і `tests/unit/workers/**` зелені; відомий флак
+  `test_self_fencing_fires_when_the_database_hangs_without_raising` — не внесений цим PR
+  (доказ — прогін на `main`).
+
+### Acceptance PR1c
+
+Команди перевірки зелені локально і в CI (Linux); `NoopHandler`-ролі поводяться як до PR1c
+(регресія scaling); `docs/workers.md` §5–§6 описують `HandlerContext`, `defer`, `retry_schedule`,
+кілька прив'язок ролі й доменні тіки; тестер довів мутаціями: `defer` через `queue.retry` →
+тест червоний; ack поза report-транзакцією → тест червоний; мовчазний `NoopHandler` при
+`ImportError` → тест червоний.
 
 ---
 

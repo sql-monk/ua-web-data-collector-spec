@@ -3,7 +3,7 @@
 | Поле | Значення |
 |---|---|
 | Owner | wp-implementer (єдиний owner shared contracts до кінця проєкту — наступні зміни лише через dependency-запити) |
-| Branch | `wp/01c-contracts` (від `wp/00-1-python-ci` після merge PR1 у `main` — rebase на `main`) |
+| Branch | `wp/01c-contracts` (PR1, merged 1f2fbc8); `wp/01c-2-payload-news-contracts` (PR2 — передумова хвилі 1, рішення оркестратора 2026-09-24) |
 | Worktree | `.worktrees/wp-01c` |
 | Залежить від | WP-00 PR1 `merged` |
 | Розблоковує | WP-01A, WP-01B, WP-01D, WP-02, WP-04 |
@@ -112,3 +112,87 @@ uv run collector contracts export --check
 ## Docs (етап 5)
 
 `docs/contracts.md` (перевірити повноту), docstrings усіх публічних моделей, `schemas/README.md`, ADR-0003 «Canonical event serialization» (формат bytes, чому sorted-keys JSON, ліміт 256 KiB).
+
+---
+
+## PR2 — `wp/01c-2-payload-news-contracts`: normalized payload, version/observation records, news/translation (передумова хвилі 1)
+
+Рішення оркестратора, 2026-09-24: збирає dependency-запити чернеток WP-01B (`WP-01B-to-WP-01C`:
+normalized projection payload, `EntityProjectionVersion`, observations) і WP-04 (`WP-04-to-WP-01C`
+п.1: `NewsTranslation`, `TranslationStatus`, `TranslationQualityFlag`; payload
+`news.version_created`). Той самий owner і процес, що в PR1 (ADR-0004: shared contracts — лише
+WP-01C). Worktree `.worktrees/wp-01c-2`, branch від свіжого `main`. Стартує одразу (U-3).
+
+**Розблоковує:** WP-01B PR2 (і validators version/observation collections — перша міграція PR2
+WP-01B), WP-01A PR3b (поля `news_*`/`news_translations`), WP-04 PR2.
+
+### Факти з коду (перевірено 2026-09-24)
+
+У `src/collector/contracts/**` є `CurrentDocumentBase`, `ProjectionCommand`,
+`AppliedProjectionReceipt`, `ProjectionAcknowledgement`, `DomainChangedEvent`,
+`NormalizedArtifactRef`, `ObservationReason` (`changed`/`heartbeat`), `EntityKind`,
+`translation_idempotency_key`; snapshots — `schemas/mongo/{applied_projection_receipt,
+current_document_base}.v1.json`, `schemas/events/{domain_changed_event,encoded_event,
+projection_acknowledgement,projection_command}.v1.json`. Немає: моделі вмісту normalized artifact,
+version record, observation, news/translation моделей і enum статусу перекладу.
+
+### Owned files
+
+Як у PR1: `src/collector/contracts/**`, `schemas/{events,mongo}/**` (нові snapshots),
+`tests/contract/contracts/**`, `tests/unit/contracts/**`, `tests/fixtures/contracts/**`,
+`docs/contracts.md`, `docs/plan/reports/WP-01C/*-pr2.md`.
+
+### Вимоги
+
+1. **Normalized projection payload (input projector-а WP-01B):** `NormalizedProjectionPayload`
+   (`schema_version`, `entity_kind`, `entity_uuid`, `source: SourceIdentity`, `identity_hash`,
+   `core`, `attributes`, `latest_state`, `time: SourceTime + SystemTime`, опційні
+   observation-поля — ціна `Money`, наявність, `observed_at`) — те, що лежить у bytes
+   normalized artifact; validator: `entity_uuid` збігається з `NormalizedArtifactRef.entity_uuid`
+   (перевірка — функція, бо ref живе окремо); `core`/`attributes` — bounded mapping (без
+   unbounded arrays, §9.2), доменна типізація — WP-07/WP-09 через dependency (minor-розширення).
+   Snapshot `schemas/mongo/normalized_projection_payload.v1.json` (або `schemas/events/`, якщо
+   WP-01C вважає його подієвим, — обрати й задокументувати).
+2. **`EntityProjectionVersion` (§9.2):** `entity_uuid`, `projection_version`, `projection_task_id`,
+   `target_collection`, `state_hash`, `state_changed`, `previous_version`/`previous_state_hash`,
+   bounded snapshot **або** `NormalizedArtifactRef`, lineage, `applied_to_current`,
+   `recorded_at`. Snapshot `schemas/mongo/entity_projection_version.v1.json`.
+3. **Observations (§9.2, §9.3 п.5):** `ObservationRecord` (offer/listing: `entity_uuid`,
+   `projection_task_id`, `projection_version`, `reason: ObservationReason`, `observed_at`,
+   `state_hash`, bounded observed values) і мінімальні `SellerContactObservation`,
+   `ReviewQuestionRecord` лише з обов'язковими полями таблиці §9.2 (ідентичність,
+   `content_version`, `projection_task_id`, час) — доменні поля додають WP-07/WP-09 minor-версією.
+   Snapshots у `schemas/mongo/`.
+4. **News/translation (§5.4, §9.1, R-04, R-20):** `TranslationStatus` (`pending`, `translated`,
+   `not_required`, `translation_failed` — закритий `StrEnum`, єдиний у проєкті, §5.5),
+   `TranslationQualityFlag` (мінімум `preservation_failed`, `low_language_confidence`,
+   `provider_truncated`; розширюється minor), `NewsTranslation` (`article_version_id`,
+   `target_language`, `provider`, `model_version`, `glossary_version`, `source_content_hash`,
+   `status`, `title`/`lead` переклад, `body_*` **nullable** або artifact ref, `quality_flags`,
+   `character_count`, `cost_minor`+валюта, `translation_idempotency_key`, `created_at`).
+   Мови поза основними 16 (`ru`, `ca` тощо) — звичайні значення `source_language` (рішення
+   користувача U-2): окремого прапорця «поза golden corpus» не потрібно.
+5. **Подія `news.version_created`:** `NewsVersionCreatedEvent` (`article_version_id`,
+   `article_id`, `source`, `original_language`, `source_locale_raw`, `content_access`,
+   `content_hash`, artifact refs title/lead/cleaned body (body nullable), `backfill: bool`,
+   `occurred_at`) з canonical bytes через `encode_event`. Snapshot
+   `schemas/events/news_version_created.v1.json`.
+6. **TM key — не контракт (рішення оркестратора WP-04 O-2):** функція ключа живе в
+   `collector.translation.memory` (owner WP-04), колонка WP-01A зберігає готовий hex; схема в
+   WP-01C не додається, доки ключ не знадобиться обчислювати WP-11A/WP-12 (тоді — перенос у
+   `contracts/identity.py` dependency-запитом).
+
+### Тести
+
+Як у PR1: snapshot drift = fail (`collector contracts export --check`); compatibility fixtures
+v1.0 для кожної нової моделі в `tests/fixtures/contracts/documents/`; `NewsTranslation` з
+`body=None` валідний, з naive datetime — ні; `TranslationStatus` має рівно чотири значення
+(golden); `NormalizedProjectionPayload` з `entity_uuid`, що не збігається з ref, — відхиляється
+функцією перевірки; `encode_event(NewsVersionCreatedEvent)` byte-equivalent після round-trip;
+тест «жодного I/O у contracts» покриває нові модулі.
+
+### Acceptance PR2
+
+Команди перевірки PR1 зелені; нові snapshots у `schemas/**`; `docs/contracts.md` описує нові
+моделі та правило розширення observation/review моделей доменними WP; dependency-запити
+WP-01B→WP-01C і WP-04→WP-01C п.1 закриті цим PR.

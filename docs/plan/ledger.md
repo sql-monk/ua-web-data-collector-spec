@@ -14,17 +14,19 @@
 | WP-00 | PR2 docker/compose | `wp/00-2-docker-compose` | merged 643d41b (PR #2) | усі gates + CI green incl. docker job | ADR-0002; runbooks; 586 tests |
 | WP-00 | PR3 web scaffold | `wp/00-3-web-scaffold` | merged 715d54e (PR #4) | CI green: 6/6 jobs incl. web + e2e проти стека | acceptance WP-00 закрито |
 | WP-00 | PR4 role DSN secrets | `wp/00-4-role-dsn-secrets` | merged ae63917 (PR #7) | CI green 6/6; testing pass, code review approve (3'), security approve, spec review accept | половина блокера pilot §13 (deps `WP-01A-to-WP-00.md` §4, §6); друга половина — WP-01D PR1b; L-2: REVOKE лише при першому initdb (ручний крок у runbook) |
+| WP-00 | PR5 object store secrets | `wp/00-5-object-store-secrets` | ready — наступна партія | — | передумова хвилі 1: MinIO per-role, Mongo per-component URI, секрет перекладу |
 | WP-01C | — | `wp/01c-contracts` | merged 1f2fbc8 (PR #1) | docs done; ADR-0003/0004; CI green | worktree `.worktrees/wp-01c`; картка `docs/plan/cards/WP-01C.md` |
+| WP-01C | PR2 payload/news contracts | `wp/01c-2-payload-news-contracts` | in_progress | — | передумова хвилі 1: WP-01B PR2, WP-01A PR3b, WP-04 PR2 |
 
 ## Хвиля 1
 
 | WP | Стан | Примітка |
 |---|---|---|
-| WP-01A | PR1 merged 758c68c (PR #3); PR2 merged 43ee69f (PR #6); PR3 pending | CI green (PR1: python, integration PostgreSQL 18, docker); ADR-0005, ADR-0007, `docs/persistence/postgres.md`; PR2 (`bad6a25`+fixes) — spec-review gate 4 `changes_requested` закрито (SR-1 gitleaks, SR-2 lineage, SR-5, N-1..N-5 fixed; D-1/D-2 задокументовані ADR-0007 + ТЗ §9.1); CI PR2 green 6/6 на `d83b627` |
-| WP-01B | card draft (`docs/plan/cards/WP-01B.md`) — чекає рішень оркестратора/користувача і dependency-передумов | 2026-09-24 |
-| WP-01D | PR1 merged f87df17 (PR #5); PR1b merged de517cf (PR #8) — runtime на per-component LOGIN-ролях, **блокер pilot §13 (I-1) закрито** разом з WP-00 PR4; залишок S-1: export-worker під `collector_scheduler` до першого export handler (WP-11A) або pilot; PR2 pending | CI green 6/6; ADR-0006, `docs/workers.md`, runbook worker-recovery; флак ризик — `tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising` нестабільний під паралельним навантаженням (відтворено на WP-01A PR2 verification, не внесений PR2 — `docs/plan/reports/WP-01A/implementation-pr2.md`) |
-| WP-02 | card draft (`docs/plan/cards/WP-02.md`) — чекає рішень оркестратора/користувача і dependency-передумов | 2026-09-24 |
-| WP-04 | card draft (`docs/plan/cards/WP-04.md`) — чекає рішень оркестратора/користувача і dependency-передумов | 2026-09-24 |
+| WP-01A | PR1 merged 758c68c (PR #3); PR2 merged 43ee69f (PR #6); PR3 розбито на PR3a–PR3d: PR3a in_progress (передумова хвилі 1), PR3b/3c після PR3a, PR3d поза хвилею 1 | CI green (PR1: python, integration PostgreSQL 18, docker); ADR-0005, ADR-0007, `docs/persistence/postgres.md`; PR2 (`bad6a25`+fixes) — spec-review gate 4 `changes_requested` закрито (SR-1 gitleaks, SR-2 lineage, SR-5, N-1..N-5 fixed; D-1/D-2 задокументовані ADR-0007 + ТЗ §9.1); CI PR2 green 6/6 на `d83b627` |
+| WP-01B | card ready 2026-09-24; PR1 `wp/01b-1-mongo-schema` — наступна партія; PR2 ← WP-01C PR2; PR3 ← WP-01D PR1c + WP-01A PR3a + WP-02 PR2 + WP-00 PR5; PR4 ← WP-01A PR3c | reconciler/compactor під `collector_projector`; publisher вимкнений до споживача; відкрито: receipt після restore (до PR3) |
+| WP-01D | PR1 merged f87df17 (PR #5); PR1c `wp/01d-1c-handler-plumbing` in_progress (передумова хвилі 1, злиття після WP-01A PR3a); PR1b merged de517cf (PR #8) — runtime на per-component LOGIN-ролях, **блокер pilot §13 (I-1) закрито** разом з WP-00 PR4; залишок S-1: export-worker під `collector_scheduler` до першого export handler (WP-11A) або pilot; PR2 pending | CI green 6/6; ADR-0006, `docs/workers.md`, runbook worker-recovery; флак ризик — `tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising` нестабільний під паралельним навантаженням (відтворено на WP-01A PR2 verification, не внесений PR2 — `docs/plan/reports/WP-01A/implementation-pr2.md`) |
+| WP-02 | card ready 2026-09-24; PR1 `wp/02-1-http-ssrf-limits` in_progress; PR2 ← PR1 + WP-01A PR3a + WP-01D PR1c + WP-00 PR5; PR3 ← PR2 | HTTPX (ADR-0008, рішення користувача); S3-клієнт `src/collector/storage/**` owner WP-02; D-2 умова 3 (`parser_version`) → WP-05 |
+| WP-04 | card ready 2026-09-24; PR1 `wp/04-1-segmenter-tm` in_progress; PR2 ← PR1 + WP-01C PR2 + WP-01A PR3a/3b + WP-01D PR1c + WP-00 PR5 + WP-02 PR2; PR3 ← PR2 | мови поза 16 перекладаються (рішення користувача); batch GCS — out of scope v1 |
 
 ## Хвиля 2
 
