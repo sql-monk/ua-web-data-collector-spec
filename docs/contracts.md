@@ -29,16 +29,19 @@
 
 | Модуль | Контракти | ТЗ |
 |---|---|---|
-| `_base` | `ContractModel` (frozen, `extra="forbid"`, base64 bytes), `VersionedDocument` (поле `schema_version`), `SchemaVersion`, `JsonObject` | §9.4 |
+| `_base` | `ContractModel` (frozen, `extra="forbid"`, base64 bytes), `VersionedDocument` (поле `schema_version`), `SchemaVersion`, `JsonObject`, `BoundedJsonObject` (PR2) | §9.2, §9.4 |
 | `canonical` | `canonical_json_bytes`, `canonical_sha256`, `format_utc_datetime`, `format_decimal` | §7.3, R-37/R-42 |
-| `enums` | `SourceState`, `RouteState`, `EntityLifecycle`, `ContentAccess`, `FetchOutcome` (+ `map_research_access_state`), `TimePrecision`, `EffectiveAtBasis`, `DataDomain`, `EntityKind`, `ContactKind`, `UploadClaimStatus`, `ObservationReason`, `ResolutionAction`, `ReleaseState` | §5.5, §9.2, §9.6, §9.8, §9.9 |
+| `enums` | `SourceState`, `RouteState`, `EntityLifecycle`, `ContentAccess`, `FetchOutcome` (+ `map_research_access_state`), `TimePrecision`, `EffectiveAtBasis`, `DataDomain`, `EntityKind`, `ContactKind`, `UploadClaimStatus`, `ObservationReason`, `ResolutionAction`, `ReleaseState`, `ReviewQuestionKind`, `TranslationStatus`, `TranslationQualityFlag` (PR2) | §5.4, §5.5, §9.2, §9.6, §9.8, §9.9 |
 | `identity` | `EntityId` (UUIDv7) + `new_entity_id`/`Uuid7Generator`, `SourceIdentity`, `NormalizedUrl`, `identity_hash_v1`, `fetch_idempotency_key`, `planned_at_bucket`, `translation_idempotency_key`, `raw_object_key` | §5.1, §9.3 |
 | `source_registry` | read-only loader `docs/research/source-registry.yaml` (`load_source_registry`, `known_source_ids`) | §9.3 п.1 |
 | `temporal` | `UtcDatetime`, `SourceTime`, `SystemTime`, `EntityTime`, `EffectiveTime` + `derive_effective_time`, `BitemporalInterval`, `VersionTimes`/`VersionInterval` + `build_intervals` | §5.1, §9.6, R-43/R-49 |
 | `values` | `Money`, `ContactValue` (+ `normalize_phone`/`normalize_email`/`normalize_contact`), `MeasuredValue` | §5.1, §9.3 п.8, §12.2 |
 | `artifacts` | `ArtifactRef`, `RawArtifactRef`, `NormalizedArtifactRef`, `UploadClaim` + `can_commit` | §7.3, §9.1, §10 п.5/7 |
 | `projection` | `ProjectionCommand`, `AppliedProjectionReceipt`, `ProjectionAcknowledgement`, `should_emit_domain_changed` | §7.3 кроки 2–4, §9.1, §9.2 |
-| `events` | `DomainChangedEvent`, `EncodedEvent`, `encode_event`/`decode_event`, `EVENT_INLINE_LIMIT_BYTES` | §7.3 п.4, R-30/R-37/R-42 |
+| `events` | `DomainChangedEvent`, `EncodedEvent`, `encode_event`/`decode_event`/`decode_news_version_created`, `PublishableEvent`, `EVENT_INLINE_LIMIT_BYTES` | §7.3 п.4, R-30/R-37/R-42 |
+| `payload` (PR2) | `NormalizedProjectionPayload`, `ObservedValues`, `check_payload_matches_artifact`, `PayloadArtifactMismatchError`, `ENTITY_KIND_DOMAINS` | §7.3, §9.2 |
+| `records` (PR2) | `EntityProjectionVersion`, `VersionSnapshot`, `ObservationRecord`, `SellerContactObservation`, `ReviewQuestionRecord` | §9.2, §9.3 п.5, R-36 |
+| `news` (PR2) | `NewsVersionCreatedEvent`, `NewsTranslation`, `LanguageCode` | §5.4, §9.1, §9.3 п.7, R-04/R-20 |
 | `current` | `CurrentDocumentBase` (`schema_version: int` major за §9.2), `SourceRef`, `Lineage`, `compute_state_hash_v1` | §9.2, §9.4 |
 | `resolution` | `ResolutionDecision`, `ResolutionSnapshot`, `project_groups` | §9.8, R-45 |
 | `release` | `ReleaseManifest`, `ReleasePart`, `ReleaseWatermark`, `EntityVersionRef`, `SourceInclusion`, `ComponentVersions`, `RELEASE_TRANSITIONS`, `can_transition`, `transition_release`, `validate_manifest_update` | §9.9, R-46 |
@@ -177,8 +180,10 @@ research-позначення: `free→full`, `body_unavailable→metadata_only`
 - `bytes` → base64 (standard, з padding); `set`/`frozenset` → відсортований список;
 - Pydantic-моделі → `model_dump(mode="python", by_alias=True)` і далі рекурсивно.
 
-`encode_event(event) -> EncodedEvent(event_id, event_bytes, event_media_type, event_sha256)`:
-media type `application/vnd.ua-collector.domain-changed.v1+json`; якщо bytes > 256 KiB —
+`encode_event(event) -> EncodedEvent(event_id, event_bytes, event_media_type, event_sha256)`
+приймає `DomainChangedEvent` (media type `application/vnd.ua-collector.domain-changed.v1+json`) і
+`NewsVersionCreatedEvent` (`application/vnd.ua-collector.news-version-created.v1+json`, PR2) —
+media type береться з `ClassVar media_type` класу події, формат bytes однаковий; якщо bytes > 256 KiB —
 `EventTooLargeError`, викликач переносить payload в immutable artifact (`payload_artifact`) і
 кодує подію без inline payload. Receipt зберігає готові bytes; reconciler/outbox копіюють їх без
 повторної серіалізації.
@@ -195,6 +200,24 @@ media type `application/vnd.ua-collector.domain-changed.v1+json`; якщо bytes
 **Strict JSON у блоках (CR-01).** `core`, `attributes`, `latest_state` (і `DomainChangedEvent.payload`)
 типізовані як рекурсивний `JsonValue` = `str | int | float(finite) | bool | None | list | dict[str, …]`
 у strict-режимі: `datetime`, `Decimal`, `UUID`, `bytes`, NaN/inf відхиляються **на конструюванні**.
+Масив — лише `list`: `set`/`frozenset`/`tuple` відхиляються (gate 2 WP-01C PR2, M-1), бо порядок
+`set` залежить від `PYTHONHASHSEED` і `state_hash` різнився б між процесами; детерміноване
+сортування відкинуто — воно мовчки змінювало б порядок, який викликач міг вважати значущим.
+`canonical_json_bytes` для рядка з одиночним сурогатом кидає `CanonicalEncodingError`.
+Ключі об'єктів — строго `str` (`JsonKey`): `bytes`-ключ відхиляється, а не приводиться мовчки
+(інакше `{b"a": 1, "a": 2}` схлопувався б у `{"a": 2}` — CR #1 gate 3).
+
+**Тип числа входить у hash (CR #2 gate 3).** `1` і `1.0` (а також `0.0`/`-0.0`) мають різне
+canonical-представлення, тож дають різний `state_hash`. Integral float **не нормалізується**:
+JSON/BSON round-trip зберігає тип числа (hash стабільний на шляху projector-а), а тиха
+нормалізація змінювала б значення, яке parser навмисно записав як float. Правило для
+parser-ів: поле має один тип у всіх шляхах коду (лічильники/гроші — `int`, виміри — `float`
+або `MeasuredValue`); зміна типу поля — зміна state і дає нову версію.
+
+**`frozen` не заморожує вкладені dict (CR #3 gate 3, accepted, owner WP-01C, 2026-09-24).**
+Блоки `core`/`attributes`/`latest_state`/`values` — звичайні `dict`; мутація після валідації
+обходить межі й інваріант `state_hash`. Правило для споживачів: не мутувати валідовані
+моделі; зміна — через `model_copy(update=...)` з повторною валідацією (`model_validate`).
 Час у блоках — лише рядок у canonical-форматі (`…T12:00:00.000000Z`), гроші — `{"amount_minor": int,
 "currency": str}`. Наслідок: `state_hash` рахується над тими самими значеннями, що й після
 JSON/BSON round-trip, і документ, який пройшов validation при записі, читається назад без
@@ -249,7 +272,107 @@ inline bytes ≤ 256 KiB і `event_sha256 == sha256(event_bytes)`. `ProjectionAc
   (inline JSON і `ArtifactRef` — окремі поля, не union, щоб посилання не «схлопувалось» після
   round-trip — CR-05; задати обидва для одного звіту не можна).
 
-## 11. Тести
+## 11. Normalized payload, version/observation records, news/translation (PR2)
+
+### 11.1. `NormalizedProjectionPayload` — вміст normalized artifact
+
+Parser пише payload як `canonical_json_bytes(payload)` у immutable normalized artifact; PostgreSQL
+зберігає лише `NormalizedArtifactRef`. Snapshot — **`schemas/events/normalized_projection_payload.v1.json`**:
+це повідомлення parser → projector (як `projection_command`), а не документ Mongo collection;
+у `schemas/mongo/` лежать лише документи, з яких WP-01B генерує `$jsonSchema` validators.
+
+- `source` — `SourceRef` (identity + `canonical_url`), бо current document §9.2 вимагає
+  `source.canonical_url`; `identity_hash`, `entity_kind`, `entity_uuid`;
+- `core`/`attributes`/`latest_state` — `BoundedJsonObject`: strict JSON (як у PR1) + межі
+  `MAX_JSON_DEPTH=8`, `MAX_JSON_ARRAY_ITEMS=256`, `MAX_JSON_OBJECT_KEYS=512` (§9.2: без unbounded
+  arrays; offers/observations/reviews/contacts — окремі collections), рядок-значення ≤
+  `MAX_JSON_STRING_CHARS=65536` символів, ключ ≤ `MAX_JSON_KEY_CHARS=256`, цілі в межах BSON
+  int64, canonical UTF-8 bytes блоку ≤ `MAX_JSON_BLOCK_BYTES=1 MiB` (три блоки ≤ 3 MiB — запас під
+  16 MiB Mongo; межа більша за inline-ліміт події 256 KiB, бо великий `domain.changed` payload
+  іде через `payload_artifact`). Lone surrogate відхиляється на валідації. Межі перевіряє модель,
+  JSON Schema їх не містить (gate 2 M-2/L-1);
+- час — `source_time: SourceTime` (з raw text/locale, §9.6) і `system_time: SystemTime`;
+  `entity_time()` збирає блок `time` current document (`EntityTime.combine`) і вже при валідації
+  payload відхиляє `source_*_at == fetched_at` (R-43);
+- `observation: ObservedValues | None` — `price: Money`, `availability`, bounded `values`; окремого
+  `observed_at` немає: час observation = `system_time.observed_at` (одне джерело правди);
+- `state_hash()` = `compute_state_hash_v1(core, attributes, latest_state)`.
+
+`check_payload_matches_artifact(payload, ref)` — функція (ref живе окремо): відхиляє інший
+`entity_uuid`, `payload.schema_version != ref.schema_version` і `entity_kind`, несумісний з
+`ref.domain` (`ENTITY_KIND_DOMAINS`: `seller` — catalog або vehicle). Помилка —
+`PayloadArtifactMismatchError(ValueError)`; projector трактує її як permanent (quarantine).
+Hash/size bytes викликач перевіряє до парсингу.
+
+### 11.2. Mongo records (`schemas/mongo/`)
+
+Усі мають `_id: UUID` (генерує projector; alias `_id`, у Python — `id`) і `schema_version` `1.0`.
+
+| Модель | Collection | Інваріанти |
+|---|---|---|
+| `EntityProjectionVersion` | `entity_projection_versions` | для кожної task (R-36); `snapshot: VersionSnapshot` і/або `artifact: NormalizedArtifactRef` (хоча б одне); `state_hash` = hash snapshot; `previous_version`/`previous_state_hash` разом (`None` — current не існував); `state_changed ⇔ state_hash ≠ previous_state_hash`; `applied_to_current ⇔ previous_version is None or previous_version < projection_version` (CAS); `lineage.projection_task_id == projection_task_id` |
+| `ObservationRecord` | `catalog_offer_observations`, `vehicle_observations` | `entity_kind ∈ {catalog_offer, vehicle_listing}`; `reason: ObservationReason`; `observed: ObservedValues`; optional artifact ref |
+| `SellerContactObservation` | `contact_observations` | `seller_id` (назва — index §9.2), `source`, 1..64 `ContactValue` (raw + normalized) |
+| `ReviewQuestionRecord` | `product_reviews`, `product_questions` | `record_kind: ReviewQuestionKind`, `parent_item_id`, `source`, `content_version`, `published_at`/`updated_at` (nullable source time), `observed_at`, `projection_task_id`, lineage |
+
+**`state_changed`: version record ≠ receipt для незастосованої task (SR-3 gate 4).** Поле має одну
+назву, але дві семантики:
+
+- `EntityProjectionVersion.state_changed` = `state_hash ≠ previous_state_hash`, де previous — current
+  у момент task, **незалежно** від `applied_to_current`. Для late arrival (порядок `3, 1, 2`: task v1
+  і v2 приходять після v3) version record v1 може мати `state_changed=true`, якщо його hash
+  відрізняється від current v3;
+- `AppliedProjectionReceipt.state_changed` для тієї ж незастосованої task — `false` (current не
+  змінився; `domain.changed` не створюється, `should_emit_domain_changed` = `false`).
+
+Наслідки: WP-01B **не копіює** `state_changed` з receipt у version record (і навпаки) — кожне
+значення обчислюється за власним правилом; скопійоване значення receipt у version record
+validator відхилить (`state_changed має дорівнювати state_hash ≠ previous_state_hash`), і
+транзакція task перерветься. Retention §9.7 («`state_changed=false` старші 90 днів») читає
+семантику version record: late-arriving версія з відмінним hash не компактиться як «незмінна».
+
+**Правило розширення доменними WP.** `ObservedValues`, `SellerContactObservation`,
+`ReviewQuestionRecord` навмисно мінімальні: доменні поля (old price, mileage, promoted, view
+counters; ім'я/роль контакту; author/rating/text/status відгуку) WP-07/WP-09 додають
+dependency-запитом `docs/plan/deps/<WP>-to-WP-01C.md` як **optional** поля — minor-версія
+(`1.0 → 1.1`), snapshot оновлюється на місці, fixture `*.v1.0.json` лишається і має валідуватися.
+Нове required поле або звуження типу — major (розділ 3.2) з reprojection plan WP-01B. До
+типізації доменні значення лежать у `ObservedValues.values` (bounded). Новий `EntityKind` вимагає
+запису в `ENTITY_KIND_DOMAINS` (тест перевіряє повноту), а для observations — рішення щодо
+`OBSERVED_ENTITY_KINDS`.
+
+### 11.3. News/translation
+
+- `TranslationStatus` — закритий, рівно `pending | translated | not_required | translation_failed`
+  (§5.4); єдиний enum статусу перекладу в проєкті (інші WP власного не створюють, §5.5). Нове
+  значення — major.
+- `TranslationQualityFlag` — `preservation_failed | low_language_confidence | provider_truncated |
+  language_unsupported` (останній — WP-04 О-5/U-2); розширюється minor.
+- `NewsTranslation` (snapshot `schemas/common/news_translation.v1.json` — shared record поза Mongo:
+  рядок `news_translations` WP-01A і результат WP-04): `translation_idempotency_key` мусить
+  дорівнювати `translation_idempotency_key(article_version_id, target_language, provider,
+  model_version, glossary_version)`; body — `body_text` **або** `body_artifact`, або жодного (R-20);
+  `translated` вимагає `title`; `pending`/`not_required` не несуть тексту (для `not_required` read
+  API віддає оригінал, §5.4); `translation_failed` вимагає явний `retry_plan` (≤ 512 символів,
+  §12.1 / WP-04 О-5 — gate coverage відрізняє failed-з-планом), інші статуси його не мають;
+  `target_language` — лише `uk` (`Literal`, §5.4; розширення — minor); межі inline-тексту:
+  `title` ≤ 2048, `lead` ≤ 16 384, `body_text` ≤ 65 536 символів (довший body — `body_artifact`;
+  20 МБ WP-02 — межа сирого HTML, не тексту в рядку PostgreSQL); `cost: Money` з
+  `amount_minor ≥ 0`; `quality_flags` без дублікатів і відсортовані за значенням (однакові
+  canonical bytes); `created_at` aware UTC.
+- `NewsVersionCreatedEvent` (snapshot `schemas/events/news_version_created.v1.json`): outbox-поля
+  `event_id`, `event_type="news.version_created"`, `aggregate_id=article_id`,
+  `aggregate_version=version_number`, `payload_schema_version=schema_version`; тексти лише як
+  `ArtifactRef` (title обов'язковий, lead/cleaned body optional); body обов'язковий для
+  `content_access=full` і заборонений для `metadata_only|blocked|challenge|gone`. Bytes —
+  `encode_event`, зворотно — `decode_news_version_created`.
+- Мови — `LanguageCode` (BCP 47-подібний, lowercase primary subtag: `uk`, `de`, `pt-BR`, `und`);
+  мови поза основними 16 (`ru`, `ca`) — звичайні значення (U-2), без окремого прапорця.
+- **TM key — не контракт** (WP-04 О-2): функція в `collector.translation.memory`, колонка WP-01A
+  зберігає готовий hex; у `collector.contracts` переноситься dependency-запитом, коли ключ
+  знадобиться обчислювати WP-11A/WP-12.
+
+## 12. Тести
 
 - `tests/unit/contracts/**` — рівні 1 (identity hash, money, E.164/e-mail) і 9 (temporal),
   replay resolution, release state machine, CLI export;

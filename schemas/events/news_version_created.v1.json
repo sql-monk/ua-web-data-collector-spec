@@ -1,0 +1,217 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Посилання на immutable content-addressed artifact.\n\n`schema_version` тут — версія схеми *вмісту* (наприклад, normalized payload), а не\nверсія цього контракту (`ArtifactRef.contract_version`).",
+      "properties": {
+        "media_type": {
+          "minLength": 3,
+          "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Версія схеми вмісту artifact (для normalized/event payload).",
+          "title": "Schema Version"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "media_type",
+        "sha256",
+        "size_bytes",
+        "uri"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "ContentAccess": {
+      "description": "Фактична повнота одного fetched item (§5.5, §5.4 `content_access`).",
+      "enum": [
+        "full",
+        "partial",
+        "metadata_only",
+        "blocked",
+        "challenge",
+        "premium",
+        "gone",
+        "unknown"
+      ],
+      "title": "ContentAccess",
+      "type": "string"
+    },
+    "SourceIdentity": {
+      "additionalProperties": false,
+      "description": "Первинний природний ключ `(source_id, source_item_id)` (§9.3 п.1).",
+      "properties": {
+        "source_id": {
+          "description": "ID джерела з docs/research/source-registry.yaml.",
+          "maxLength": 64,
+          "pattern": "^(news|vehicle|catalog)_[a-z]{2}_[a-z0-9]+(_[a-z0-9]+)*$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_item_id": {
+          "description": "Стабільний ID сутності на джерелі.",
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Source Item Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_item_id"
+      ],
+      "title": "SourceIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/events/news_version_created.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`news.version_created` (§9.1, §10 п.8): нова immutable версія статті.\n\nПоля outbox (`event_id`, `event_type`, `aggregate_id`=`article_id`,\n`aggregate_version`=`version_number`, `payload_schema_version`=`schema_version`) —\nз цієї моделі. Тексти не inline: лише artifact refs title/lead/cleaned body; body\nобов'язковий для `content_access=full` і заборонений для `metadata_only`/`blocked`/\n`challenge`/`gone`.",
+  "properties": {
+    "article_id": {
+      "format": "uuid",
+      "title": "Article Id",
+      "type": "string"
+    },
+    "article_version_id": {
+      "format": "uuid",
+      "title": "Article Version Id",
+      "type": "string"
+    },
+    "backfill": {
+      "default": false,
+      "title": "Backfill",
+      "type": "boolean"
+    },
+    "cleaned_body_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "content_access": {
+      "$ref": "#/$defs/ContentAccess"
+    },
+    "content_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "event_id": {
+      "description": "Стабільний ID події; той самий при replay outbox.",
+      "format": "uuid",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_type": {
+      "const": "news.version_created",
+      "default": "news.version_created",
+      "title": "Event Type",
+      "type": "string"
+    },
+    "lead_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "occurred_at": {
+      "description": "Commit нової версії статті.",
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "original_language": {
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "title": "Original Language",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceIdentity"
+    },
+    "source_locale_raw": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Declared locale джерела як отримано (`lang`, `og:locale`).",
+      "title": "Source Locale Raw"
+    },
+    "title_artifact": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
+    "version_number": {
+      "description": "Монотонна версія статті (aggregate_version).",
+      "minimum": 1,
+      "title": "Version Number",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "article_id",
+    "article_version_id",
+    "content_access",
+    "content_hash",
+    "event_id",
+    "occurred_at",
+    "original_language",
+    "source",
+    "title_artifact",
+    "version_number"
+  ],
+  "title": "NewsVersionCreatedEvent",
+  "type": "object",
+  "x-contract-version": "1.0"
+}
