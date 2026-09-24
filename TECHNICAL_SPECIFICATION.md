@@ -5,8 +5,8 @@
 | Поле | Значення |
 |---|---|
 | Статус | Готово до декомпозиції та реалізації |
-| Версія | 1.4 |
-| Дата | 2026-09-22 |
+| Версія | 1.5 |
+| Дата | 2026-09-24 |
 | Мова | Українська |
 | Робоча назва системи | UA Web Data Collector |
 | Призначення | Регулярно отримувати, зберігати, перекладати та нормалізувати публічні дані для внутрішніх досліджень |
@@ -454,8 +454,7 @@ OIDC group → application role mapping versioned і audited. Backend перев
 |---|---|---|
 | Python 3.13 | усі worker/API компоненти | зріла scraping/data екосистема; версію фіксувати через `.python-version` |
 | `uv` + `pyproject.toml` + lockfile | залежності й відтворювані збірки | один lockfile; бот оновлень створює окремі PR |
-| Scrapy 2.13.x | crawl lifecycle, downloader middleware, throttling, sitemap | основний HTTP crawler; selectors тільки в adapters |
-| HTTPX | анонімні публічні JSON API і тестовані HTTP clients | typed client створюється лише для live-перевіреного anonymous endpoint; реєстраційний AUTO.RIA API у v1 не використовується |
+| HTTPX | основний async HTTP-клієнт fetch core (SSRF-guard, DNS pinning на кожному redirect hop, потоковий обрив body, ліміти), а також анонімні публічні JSON API і тестовані HTTP clients | selectors тільки в adapters; typed client для JSON API створюється лише для live-перевіреного anonymous endpoint; реєстраційний AUTO.RIA API у v1 не використовується. Scrapy не використовується — див. ADR-0008 (конфлікт з WorkerRuntime/PostgreSQL origin limiter, §7.6, R-53) |
 | feedparser | RSS/Atom | зберігати feed entry ID і raw XML |
 | Trafilatura + selectolax/lxml | виділення повного тексту й очищення HTML | site-specific selectors мають пріоритет; generic extractor є fallback |
 | lingua-language-detector або fastText lid.176 | визначення мови | результат з confidence; source-declared language не ігнорувати мовчки |
