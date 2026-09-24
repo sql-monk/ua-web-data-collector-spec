@@ -106,7 +106,19 @@ exit=1
 testcontainers):
 
 ```text
-NOTLIVE_PLACEHOLDER
+tests/integration/mongo/test_cli_ensure_mongo.py ....                    [ 11%]
+tests/integration/mongo/test_repositories.py .......                     [ 11%]
+tests/integration/mongo/test_schema_migrations.py ...........            [ 12%]
+tests/integration/mongo/test_users.py .....                              [ 12%]
+...
+tests/integration/scaling/test_scheduler_singleton_adversarial.py ..F.   [ 34%]
+tests/integration/scaling/test_worker_runtime.py .........FF.....        [ 36%]
+...
+SKIPPED [19] tests/e2e/test_gui_runtime_contract.py: gui не відповідає на http://127.0.0.1:80 (потрібен compose-стек)
+SKIPPED [2] tests/e2e/test_runtime_suite_is_enforced.py: вартовий діє лише в job `docker`
+SKIPPED [1] tests/unit/test_network_blocked.py:27: Windows: loopback потрібен asyncio
+===== 3 failed, 1137 passed, 23 skipped, 8 warnings in 5131.42s (1:25:31) =====
+exit=1
 ```
 
 `uv run pre-commit run --all-files`:
@@ -145,7 +157,22 @@ branch** (спільний git-репозиторій, скан бачить к�
 - Мутаційні перевірки вартового (прибрати env з job, зупинити Mongo в job, `pytest.mark.skip` на
   тест) — робота тестувальника gate 2; hook вручну доведено на недоборі тестів (вище).
 - `uv run pytest -m integration tests/integration/postgres tests/integration/scaling` окремо не
-  запускався — входить у `pytest -m "not live"` вище.
+  запускався — входить у `pytest -m "not live"` вище (повний прогін — один раз, хост навантажений).
+
+### Окремо: 3 провали — scaling-флейки WP-01D, не внесені WP-01B
+
+Усі три — `tests/integration/scaling/**` (WP-01D), таймаут очікування `conftest.py:256`
+(«умова не настала за 15.0 с: task у роботі») на перевантаженому хості (паралельні прогони інших
+WP; повний прогін тривав 1 год 25 хв):
+
+- `test_scheduler_singleton_adversarial.py::test_graceful_stop_hands_the_lease_over_without_waiting_for_a_ttl`;
+- `test_worker_runtime.py::test_self_fencing_cancels_active_tasks_when_the_database_stops_confirming_the_lease`;
+- `test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising`
+  (уже в ledger як нестабільний, див. «Відомі ризики» картки).
+
+PR1 не змінює код worker/scheduler/PostgreSQL; з модулів, які імпортує scaling-набір, зачеплено
+лише `collector.cli` (тільки тіло `db ensure-mongo`). Повторно не запускались (інструкція
+оркестратора: повний прогін — лише раз).
 
 ## Ризики
 
