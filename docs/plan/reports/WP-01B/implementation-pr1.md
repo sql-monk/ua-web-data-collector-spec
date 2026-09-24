@@ -1,5 +1,15 @@
 # WP-01B PR1 — звіт реалізатора (`wp/01b-1-mongo-schema`)
 
+> **Gate refresh, 2026-09-24.** Після злиття актуального `main` dependency WP-00 PR5
+> розв'язана: повний Compose clean-host startup виконано двічі. Перший запуск застосував дві
+> міграції, створив 23 indexes і чотирьох користувачів; повторний дав `none (up to date)`,
+> `created=0`, `present=23`. Усі one-shot services завершились `0`, сервіси healthy. Незалежний
+> adversarial-набір виявив і закрив дві прогалини: `schema_version` тепер обов'язковий у current
+> validator, а semantic index options входять у перевірку еквівалентності. Актуальний Mongo
+> integration-набір: **138 passed**; mutation semantic-options: **3 failed** на зламаному коді,
+> **3 passed** після відновлення. Старий розділ «Що не перевірено» нижче є історією первинного
+> implementer-run; актуальний стан визначають `testing-pr1.md` і цей абзац.
+
 Картка: `docs/plan/cards/WP-01B.md`, розділ «PR1», «Передумови», «Рішення оркестратора» (п.5, п.8),
 «Спільні вимоги». База: `main` @ `626b7e4`. Статус приймання визначає gate.
 

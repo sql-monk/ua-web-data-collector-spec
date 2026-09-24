@@ -193,7 +193,11 @@ async def test_five_defers_in_a_row_never_dead_letter_a_job_with_four_attempts(
 
     for done in range(1, 6):
         await wait_for(lambda done=done: run.runtime.reports >= done, what=f"defer №{done}")
-        clock.now += timedelta(seconds=1)
+        # Пересуваємо час лише щоб зробити доступною наступну з п'яти перевірених видач.
+        # Після п'ятої не відкриваємо шосту: runtime працює паралельно й інакше може встигнути
+        # claim-нути її до точного assert нижче, хоча invariant "attempt не згоряє" виконано.
+        if done < 5:
+            clock.now += timedelta(seconds=1)
     job = await read_job(pg_sessions, job_id)
     assert run.runtime.report_failures == 0
     assert [task.attempt for task in handler.seen] == [1, 1, 1, 1, 1], "спроба не згоряє"
