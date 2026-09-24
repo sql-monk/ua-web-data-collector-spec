@@ -36,8 +36,23 @@ SECRET_CONSUMERS: dict[str, set[str]] = {
     "postgres_password": {"postgres"},
     "mongo_root_password": {"mongo", "ensure-mongo"},
     "mongo_keyfile": {"mongo"},
-    "minio_root_user": {"minio"},
-    "minio_root_password": {"minio"},
+    # Root MinIO — сервер і one-shot `ensure-minio` (WP-00 PR5), більше ніхто.
+    "minio_root_user": {"minio", "ensure-minio"},
+    "minio_root_password": {"minio", "ensure-minio"},
+    # Per-component MinIO (WP-00 PR5, таблиця картки п.1): `ensure-minio` створює користувачів.
+    "minio_fetcher": {"ensure-minio", "discovery-worker", "fetch-worker", "browser-worker"},
+    "minio_parser": {"ensure-minio", "parse-worker"},
+    "minio_projector": {"ensure-minio", "projector-worker"},
+    "minio_translation": {"ensure-minio", "translation-worker"},
+    "minio_maintenance": {"ensure-minio", "maintenance-worker"},
+    "minio_readonly": {"ensure-minio", "api", "export-worker"},
+    # Per-component Mongo (WP-00 PR5 п.2): `ensure-mongo --users` бере з них паролі.
+    "mongo_uri_projector": {"ensure-mongo", "projector-worker"},
+    "mongo_uri_compactor": {"ensure-mongo", "projector-worker"},
+    "mongo_uri_api_ro": {"ensure-mongo", "api"},
+    "mongo_uri_export_ro": {"ensure-mongo", "export-worker"},
+    # Зовнішній credential провайдера перекладу (WP-04) — лише translation-worker.
+    "google_translation_credentials": {"translation-worker"},
     # Міграційний DSN — лише one-shot `migrate-postgres` (§13: migration role не використовується
     # runtime-процесами).
     "postgres_dsn": {"migrate-postgres"},
@@ -64,7 +79,7 @@ SECRET_CONSUMERS: dict[str, set[str]] = {
     "postgres_dsn_export_ro": {"migrate-postgres"},
 }
 COMPONENT_NAMES = ("postgres", "mongo", "minio")
-ONE_SHOTS = {"migrate-postgres", "ensure-mongo"}
+ONE_SHOTS = {"migrate-postgres", "ensure-mongo", "ensure-minio"}
 STATEFUL = {"postgres", "mongo", "minio"}
 
 
@@ -95,24 +110,65 @@ def test_each_secret_has_exactly_documented_consumers(services: dict[str, dict[s
     assert consumers == SECRET_CONSUMERS
 
 
-def test_api_has_no_secrets_and_runtime_has_only_the_dsn(
+# WP-00 PR5: рівно ці `*_FILE` → secret у кожному runtime-сервісі (least privilege §13).
+# `scheduler` — лише свій DSN (§13 «scheduler/fetcher не має MongoDB credentials»; object store
+# йому не потрібен). `api` — read-only MinIO і Mongo (read-only PostgreSQL — WP-11A).
+_FETCHER_FILES = {
+    "COLLECTOR_POSTGRES_DSN_FILE": "postgres_dsn_fetcher",
+    "COLLECTOR_MINIO_CREDENTIALS_FILE": "minio_fetcher",
+}
+RUNTIME_SECRET_FILES: dict[str, dict[str, str]] = {
+    "api": {
+        "COLLECTOR_MINIO_CREDENTIALS_FILE": "minio_readonly",
+        "COLLECTOR_MONGO_URI_FILE": "mongo_uri_api_ro",
+    },
+    "scheduler": {"COLLECTOR_POSTGRES_DSN_FILE": "postgres_dsn_scheduler"},
+    "discovery-worker": _FETCHER_FILES,
+    "fetch-worker": _FETCHER_FILES,
+    "browser-worker": _FETCHER_FILES,
+    "parse-worker": {
+        "COLLECTOR_POSTGRES_DSN_FILE": "postgres_dsn_parser",
+        "COLLECTOR_MINIO_CREDENTIALS_FILE": "minio_parser",
+    },
+    "projector-worker": {
+        "COLLECTOR_POSTGRES_DSN_FILE": "postgres_dsn_projector",
+        "COLLECTOR_MINIO_CREDENTIALS_FILE": "minio_projector",
+        "COLLECTOR_MONGO_URI_FILE": "mongo_uri_projector",
+        "COLLECTOR_MONGO_COMPACTOR_URI_FILE": "mongo_uri_compactor",
+    },
+    "translation-worker": {
+        "COLLECTOR_POSTGRES_DSN_FILE": "postgres_dsn_translation",
+        "COLLECTOR_MINIO_CREDENTIALS_FILE": "minio_translation",
+        "COLLECTOR_TRANSLATION_CREDENTIALS_FILE": "google_translation_credentials",
+    },
+    "export-worker": {
+        "COLLECTOR_POSTGRES_DSN_FILE": "postgres_dsn_scheduler",
+        "COLLECTOR_MINIO_CREDENTIALS_FILE": "minio_readonly",
+        "COLLECTOR_MONGO_URI_FILE": "mongo_uri_export_ro",
+    },
+    "maintenance-worker": {
+        "COLLECTOR_POSTGRES_DSN_FILE": "postgres_dsn_scheduler",
+        "COLLECTOR_MINIO_CREDENTIALS_FILE": "minio_maintenance",
+    },
+}
+
+
+def test_runtime_services_mount_exactly_their_own_credentials(
     services: dict[str, dict[str, Any]],
 ) -> None:
-    """`api` без DB credentials (owner WP-11A); worker/scheduler — рівно один secret: DSN.
+    """Кожен runtime-сервіс — рівно свої secrets, і кожен змонтований має власний `*_FILE`.
 
-    WP-01D PR1 замінив placeholder-процеси на runtime, який читає чергу, тому DSN їм потрібен;
-    PR1b — це DSN власної LOGIN-ролі компонента (§13). Жодних інших credentials (Mongo/MinIO)
-    вони не отримують — це залишається least privilege.
+    WP-01D PR1b — DSN власної LOGIN-ролі; WP-00 PR5 — MinIO/Mongo/provider за таблицею картки.
+    Зайвий secret (скопійований anchor чи «про всяк випадок») — провал.
     """
-    for name, svc in services.items():
+    runtime = {n for n in services if n.endswith("-worker") or n in {"api", "scheduler"}}
+    assert runtime == set(RUNTIME_SECRET_FILES), "мапа має покривати всі runtime-сервіси"
+    for name, expected in RUNTIME_SECRET_FILES.items():
+        svc = services[name]
         env = svc.get("environment", {})
-        if name == "api":
-            assert not _secret_names(svc), f"{name}: секрети без потреби"
-            assert not [k for k in env if k.endswith("_FILE")], f"{name}: *_FILE без secret"
-        elif name.endswith("-worker") or name == "scheduler":
-            (secret,) = _secret_names(svc)
-            assert secret.startswith("postgres_dsn_"), f"{name}: {secret} замість per-role DSN"
-            assert [k for k in env if k.endswith("_FILE")] == ["COLLECTOR_POSTGRES_DSN_FILE"], name
+        files = {k: v for k, v in env.items() if k.endswith("_FILE")}
+        assert files == {k: f"/run/secrets/{v}" for k, v in expected.items()}, name
+        assert _secret_names(svc) == set(expected.values()), name
 
 
 def test_secret_file_env_points_to_mounted_secret(services: dict[str, dict[str, Any]]) -> None:

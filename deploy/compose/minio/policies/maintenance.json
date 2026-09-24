@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SweepList",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::raw",
+        "arn:aws:s3:::normalized",
+        "arn:aws:s3:::events",
+        "arn:aws:s3:::translated"
+      ]
+    },
+    {
+      "Sid": "SweepHeadDelete",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:DeleteObject"],
+      "Resource": [
+        "arn:aws:s3:::raw/*",
+        "arn:aws:s3:::normalized/*",
+        "arn:aws:s3:::events/*",
+        "arn:aws:s3:::translated/*"
+      ]
+    }
+  ]
+}
