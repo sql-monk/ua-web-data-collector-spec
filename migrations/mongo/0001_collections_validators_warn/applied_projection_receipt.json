@@ -1,0 +1,191 @@
+{
+  "$jsonSchema": {
+    "title": "applied_projection_receipt@1.0",
+    "additionalProperties": false,
+    "properties": {
+      "applied_to_current": {
+        "bsonType": "bool"
+      },
+      "cluster_time": {
+        "minLength": 1,
+        "bsonType": "string"
+      },
+      "committed_at": {
+        "bsonType": "date"
+      },
+      "document_id": {
+        "bsonType": "binData"
+      },
+      "entity_uuid": {
+        "bsonType": "binData"
+      },
+      "event_artifact": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "media_type": {
+                "minLength": 3,
+                "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+                "bsonType": "string"
+              },
+              "schema_version": {
+                "anyOf": [
+                  {
+                    "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+                    "bsonType": "string"
+                  },
+                  {
+                    "bsonType": "null"
+                  }
+                ]
+              },
+              "sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "bsonType": "string"
+              },
+              "size_bytes": {
+                "minimum": 0,
+                "bsonType": [
+                  "int",
+                  "long"
+                ]
+              },
+              "uri": {
+                "minLength": 1,
+                "pattern": "^[a-z][a-z0-9+.-]*://.+",
+                "bsonType": "string"
+              }
+            },
+            "required": [
+              "media_type",
+              "sha256",
+              "size_bytes",
+              "uri"
+            ],
+            "bsonType": "object"
+          },
+          {
+            "bsonType": "null"
+          }
+        ]
+      },
+      "event_bytes": {
+        "anyOf": [
+          {
+            "bsonType": "binData"
+          },
+          {
+            "bsonType": "null"
+          }
+        ]
+      },
+      "event_id": {
+        "anyOf": [
+          {
+            "bsonType": "binData"
+          },
+          {
+            "bsonType": "null"
+          }
+        ]
+      },
+      "event_media_type": {
+        "anyOf": [
+          {
+            "bsonType": "string"
+          },
+          {
+            "bsonType": "null"
+          }
+        ]
+      },
+      "event_sha256": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "bsonType": "string"
+          },
+          {
+            "bsonType": "null"
+          }
+        ]
+      },
+      "previous_hash": {
+        "anyOf": [
+          {
+            "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+            "bsonType": "string"
+          },
+          {
+            "bsonType": "null"
+          }
+        ]
+      },
+      "previous_version": {
+        "anyOf": [
+          {
+            "minimum": 1,
+            "bsonType": [
+              "int",
+              "long"
+            ]
+          },
+          {
+            "bsonType": "null"
+          }
+        ]
+      },
+      "projection_task_id": {
+        "bsonType": "binData"
+      },
+      "projection_version": {
+        "minimum": 1,
+        "bsonType": [
+          "int",
+          "long"
+        ]
+      },
+      "result_hash": {
+        "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+        "bsonType": "string"
+      },
+      "result_version": {
+        "minimum": 1,
+        "bsonType": [
+          "int",
+          "long"
+        ]
+      },
+      "schema_version": {
+        "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+        "bsonType": "string"
+      },
+      "state_changed": {
+        "bsonType": "bool"
+      },
+      "target_collection": {
+        "maxLength": 120,
+        "pattern": "^[a-z][a-z0-9_]*$",
+        "bsonType": "string"
+      },
+      "_id": {
+        "bsonType": "binData"
+      }
+    },
+    "required": [
+      "applied_to_current",
+      "cluster_time",
+      "committed_at",
+      "document_id",
+      "entity_uuid",
+      "projection_task_id",
+      "projection_version",
+      "result_hash",
+      "result_version",
+      "state_changed",
+      "target_collection"
+    ],
+    "bsonType": "object"
+  }
+}
