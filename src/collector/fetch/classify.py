@@ -65,7 +65,7 @@ def parse_retry_after(value: str | None, now: datetime) -> timedelta:
     """
     delay: timedelta | None = None
     text = (value or "").strip()
-    if text.isdigit():
+    if text.isascii() and text.isdigit():  # `isdigit` сам пускає `²` → `int()` падає (F-2)
         delay = timedelta(seconds=min(int(text), int(RETRY_AFTER_MAX.total_seconds()) + 1))
     elif text:
         try:

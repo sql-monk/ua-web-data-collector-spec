@@ -115,6 +115,23 @@ class _RedirectRefused(Exception):  # noqa: N818 — permanent відмова re
         self.error_code = error_code
 
 
+DETACHED_LOCATION = "collector_location"
+
+
+async def _detach_location(response: httpx.Response) -> None:
+    """Забрати `Location` redirect-у до того, як httpx спробує його розпарсити.
+
+    Навіть з `follow_redirects=False` httpx будує `next_request` і на `Location`, який його
+    парсер відкидає (`http://0177.0.0.01/`), кидає `RemoteProtocolError` — fetch класифікувався
+    б як retryable `network_error` (gate 2, F-3). Location іде в `extensions` і перевіряється
+    нашим guard/SSRF як будь-який інший hop.
+    """
+    location = response.headers.get("location")
+    if response.status_code in REDIRECT_STATUSES and location is not None:
+        response.extensions = {**response.extensions, DETACHED_LOCATION: location}
+        del response.headers["location"]
+
+
 def _no_cookies() -> CookieJar:
     return CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))
 
@@ -159,6 +176,7 @@ class SafeFetcher:
                     follow_redirects=False,
                     timeout=timeout,
                     cookies=_no_cookies(),
+                    event_hooks={"response": [_detach_location]},
                 ) as client,
             ):
                 return await self._run(client, backend, request, held, hops, deadline)
@@ -211,7 +229,7 @@ class SafeFetcher:
                     status=response.status_code,
                     url=redact(guarded.url),
                 )
-                location = response.headers.get("location")
+                location = response.extensions.get(DETACHED_LOCATION)
                 if response.status_code not in REDIRECT_STATUSES or not location:
                     return await self._complete(response, request, origin, hops, deadline)
                 url = self._next_url(guarded.url, location)
@@ -281,7 +299,7 @@ class SafeFetcher:
         sitemap = request.request_kind == "sitemap"
         limit = self._config.max_sitemap_bytes if sitemap else self._config.max_body_bytes
         declared = response.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > limit:
+        if declared.isascii() and declared.isdigit() and int(declared) > limit:
             return result(classify_error("body_too_large"))
         limits = BodyLimits(
             max_bytes=limit,

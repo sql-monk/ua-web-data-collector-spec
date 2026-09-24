@@ -152,7 +152,11 @@ async def read_body(
     `on_chunk` викликається перед обробкою кожного мережевого чанка (перевірка total deadline).
     """
     chain = decoders_for(content_encoding)
-    inner: list[Decoder] | None = None  # лише sitemap із gzip entity
+    # Sitemap: чи entity — gzip-файл, вирішується за накопиченим префіксом (≥ 2 байти), а не
+    # за першим мережевим чанком — межі чанків контролює сервер (gate 2, F-1).
+    decided = not limits.sitemap
+    head = b""
+    inner: list[Decoder] = []
     parts: list[bytes] = []
     received = decoded = 0
 
@@ -166,6 +170,14 @@ async def read_body(
             msg = f"ratio розпакування > {limits.max_ratio}"
             raise BodyLimitExceeded("decompression_bomb", msg)
 
+    def consume(entity: bytes) -> None:
+        parts.append(entity)
+        if inner:
+            for piece in _pipe(inner, entity):
+                count(len(piece))
+        else:
+            count(len(entity))
+
     async for chunk in raw:
         if on_chunk is not None:
             on_chunk()
@@ -174,15 +186,17 @@ async def read_body(
             msg = f"отримано понад {limits.max_bytes} байт"
             raise BodyLimitExceeded("body_too_large", msg)
         for entity in _pipe(chain, chunk):
-            if inner is None:
-                sitemap_gz = limits.sitemap and not parts and entity.startswith(GZIP_MAGIC)
-                inner = [ZlibDecoder(16 + zlib.MAX_WBITS)] if sitemap_gz else []
-            parts.append(entity)
-            if inner:
-                for piece in _pipe(inner, entity):
-                    count(len(piece))
-            else:
-                count(len(entity))
+            if not decided:
+                head += entity
+                if len(head) < len(GZIP_MAGIC):
+                    continue
+                decided = True
+                if head.startswith(GZIP_MAGIC):
+                    inner.append(ZlibDecoder(16 + zlib.MAX_WBITS))
+                entity, head = head, b""
+            consume(entity)
+    if head:  # entity коротший за magic — не gzip
+        consume(head)
     return Body(
         data=b"".join(parts),
         received_bytes=received,
