@@ -137,3 +137,25 @@ CR-3) не спрацьовує. Прохання до owner-а publisher loop (
 2. подати dependency-запит до WP-01A на лічильник видач у `fetch_unpublished`
    (`delivery_attempts` + паркування за ним у тій самій транзакції lease). Це одна колонка і
    одна зміна запиту.
+
+**Стан §7 після WP-01A PR3a (`wp/01a-3a-queue-outbox-preflight`) — PG-частину реалізовано,
+`resolved` після WP-01B PR3.** Обрано варіант 2 (рішення оркестратора WP-01B N-2): колонка
+`outbox_events.delivery_attempts` (міграція `0006_queue_outbox_preflight`);
+`outbox.fetch_unpublished(..., max_delivery_attempts=DEFAULT_MAX_PUBLISH_ATTEMPTS)` у тій
+самій lease-транзакції інкрементує лічильник кожного виданого рядка, а рядок, що вже досяг
+межі, паркує (`parked_at`, `last_error_code="delivery_attempts_exhausted"`) замість видачі;
+`mark_failed` лічильник видач не чіпає, `unpark` скидає обидва. Column UPDATE
+`delivery_attempts` — у `collector_scheduler`. Publisher loop (`collector.workers.publisher`,
+owner WP-01B за винятком оркестратора) нічого додатково рахувати не мусить; §7 закривається
+разом із WP-01B PR3, коли loop почне викликати новий параметр.
+
+## 8. PR3a: API для PR1c (not_before / defer / fencing ack)
+
+Сигнатури зафіксовано у `docs/plan/reports/WP-01A/implementation-pr3a.md`, розділ «Нові
+публічні API». Коротко: `queue.retry(..., not_before=None)` і
+`projection.retry_projection_task(..., not_before=None)` — задане значення використовується
+**рівно** (`max(not_before, now)`), `policy` при цьому не застосовується, тож runtime передає
+вже обчислене `max(now + schedule.delay(attempt), retry_after)`; `queue.release(...,
+not_before=None)` і `projection.release_projection_task(..., not_before=None)` — defer без
+спалювання спроби; `projection.acknowledge_projection(..., owner=None)` — з `owner` ack
+можливий лише власником lease (`LeaseNotOwnedError` до будь-якого запису).
