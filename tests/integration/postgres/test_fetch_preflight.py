@@ -73,6 +73,15 @@ async def seed_source(
     return source, route
 
 
+async def test_count_retries_since_rejects_naive_boundary_before_sql(
+    pg_session: AsyncSession,
+) -> None:
+    source, _ = await seed_source(pg_session)
+    naive = datetime(2026, 9, 24, 12)  # noqa: DTZ001 — contract under test
+    with pytest.raises(ValueError, match="since.*aware"):
+        await artifacts.count_retries_since(pg_session, source.id, naive)
+
+
 # --- preflight ---------------------------------------------------------------------------
 
 

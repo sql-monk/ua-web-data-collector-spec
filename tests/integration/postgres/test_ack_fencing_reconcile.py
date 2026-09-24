@@ -7,7 +7,7 @@ Reconciler підтверджує без `owner` (рішення WP-01B п.1).
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -29,6 +29,14 @@ from .conftest import FIXED_NOW, make_entity, receipt, record
 pytestmark = pytest.mark.integration
 
 T0 = FIXED_NOW
+
+
+async def test_projection_completeness_rejects_naive_watermark_before_sql(
+    pg_session: AsyncSession,
+) -> None:
+    naive = datetime(2026, 9, 24, 12)  # noqa: DTZ001 — contract under test
+    with pytest.raises(ValueError, match="created_before.*aware"):
+        await reconciliation.projection_completeness(pg_session, created_before=naive)
 
 
 async def _counts(session: AsyncSession) -> tuple[int, int, int]:

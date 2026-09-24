@@ -78,8 +78,11 @@ async def fetch_unpublished(
     Тобто подія видається щонайбільше `max_delivery_attempts` разів, навіть якщо publisher
     щоразу падає до `mark_failed`. Запаркований рядок звільняє місце: наступний виклик бере
     наступні події (немає head-of-line blocking), але поточний батч може бути коротшим за
-    `limit`. `mark_failed` рахує лише помилки (`attempts`) і `delivery_attempts` не чіпає, тож
-    одна спроба не рахується двічі; межі незалежні, паркує та, що спрацює першою.
+    `limit` або навіть порожнім, якщо всі вибрані кандидати саме вичерпали межу. Тому `[]`
+    означає «у цій транзакції нічого не видано», а не гарантує порожній backlog; publisher
+    опитує знову за звичайним poll-інтервалом. `mark_failed` рахує лише помилки (`attempts`) і
+    `delivery_attempts` не чіпає, тож одна спроба не рахується двічі; межі незалежні, паркує
+    та, що спрацює першою.
 
     Предикат — `published_at IS NULL AND parked_at IS NULL AND available_at <= now` з порядком
     `(available_at, event_id)`, тобто partial index `ix_outbox_events_unpublished` (і

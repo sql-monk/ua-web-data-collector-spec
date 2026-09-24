@@ -29,7 +29,7 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collector.persistence.postgres.clock import resolve_now
+from collector.persistence.postgres.clock import require_aware_utc, resolve_now
 from collector.persistence.postgres.models import (
     CLAIMABLE_PROJECTION_STATUSES,
     EntityIndex,
@@ -170,8 +170,9 @@ async def projection_completeness(
         tasks = tasks.where(ProjectionTask.entity_uuid == entity_uuid)
         events = events.where(OutboxEvent.aggregate_id == entity_uuid)
     if created_before is not None:
-        tasks = tasks.where(ProjectionTask.created_at < created_before)
-        events = events.where(OutboxEvent.created_at < created_before)
+        watermark = require_aware_utc(created_before, parameter="created_before")
+        tasks = tasks.where(ProjectionTask.created_at < watermark)
+        events = events.where(OutboxEvent.created_at < watermark)
     open_count, oldest_open, quarantined_count, oldest_quarantined = (
         (await session.execute(tasks)).one()._tuple()
     )

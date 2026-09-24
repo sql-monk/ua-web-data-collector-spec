@@ -318,9 +318,9 @@ markdownlint-cli2........................................................Passed
 - Integration-набір у Linux-контейнері не проганявся (потребує Docker-in-Docker/мережі хоста).
 - EXPLAIN на реальному обсязі `fetches`: тест доводить застосовність індексу (з вимкненим seq
   scan), а не вибір планувальника на мільйонах рядків.
-- `docs/persistence/postgres.md` не доповнено — файл не входить в owned files картки
-  (розділ «Docs (етап 5)»); потрібне доповнення: `delivery_attempts`/N-2, `purge_published`,
-  `ix_fetches_validators`, column GRANT `source_routes`, модуль `reconciliation`.
+- Документація acceptance доповнена після gate 2: `docs/persistence/postgres.md` охоплює
+  `delivery_attempts`/N-2, `purge_published`, `ix_fetches_validators`, column GRANT
+  `source_routes`, fencing і модуль `reconciliation`.
 - Споживання API — WP-01D PR1c/WP-02 PR2/WP-01B PR3 ще не злиті; сумісність перевірено лише
   сигнатурами й тестами цього PR.
 
@@ -363,8 +363,23 @@ markdownlint-cli2........................................................Passed
   паркування за видачами; `purge_published` викликається лише maintenance WP-12 (поки не
   викликається нічим).
 
+## Виправлення після gate 2
+
+Джерело: `docs/plan/reports/WP-01A/testing-pr3a.md` (незалежні тести — коміт `91cd19f`, не
+послаблювалися).
+
+| Знахідка | Виправлення | Доказ |
+|---|---|---|
+| F-1 medium — acceptance-документація не охоплювала PR3a | `docs/persistence/postgres.md` оновлено до PR1–PR3a: схема/колонки, transaction boundaries queue/outbox/preflight/reconciler, N-2/purge, fencing, індекс validators, LOGIN/GRANT | `markdownlint-cli2`; звірка з `0006`, repositories і role tests |
+| F-2 low — `[]` може означати лише parked candidates, не порожній backlog | Docstring `fetch_unpublished` і PostgreSQL-документація прямо фіксують цю семантику та повторний poll; SQL не ускладнювався циклом у транзакції | adversarial `test_batch_of_only_exhausted_rows_returns_empty_while_backlog_remains` |
+| F-3 low — naive datetime оброблявся неоднорідно | Новий `clock.require_aware_utc(value, parameter=…)`; `clamp_not_before`, `count_retries_since`, `projection_completeness(created_before)` відхиляють naive до SQL і нормалізують aware offset до UTC | unit `test_clamp_not_before_rejects_naive_and_normalizes_aware_offsets`; integration `test_count_retries_since_rejects_naive_boundary_before_sql`, `test_projection_completeness_rejects_naive_watermark_before_sql`; наявний adversarial test чотирьох defer/retry API |
+| F-4 info — expired, unrecovered lease owner може ack | Код не змінено: це безпечна owner-based семантика, спільна з `queue.complete`; зафіксовано в `acknowledge_projection` і PostgreSQL docs для WP-01D PR1c | `test_ack_with_owner_on_expired_but_unrecovered_lease_is_accepted`; row-lock конкуренція recover/claim |
+
+Після виправлень: `ruff`/format green, mypy strict — 100 source files, 18 unit tests і 20
+цільових PostgreSQL integration tests passed. Повний PostgreSQL-набір і всі repository gates
+повторюються перед PR після code/spec review.
+
 ## Dependency-запити
 
 Нових немає. Оновлено відповідь `docs/plan/deps/WP-01A-to-WP-01D.md`: §7 (N-2) — PG-частину
-реалізовано, `resolved` разом із WP-01B PR3; §8 — вказівник на API для PR1c. Для етапу 5
-(docs-writer) — доповнення `docs/persistence/postgres.md` (див. «Що не перевірено»).
+реалізовано, `resolved` разом із WP-01B PR3; §8 — вказівник на API для PR1c.

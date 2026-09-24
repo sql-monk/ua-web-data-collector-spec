@@ -35,7 +35,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.contracts import new_entity_id
-from collector.persistence.postgres.clock import resolve_now
+from collector.persistence.postgres.clock import require_aware_utc, resolve_now
 from collector.persistence.postgres.errors import (
     LeaseNotOwnedError,
     NotFoundError,
@@ -94,8 +94,12 @@ class BackoffPolicy:
 
 
 def clamp_not_before(not_before: datetime | None, now: datetime) -> datetime:
-    """`max(not_before, now)`; `None` → `now`. Спільне правило `retry`/`release` черг PR3a."""
-    return now if not_before is None or not_before < now else not_before
+    """`max(not_before, now)` у UTC; naive datetime відхиляється до будь-якого запису."""
+    current = require_aware_utc(now, parameter="now")
+    if not_before is None:
+        return current
+    lower_bound = require_aware_utc(not_before, parameter="not_before")
+    return current if lower_bound < current else lower_bound
 
 
 def next_attempt_at(

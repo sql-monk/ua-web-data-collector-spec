@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import random
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
+
+import pytest
 
 from collector.persistence.postgres.repositories.queue import (
     BackoffPolicy,
@@ -18,6 +20,17 @@ def test_clamp_not_before_never_goes_to_the_past() -> None:
     assert clamp_not_before(None, NOW) == NOW
     assert clamp_not_before(NOW - timedelta(days=1), NOW) == NOW
     assert clamp_not_before(NOW + timedelta(hours=2), NOW) == NOW + timedelta(hours=2)
+
+
+def test_clamp_not_before_rejects_naive_and_normalizes_aware_offsets() -> None:
+    naive = datetime(2026, 9, 24, 12)  # noqa: DTZ001 — contract under test
+    with pytest.raises(ValueError, match="not_before.*aware"):
+        clamp_not_before(naive, NOW)
+    with pytest.raises(ValueError, match="now.*aware"):
+        clamp_not_before(NOW, naive)
+
+    kyiv = timezone(timedelta(hours=3))
+    assert clamp_not_before(datetime(2026, 9, 24, 15, tzinfo=kyiv), NOW) == NOW
 
 
 def test_explicit_not_before_wins_over_policy_in_both_directions() -> None:

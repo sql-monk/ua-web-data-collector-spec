@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.contracts import NormalizedArtifactRef, new_entity_id
 from collector.contracts.enums import ContentAccess, FetchOutcome, UploadClaimStatus
-from collector.persistence.postgres.clock import resolve_now
+from collector.persistence.postgres.clock import require_aware_utc, resolve_now
 from collector.persistence.postgres.errors import NotFoundError, StaleClaimError
 from collector.persistence.postgres.models import (
     ArtifactUploadClaim,
@@ -164,12 +164,13 @@ async def count_retries_since(session: AsyncSession, source_uuid: UUID, since: d
     Агрегат за `ix_fetches_source_id_fetched_at`; предикат за `fetched_at` відсікає зайві
     місячні партиції (partition pruning). Transaction boundary: викликач; один SELECT.
     """
+    lower_bound = require_aware_utc(since, parameter="since")
     total = await session.scalar(
         select(func.count())
         .select_from(Fetch)
         .where(
             Fetch.source_id == source_uuid,
-            Fetch.fetched_at >= since,
+            Fetch.fetched_at >= lower_bound,
             Fetch.outcome == FetchOutcome.RETRYABLE.value,
         )
     )

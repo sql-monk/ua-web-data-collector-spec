@@ -1,21 +1,25 @@
-# PostgreSQL — схема control plane, artifacts і projection (WP-01A PR1+PR2)
+# PostgreSQL — control plane, artifacts, projection і preflight (WP-01A PR1–PR3a)
 
 Огляд PostgreSQL-схеми, яку створює й підтримує WP-01A (§9.1, §13 ТЗ). Документ покриває
 **PR1** (`wp/01a-1-control-queue`, ревізії `0001_control_queue` → `0002_claim_index` →
 `0003_default_partition`): control plane джерел, job queue, глобальний origin rate limiter,
-worker pools і масштабування, append-only audit log — і **PR2** (`wp/01a-2-artifacts-projection`,
+worker pools і масштабування, append-only audit log — **PR2** (`wp/01a-2-artifacts-projection`,
 ревізії `0004_artifacts_projection` → `0005_entity_version_guard`): fetch/raw lineage, upload
-claims, normalized artifact pointers, projection tasks/acks, transactional outbox, entity index.
-Разом — 23 таблиці.
+claims, normalized artifact pointers, projection tasks/acks, transactional outbox, entity index —
+і **PR3a** (`wp/01a-3a-queue-outbox-preflight`, ревізія `0006_queue_outbox_preflight`): queue
+defer/`not_before`, outbox delivery fencing і purge, fetch preflight/validators, route failure
+counter, retry budget та reconciler queries. Разом — 23 таблиці; PR3a додає колонки й індекси,
+але не нові таблиці.
 
-**Таблиці PR3** (news/translations/matching/release/retention/capacity) ще не існують у схемі —
-цей документ оновиться разом з наступним PR WP-01A.
+**Таблиці PR3b–PR3d** (news/translations/matching/release/retention/capacity) ще не існують у
+схемі — цей документ оновиться разом з наступними під-PR WP-01A.
 
 Джерело істини для схеми — SQLAlchemy-моделі `src/collector/persistence/postgres/models/**`;
 Alembic-ревізії в `migrations/postgres/versions/**` — їх forward-only знімки. Опис нижче
 звірений з обома і з живою схемою (тести `tests/integration/postgres/test_schema_contract.py`,
 `test_metadata.py`, звіти `docs/plan/reports/WP-01A/{implementation,code-review,spec-review}-pr1.md`,
-`docs/plan/reports/WP-01A/{implementation,code-review-pr2-r2,spec-review}-pr2.md`). Рішення
+`docs/plan/reports/WP-01A/{implementation,code-review-pr2-r2,spec-review}-pr2.md` і
+`docs/plan/reports/WP-01A/{implementation,testing}-pr3a.md`). Рішення
 поза буквою ТЗ (партиціювання PR2, ідемпотентність `record_parse_result`) — `docs/decisions/
 0007-event-tables-global-unique-over-partitioning.md`.
 
@@ -25,10 +29,10 @@ Alembic-ревізії в `migrations/postgres/versions/**` — їх forward-onl
 |---|---|
 | `sources` | реєстр джерел: canonical `source_id`, домен, країна, `state` (`SourceState`), optimistic `revision` |
 | `source_policy_versions` | immutable знімки policy-частини маніфесту джерела (rate limit, розклад, robots, `manifest_sha256`) |
-| `source_routes` | маршрути джерела (rss/sitemap/category/detail/api/browser) зі станом circuit breaker |
+| `source_routes` | маршрути джерела (rss/sitemap/category/detail/api/browser) зі станом circuit breaker, атомарним `consecutive_failures` і `circuit_open_until` |
 | `source_cursors` | opaque курсори discovery (page token / ETag / watermark) за `(source_id, cursor_kind, cursor_key)` |
 | `crawl_runs` | обходи джерела (`full`/`incremental`/`replay`/`backfill`); не більше одного running `full` на джерело |
-| `crawl_jobs` | job queue §7.2: lease, priority, `not_before`, idempotency key, `attempt/max_attempts` |
+| `crawl_jobs` | job queue §7.2: lease, priority, `not_before`, idempotency key, `attempt/max_attempts`; retry з явною нижньою межею та defer без спалювання спроби |
 | `dead_letters` | job-и, що вичерпали `max_attempts` або отримали ручний `quarantine` |
 | `origin_rate_buckets` | canonical token bucket + concurrency budget на normalized origin (R-53) |
 | `origin_rate_permits` | видані leased permits (rate token + concurrency slot) |
@@ -36,7 +40,7 @@ Alembic-ревізії в `migrations/postgres/versions/**` — їх forward-onl
 | `worker_instances` | зареєстровані instance-и: статус, heartbeat, slots, підтверджена pool revision |
 | `scale_commands` | аудитовані команди масштабування зі станами §7.6 |
 | `audit_log` | append-only журнал mutating actions §13, партиційований по місяцях |
-| `fetches` | HTTP-запити: requested/final URL, метадані відповіді, `raw_sha256`, timestamps; RANGE-партиціонована по `fetched_at` + DEFAULT-партиція `fetches_default` |
+| `fetches` | HTTP-запити: requested/final URL, generated `requested_url_md5`, validators, `raw_sha256`, timestamps; RANGE-партиціонована по `fetched_at` + DEFAULT-партиція `fetches_default` |
 | `raw_objects` | сирі байти за content hash: UUID PK `raw_object_id`, unique `sha256`, `uri/size`; непартиціонована (ADR-0007) |
 | `parse_attempts` | спроби parse конкретного fetch: `parser_version`, вихід/помилка, lineage `fetch_id`/`raw_sha256` |
 | `artifact_upload_claims` | fencing-претензії на upload ключ об'єктного сховища: unique `object_key`, `claim_generation`, owner, lease |
@@ -45,7 +49,7 @@ Alembic-ревізії в `migrations/postgres/versions/**` — їх forward-onl
 | `projection_acknowledgements` | PK `task_id`; Mongo receipt, `applied_to_current`/`state_changed`, previous/result hash |
 | `entity_index` | PK `entity_uuid`; `confirmed_projection_version` (монотонна, тригер-guard), unique source identity, Mongo collection/document ID |
 | `change_events` | доменні події зміни стану: unique `event_id`, bounded `event_bytes`; непартиціонована (ADR-0007) |
-| `outbox_events` | transactional outbox для `projection.command`(internal)/`domain.changed`(domain): unique `event_id`, visibility lease, паркування; непартиціонована (ADR-0007) |
+| `outbox_events` | transactional outbox для `projection.command`(internal)/`domain.changed`(domain): unique `event_id`, visibility lease, `delivery_attempts`, паркування й bounded purge; непартиціонована (ADR-0007) |
 
 ## 2. ER-схема
 
@@ -96,7 +100,8 @@ transaction boundary; нижче — підсумок за групами опе
 | `claim` | `SELECT … FOR UPDATE SKIP LOCKED` на кандидатів + `UPDATE …→leased` — одна транзакція; викликач комітить одразу після виклику (row locks тримаються до commit) і виконує роботу **поза** цією транзакцією |
 | `heartbeat` | один `UPDATE` з предикатом `status='leased' AND lease_owner=:owner` |
 | `complete` | один `UPDATE`; викликач зазвичай об'єднує з записом результату (artifact pointer / outbox — PR2) у тій самій транзакції |
-| `retry` | `SELECT … FOR UPDATE` рядка + `UPDATE`, і за потреби `INSERT dead_letters` — усе в одній транзакції (`_quarantine_locked`) |
+| `retry(not_before=…)` | `SELECT … FOR UPDATE` рядка + `UPDATE`, і за потреби `INSERT dead_letters` — усе в одній транзакції (`_quarantine_locked`); aware lower bound нормалізується до UTC, naive відхиляється до SQL |
+| `release(not_before=…)` | `leased → pending`, компенсує attempt і не пише error/dead letter; плановий defer не спалює спробу, lower bound має ту саму UTC-політику |
 | `quarantine` | так само, як `retry`, при `max_attempts` |
 | `recover_expired_leases` | один `UPDATE … RETURNING` з `SKIP LOCKED` (щоб не чекати рядки, які саме heartbeat-яться); maintenance/scheduler tick |
 | `enqueue` | `INSERT … ON CONFLICT DO NOTHING` + `SELECT` — **вимагає READ COMMITTED** (розділ 4) |
@@ -169,9 +174,9 @@ control plane: `set_source_state`, `add_policy_version`, `upsert_route` (лиш�
 |---|---|
 | `record_parse_result` | **одна транзакція**: узгодженість lineage (`attempt.fetch_id`/`raw_sha256`/`parser_version`/`domain` == `artifact_ref`, інакше `InvalidValueError` до першого запису) → `SELECT entity_index … FOR UPDATE` (row lock — атомарна видача `projection_version`) → `normalized_artifacts ON CONFLICT (object_key) DO NOTHING` → `parse_attempts INSERT` → `projection_version = existing + 1` → `projection_tasks INSERT` за unique `(entity_uuid, projection_version)` і `parse_key` → `outbox_events INSERT (projection.command, topic=internal)`. Повторний виклик з тим самим `parse_key` (той самий parse-крок) повертає існуючий task, `created=False` — ідемпотентність за ідентичністю parse-кроку, не за вмістом artifact (ADR-0007) |
 | `claim_projection_tasks` / `heartbeat_projection_task` / `retry_projection_task` / `quarantine_projection_task` | той самий патерн, що `queue.claim`/`heartbeat`/`retry`/`quarantine` (розділ «Queue»), над `projection_tasks` |
-| `release_projection_task` | симетричний до `queue.release`: `leased → pending`, `attempt` не змінюється, без audit |
+| `release_projection_task` | симетричний до `queue.release`: `leased → pending`, `attempt` не змінюється, aware `not_before`, без audit |
 | `recover_expired_projection_leases` | `UPDATE … RETURNING` з `SKIP LOCKED`, maintenance tick |
-| `acknowledge_projection` | **одна транзакція**: `projection_acknowledgements INSERT … ON CONFLICT (task_id) DO NOTHING` (повторний ack ідемпотентний, повертає наявний рядок) → `entity_index.confirmed_projection_version = GREATEST(existing, receipt.projection_version)` (ніколи не зменшується — тригер `entity_index_versions_monotonic`, міграція `0005`, форсує це навіть для `collector_migrate`) → `projection_tasks.status = 'succeeded'` → лише якщо `applied_to_current AND state_changed`: `change_events INSERT` + `outbox_events INSERT (domain.changed, topic=domain)` з `event_bytes`/hash **з receipt без reserialization** |
+| `acknowledge_projection(owner=…)` | **одна транзакція**: при заданому owner спочатку row lock і fencing за `status='leased' AND lease_owner=owner` (прострочений, але ще не recovered lease власника чинний) → `projection_acknowledgements INSERT … ON CONFLICT (task_id) DO NOTHING` → `entity_index.confirmed_projection_version = GREATEST(existing, receipt.projection_version)` → `projection_tasks.status = 'succeeded'` → за `applied_to_current AND state_changed`: `change_events` + `outbox_events(domain.changed)` з bytes/hash receipt без reserialization. `owner=None` лишено для reconciler-а |
 
 ### Outbox publisher (`repositories/outbox.py`, §7.3, R-30) — lease і паркування
 
@@ -179,14 +184,30 @@ control plane: `set_source_state`, `add_policy_version`, `upsert_route` (лиш�
 
 | Операція | Межа транзакції |
 |---|---|
-| `fetch_unpublished(limit, topics=(domain,), lock=True)` | коротка транзакція: `SELECT … FOR UPDATE SKIP LOCKED` за index `(published_at, available_at, event_id)` + **visibility lease** — вибраним рядкам `available_at` зсувається на `visibility_seconds` (типово 60 с) уперед, транзакція одразу комітиться. Інший publisher не бачить ці рядки ні паралельно (row lock), ні одразу після commit (до спливу lease); якщо publisher упав між `fetch_unpublished` і `mark_published`/`mark_failed`, рядок знову стає видимим після lease — звідси «щонайменше один раз». За замовчуванням — лише `topic='domain'` (fail-closed: внутрішня `projection.command` назовні не публікується, R-30) |
+| `fetch_unpublished(limit, topics=(domain,), max_delivery_attempts=10)` | коротка транзакція: `SELECT … FOR UPDATE SKIP LOCKED` + один UPDATE. Рядок нижче межі отримує visibility lease й `delivery_attempts + 1`; вичерпаний рядок паркується з `delivery_attempts_exhausted` і не повертається. Тому результат може бути коротшим за `limit` або `[]` при непорожньому backlog — publisher повторює poll; crash до `mark_failed` межу не обходить. За замовчуванням видається лише `domain` |
 | `mark_published` | ідемпотентний `UPDATE` (`published_at`); повторний виклик для вже опублікованого рядка — no-op |
 | `mark_failed(attempts, error, backoff)` | `UPDATE` з `BackoffPolicy`; після `max_attempts` (типово 10) рядок **паркується** (`parked_at`) і `fetch_unpublished` більше його не віддає, доки оператор не викличе `unpark` |
 | `list_parked` / `unpark` | read-only вибірка запаркованих рядків / `UPDATE parked_at = NULL` операторським рішенням |
 | `get_event` / `count_backlog` / `oldest_unpublished_age(topics=(domain,))` | read-only; `oldest_unpublished_age` узгоджена з `count_backlog` щодо `topic`/`parked_at` (виключає опубліковані й запарковані) |
+| `purge_published(older_than, after, limit)` | bounded keyset delete: старі published domain-рядки та internal-рядки лише після `projection_tasks.status='succeeded'` і наявного ack; quarantined/unacknowledged internal і unpublished domain не видаляються |
 
 Доставка публікується поза транзакцією БД (мережевий виклик до Mongo/шини) — `mark_published`/
 `mark_failed` викликається **після** цього, окремою короткою транзакцією.
+
+### Fetch preflight, validators і reconciler (PR3a)
+
+| Операція | Межа транзакції |
+|---|---|
+| `get_fetch_preflight(source_uuid, route_id)` | один SELECT `sources` + route + чинний immutable policy snapshot; повертає source/route state і revision перед мережею |
+| `latest_validators(source_uuid, normalized_url)` | один SELECT останнього успішного 200/206 за `source_id + requested_url_md5`; повний URL усуває ризик MD5-колізії, 304 не затіняє validators попереднього body |
+| `record_route_failure` | row lock route + atomic counter; перший перехід через threshold відкриває circuit, збільшує revision і пише audit в тій самій транзакції |
+| `reset_route_failures` | один UPDATE counter; state/revision не переписує |
+| `count_retries_since(source_uuid, since)` | read-only COUNT за aware UTC lower bound; naive відхиляється до SQL |
+| `list_stale_projection_tasks` / `list_quarantined_projection_tasks` | read-only keyset queries без `OFFSET`; перший використовує aware `now` і threshold |
+| `projection_completeness(created_before=…)` | два read-only агрегати tasks/outbox до aware UTC watermark; `settled` дозволяє quarantined, `complete` — ні |
+
+Усі API не комітять самі. `record_route_failure` викликач комітить разом із audit; preflight,
+validators, retry budget і reconciler queries виконуються в короткій read-only транзакції.
 
 ### Entity index (`repositories/entities.py`, §15 keyset)
 
@@ -282,6 +303,7 @@ Alembic autogenerate ігнорує child-таблиці (`partitions.is_partiti
 | unique `uq_change_events_event_id (event_id)` | `change_events` | ідемпотентність доменних подій змін (ADR-0007) |
 | partial `ix_projection_tasks_claimable_order` (`status`, предикат) | `projection_tasks` | той самий патерн, що `ix_crawl_jobs_claimable_order` (нижче) — hot path claim |
 | partial `ix_outbox_events_unpublished` | `outbox_events` | hot path `fetch_unpublished` без опублікованих/запаркованих рядків |
+| partial `ix_fetches_validators (source_id, requested_url_md5, fetched_at)` | кожна `fetches` partition | `latest_validators`; partition pruning + backward index scan, повний URL перевіряється як collision guard |
 
 ### `0002_claim_index` — партійний index під hot path `claim`
 
@@ -336,13 +358,13 @@ runtime-помилку на production. Нову CHECK-константу або
 після кожної міграції, яка змінює GRANT). Скрипт створює/тримає ролі `NOLOGIN` і жодного
 пароля не містить — LOGIN і паролі вмикає окрема команда (розділ 7.2).
 
-| Роль | Компонент | Права (PR1 + PR2) |
+| Роль | Компонент | Права (PR1–PR3a) |
 |---|---|---|
 | `collector_migrate` | лише міграції | owner усіх таблиць/функцій (`ALTER TABLE … OWNER TO`); LOGIN не отримує; **не** використовується runtime-кодом (`test_role_connections.py::test_migrate_role_is_not_referenced_by_runtime_code`) |
-| `collector_scheduler` | scheduler + controller + maintenance + outbox publisher | control plane/queue/limiter/pools/audit RW (PR1); PR2: SELECT на fetch/artifact/projection-таблиці, column-level UPDATE на `projection_tasks` (lease/status/attempt, не `parse_key`/версію/identity), `outbox_events` (available/published/parked/attempts, не payload/topic), `artifact_upload_claims` (sweeper-колонки) — `recover_expired_projection_leases`, `expire_claims`, `fetch_unpublished`/`mark_published`/`mark_failed` |
-| `collector_fetcher` | discovery/fetch/browser workers | control plane read + `crawl_jobs`/permits/routes/cursors (PR1); PR2: SELECT/INSERT на `fetches`, `raw_objects`; SELECT/INSERT/UPDATE на `artifact_upload_claims` |
+| `collector_scheduler` | scheduler + controller + maintenance + outbox publisher | PR1–PR2 права вище; PR3a: column UPDATE `outbox_events.delivery_attempts`, DELETE для bounded purge, INSERT `crawl_jobs` для reconcile/compact; payload/topic не змінює |
+| `collector_fetcher` | discovery/fetch/browser workers | PR1–PR2 права вище; PR3a: preflight/validators/retry-budget SELECT і column UPDATE лише `source_routes` counter/state/revision/circuit timestamps для атомарного failure tracking |
 | `collector_parser` | parse workers | queue (PR1); PR2: upload claims для normalized artifact-ів, INSERT на `parse_attempts`/`normalized_artifacts`, column-level UPDATE `normalized_artifacts(parse_attempt_id)` лише (pointer незмінний, CR-6/S-2), column-level INSERT/UPDATE на `entity_index` (лише identity-колонки й `projection_version` — версії/`confirmed_at`/`mongo_*` недосяжні, F-1/S-1), INSERT на `projection_tasks`/`outbox_events` з RLS-обмеженням `topic=internal` (нижче); жодного SELECT на `audit_log`, лише INSERT |
-| `collector_projector` | projector workers | worker_instances (PR1); PR2: SELECT `normalized_artifacts`; column-level UPDATE `projection_tasks` (лише lease/status/attempt-колонки — `parse_key`/`projection_version`/`artifact_id`/`entity_uuid`/`parse_attempt_id` незмінні, N-4 gate 4); column-level UPDATE `entity_index(confirmed_projection_version, confirmed_at, mongo_collection, mongo_document_id, updated_at)`; INSERT на `projection_acknowledgements`, `change_events`, `outbox_events` |
+| `collector_projector` | projector workers + reconciler | PR1–PR2 права вище; PR3a: SELECT для SR-4 на tasks/acks/entity/outbox, без publisher UPDATE; fencing ack використовує наявні lease-колонки |
 | `collector_translation` | translation workers | те саме, що `collector_projector` у PR1 (PR3 додасть news/translations) |
 | `collector_api_ro` | operator/read API | SELECT усіх 23 таблиць, нічого більше |
 | `collector_export_ro` | exporter | SELECT усіх 23 таблиць, нічого більше |
@@ -362,6 +384,9 @@ PR1) і `test_role_logins.py` (17 тестів, PR2) через окремі log
 - `collector_migrate` ніде не згадується в runtime-коді (лише `roles.py`/`sql/roles.sql`);
 - жоден runtime-логін не є членом `collector_migrate` і не має власного `CREATEDB`/`REPLICATION`
   (`verify_runtime_login`, gate 4 N-5).
+- PR3a-операції перевірені і позитивно під своєю LOGIN-роллю, і негативно під чужими:
+  scheduler publisher/purge, fetcher preflight/counter, projector fencing/reconciler, read-only
+  ролі не отримали write-доступ (`test_pr3a_roles.py` та adversarial role tests).
 
 ### 7.1. Column-level GRANT
 
