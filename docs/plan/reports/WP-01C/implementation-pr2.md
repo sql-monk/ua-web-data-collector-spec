@@ -193,3 +193,69 @@ markdownlint-cli2........................................................Passed
   payload `news.version_created`). Самостійних файлів `docs/plan/deps/WP-01B-to-WP-01C.md` /
   `WP-04-to-WP-01C.md` у репозиторії немає (запити зведено в картки) — статус оновлює оркестратор.
 - Нових запитів від WP-01C немає.
+
+## Fixes after gate 2
+
+Gate 2 — pass (`testing-pr2.md`, коміти тестувальника `a29c323`, `81d9af7` не переписувались).
+Знахідки закрито комітом `fix(wp-01c): close gate-2 findings ...`.
+
+| ID | Рішення | Де | Тест |
+|---|---|---|---|
+| M-1 (medium) `set` у `core` → недетермінований `state_hash` | **Заборона**, не сортування: масив у `JsonValue` — `Annotated[list[JsonValue], Strict()]`; `set`/`frozenset`/`tuple` → помилка валідації. Сортування безпечніше лише на вигляд: воно мовчки переставляло б елементи, порядок яких викликач міг вважати значущим, і маскувало б помилку parser-а (той самий принцип, що в `UtcDatetime` — відхиляти, не нормалізувати). JSON-шлях (projector, `model_validate_json`) не змінюється — JSON-масив завжди `list`. Snapshot-и не змінились (`Strict()` не впливає на JSON Schema). Зачіпає і PR1-блоки (`CurrentDocumentBase`, `DomainChangedEvent.payload`) — лише Python-callers з non-list, тобто саме помилковий шлях | `_base.py` `JsonValue` | `test_gate2_fixes.py::test_state_hash_identical_across_hash_seeds_and_set_always_rejected` (4 процеси, `PYTHONHASHSEED` 0/1/2/12345), `test_non_list_sequences_rejected_*` |
+| M-2 (medium) лише структурні межі | `BoundedJsonObject` додатково: рядок-значення ≤ 65 536 символів, ключ ≤ 256, ціле в `[-2^63, 2^63-1]` (BSON int64), canonical UTF-8 bytes блоку ≤ 1 MiB. Узгодження з 256 KiB: межа блоку свідомо більша — великий `domain.changed` payload іде через `payload_artifact` (`EventTooLargeError`), а три блоки ≤ 3 MiB лишають запас під 16 MiB Mongo. Схеми не змінились | `_base.py` | `test_string_length_limit`, `test_key_length_limit`, `test_int64_range`, `test_block_canonical_size_limit`, `test_block_limit_is_above_event_inline_limit` |
+| L-1 (low) одиночні сурогати | Закрито: `canonical_json_bytes` кидає `CanonicalEncodingError` (не сирий `UnicodeEncodeError`); `BoundedJsonObject` рахує canonical bytes на валідації, тож сурогат у блоках відхиляється моделлю. Тест тестувальника `test_lone_surrogate_in_python_input_never_produces_canonical_bytes` посилено до нової гарантії (новий коміт, історія не переписана) | `canonical.py`, `_base.py` | `test_lone_surrogate_is_canonical_encoding_error`, оновлений тест тестувальника |
+| L-2 (low) `source_locale_raw` без межі | `max_length=64` у `NewsVersionCreatedEvent` (snapshot `events/news_version_created.v1.json` оновлено; модель ще не злита, версія лишається `1.0`). `SourceTime.source_locale_raw` (PR1, злитий) не чіпав — посилення злитого контракту = major за `docs/contracts.md` §3 | `news.py` | `test_source_locale_raw_is_bounded` |
+| Запит WP-04 PR1: `language_unsupported` | Уже є з першого коміту PR2 (`9d9f1de`, snapshot `common/news_translation.v1.json` рядок 81; тест `test_quality_flags_contain_required_minimum`). Minor bump не потрібен: `1.0` ще не злитий і не мав споживачів, тож «попередньої minor-версії» без цього значення не існує; bump до `1.1` вимагав би fixture `1.0` без значення, якого ніколи не було | `enums.py` | наявний |
+
+`docs/contracts.md` §7 і §11.1 доповнено (заборона non-list масивів, нові межі, сурогати).
+
+### Команди після виправлень
+
+```text
+$ uv run ruff check .
+All checks passed!
+$ uv run ruff format --check .
+282 files already formatted
+$ uv run mypy src
+Success: no issues found in 81 source files
+$ uv run collector contracts export --check
+schemas up to date: schemas
+exit=0
+$ uv run pre-commit run --all-files
+fix end of files.........................................................Passed
+trim trailing whitespace.................................................Passed
+check yaml...............................................................Passed
+check toml...............................................................Passed
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+detect private key.......................................................Passed
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+Detect hardcoded secrets.................................................Passed
+markdownlint-cli2........................................................Passed
+```
+
+```text
+$ uv run pytest -m "not live" -q -rs
+(хвіст; -p no:cacheprovider, тому назви 2 падінь у виводі не збереглися — tail -8 їх обрізав)
+SKIPPED [1] tests\e2e\test_gui_runtime_contract.py:310: gui не відповідає на http://127.0.0.1:80 — підніміть `COMPOSE_PROFILES=core,workers,gui docker compose up -d --wait`
+SKIPPED [1] tests\e2e\test_runtime_suite_is_enforced.py:49: перевірка діє лише там, де стек обіцяний (COLLECTOR_E2E_REQUIRED=1 — крок job `docker` після `up -d --wait`)
+SKIPPED [1] tests\e2e\test_runtime_suite_is_enforced.py:62: перевірка діє лише там, де стек обіцяний (COLLECTOR_E2E_REQUIRED=1 — крок job `docker` після `up -d --wait`)
+SKIPPED [1] tests\unit\test_network_blocked.py:27: Windows: loopback потрібен asyncio
+2 failed, 1374 passed, 23 skipped, 8 warnings in 4986.64s (1:23:06)
+
+# Повторний прогін тих самих тестів двома частинами (разом = повний набір "not live"):
+$ uv run pytest -m "not live and not integration and not e2e" -q
+1081 passed, 1 skipped, 317 deselected, 8 warnings in 320.29s (0:05:20)
+$ uv run pytest -m "(integration or e2e) and not live" -q -rfE
+295 passed, 22 skipped, 1082 deselected, 2 warnings in 1049.20s (0:17:29)
+```
+
+**2 падіння в повному прогоні — не атрибутовані.** Прогін тривав 1 год 23 хв при 4 паралельних
+повних прогонах інших worktree (wp-00-5, wp-01b-1, wp-02-1, wp-01d-1c scaling) і їхніх
+контейнерах. Назви падінь не збереглися (без cache provider, вивід обрізано). Повторний прогін
+усього набору двома частинами — 0 падінь (1376 passed). Найімовірніше — відомі timing-флейки
+(PR1 `test_project_groups_scales_linearly_on_disjoint_merges`, що падав у першому прогоні, і/або
+scaling-тести WP-01D, `docs/plan/reports/WP-01D/flaky-scaling-tests.md`), але це **не
+доведено**; окремо позначаю як неперевірене. Нові тести gate-2 (`test_gate2_fixes.py`, 13) і вся
+група contracts зелені в обох прогонах.
