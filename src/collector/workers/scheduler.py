@@ -69,6 +69,8 @@ SchedulerTick = Callable[["AsyncSession", datetime], Awaitable[None]]
 """Вбудований maintenance-тік: одна транзакція. **Мусить бути ідемпотентним** (M-4)."""
 
 MAINTENANCE_TICK = "maintenance"
+MAINTENANCE_TIMEOUT_FLOOR_SECONDS = 30.0
+"""Мінімальна стеля одного maintenance-проходу (client-side `wait_for`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,9 +196,14 @@ class SchedulerRuntime:
             _Scheduled(
                 name=MAINTENANCE_TICK,
                 interval_seconds=config.tick_seconds,
-                # `statement_timeout` вже обмежує кожен запит тіку; стеля всього проходу —
-                # запас на кілька запитів, щоб зависле з'єднання не тримало цикл вічно.
-                timeout_seconds=max(config.statement_timeout_ms / 1000 * 3, config.tick_seconds),
+                # `statement_timeout` вже обмежує кожен запит тіку; стеля всього проходу лише не
+                # дає завислому з'єднанню тримати цикл вічно. Нижня межа 30 с: до PR1c стелі не
+                # було взагалі, а тісна стеля на завантаженій машині скасовувала б здоровий тік.
+                timeout_seconds=max(
+                    config.statement_timeout_ms / 1000 * 3,
+                    config.tick_seconds,
+                    MAINTENANCE_TIMEOUT_FLOOR_SECONDS,
+                ),
                 run=run_maintenance_tick,
             ),
             *(self._schedule_domain(item) for item in loaded),

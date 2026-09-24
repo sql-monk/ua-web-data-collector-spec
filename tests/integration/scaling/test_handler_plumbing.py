@@ -40,12 +40,19 @@ from collector.workers.handlers import (
 from collector.workers.roles import WorkerRole
 from collector.workers.runtime import DEFAULT_BACKOFF, WorkerRuntime
 
-from .conftest import NEEDS_PR3A, PAST, T0, WaitFor
+from .conftest import NEEDS_PR3A, PAST, PATIENT_TIMEOUT, T0, WaitFor
 
 pytestmark = pytest.mark.integration
 
 MakePool = Callable[..., Awaitable[int]]
 MakeConfig = Callable[..., WorkerRuntimeConfig]
+
+
+@pytest.fixture
+def wait_for(patient_wait_for: WaitFor) -> WaitFor:
+    """Бюджет `PATIENT_TIMEOUT` (conftest): очікування включає boot runtime під LOGIN-роллю."""
+    return patient_wait_for
+
 
 SPEC_10 = RetrySchedule(
     (timedelta(seconds=5), timedelta(seconds=30), timedelta(minutes=2), timedelta(minutes=10))
@@ -130,7 +137,7 @@ class Harness:
 
     async def close(self) -> None:
         self.stop.set()
-        await asyncio.wait_for(self.task, timeout=15)
+        await asyncio.wait_for(self.task, timeout=PATIENT_TIMEOUT)
 
 
 @pytest.fixture

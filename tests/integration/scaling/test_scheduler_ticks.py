@@ -28,12 +28,19 @@ from collector.workers.config import SchedulerRuntimeConfig
 from collector.workers.registry import DomainTickSpec, LoadedTick
 from collector.workers.scheduler import MAINTENANCE_TICK, SchedulerRuntime, TickContext
 
-from .conftest import T0, WaitFor, make_entity, record_parse_result
+from .conftest import PATIENT_TIMEOUT, T0, WaitFor, make_entity, record_parse_result
 
 pytestmark = pytest.mark.integration
 
 MakePool = Callable[..., Awaitable[int]]
 EnqueueJobs = Callable[..., Awaitable[list[UUID]]]
+
+
+@pytest.fixture
+def wait_for(patient_wait_for: WaitFor) -> WaitFor:
+    """Бюджет `PATIENT_TIMEOUT` (conftest): очікування включає boot runtime під LOGIN-роллю."""
+    return patient_wait_for
+
 
 FAST = SchedulerRuntimeConfig(
     lease_name="scheduler-ticks", tick_seconds=0.02, lease_retry_seconds=0.02
@@ -68,7 +75,7 @@ def tick(
     run: Callable[[TickContext], Awaitable[None]],
     *,
     interval: float = 0.01,
-    timeout: float = 5.0,
+    timeout: float = 30.0,
 ) -> LoadedTick:
     return LoadedTick(DomainTickSpec(name, f"tests:{name}", interval, timeout), run)
 
@@ -102,7 +109,7 @@ async def test_default_tick_recovers_expired_projection_leases(
     assert (projection_task.status, projection_task.lease_owner) == ("pending", None)
     assert projection_task.attempt == 1, "recover зберігає attempt"
     scheduler.request_stop()
-    await asyncio.wait_for(task, timeout=15)
+    await asyncio.wait_for(task, timeout=PATIENT_TIMEOUT)
 
 
 async def test_failing_or_hanging_domain_tick_does_not_stop_maintenance_or_lease(
@@ -141,7 +148,7 @@ async def test_failing_or_hanging_domain_tick_does_not_stop_maintenance_or_lease
         job = await session.get(CrawlJob, job_id)
     assert job is not None and job.status == "pending", "maintenance повернув lease"
     scheduler.request_stop()
-    await asyncio.wait_for(task, timeout=15)
+    await asyncio.wait_for(task, timeout=PATIENT_TIMEOUT)
 
 
 async def count_reconcile_jobs(sessions: async_sessionmaker[AsyncSession]) -> int:
@@ -181,13 +188,17 @@ async def test_two_schedulers_with_the_same_domain_tick_enqueue_no_duplicates(
         clock=fixed,
     )
     first_task = start(first, running)
-    await wait_for(lambda: first.tick_runs.get("projection.reconcile", 0) >= 3, what="first тікає")
+    await wait_for(
+        lambda: first.tick_runs.get("projection.reconcile", 0) >= 3,
+        what="first тікає",
+    )
     second_task = start(second, running)
     await wait_for(lambda: second.attempted.is_set(), what="second пробував lease")
     first.request_stop()
-    await asyncio.wait_for(first_task, timeout=15)
+    await asyncio.wait_for(first_task, timeout=PATIENT_TIMEOUT)
     await wait_for(
-        lambda: second.tick_runs.get("projection.reconcile", 0) >= 3, what="second перейняв тік"
+        lambda: second.tick_runs.get("projection.reconcile", 0) >= 3,
+        what="second перейняв тік",
     )
     assert await count_reconcile_jobs(pg_sessions) == 1
 
@@ -209,7 +220,7 @@ async def test_two_schedulers_with_the_same_domain_tick_enqueue_no_duplicates(
     await asyncio.gather(*(schedule_reconcile(ctx) for ctx in contexts))
     assert await count_reconcile_jobs(pg_sessions) == 1, "те саме вікно — та сама job"
     second.request_stop()
-    await asyncio.wait_for(second_task, timeout=15)
+    await asyncio.wait_for(second_task, timeout=PATIENT_TIMEOUT)
 
 
 async def test_domain_tick_sees_its_lease_and_opens_bounded_transactions(
@@ -234,4 +245,4 @@ async def test_domain_tick_sees_its_lease_and_opens_bounded_transactions(
     assert FAST.statement_timeout_ms == 1000
     assert seen[0][1] == "1s", "statement_timeout scheduler-а діє і в доменному тіку"
     scheduler.request_stop()
-    await asyncio.wait_for(task, timeout=15)
+    await asyncio.wait_for(task, timeout=PATIENT_TIMEOUT)

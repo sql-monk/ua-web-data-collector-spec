@@ -44,6 +44,7 @@ from collector.workers.runtime import WorkerRuntime
 
 from .conftest import (
     NEEDS_PR3A,
+    PATIENT_TIMEOUT,
     PROJECTION_COLLECTION,
     T0,
     RoleSessions,
@@ -58,6 +59,12 @@ pytestmark = pytest.mark.integration
 MakePool = Callable[..., Awaitable[int]]
 EnqueueJobs = Callable[..., Awaitable[list[UUID]]]
 MakeConfig = Callable[..., WorkerRuntimeConfig]
+
+
+@pytest.fixture
+def wait_for(patient_wait_for: WaitFor) -> WaitFor:
+    """Бюджет `PATIENT_TIMEOUT` (conftest): очікування включає boot runtime під LOGIN-роллю."""
+    return patient_wait_for
 
 
 class FakeProjector(TaskHandler):
@@ -181,7 +188,7 @@ class Projector:
 
     async def close(self) -> None:
         self.stop.set()
-        await asyncio.wait_for(self.task, timeout=15)
+        await asyncio.wait_for(self.task, timeout=PATIENT_TIMEOUT)
 
 
 MakeProjector = Callable[..., Projector]
