@@ -53,6 +53,8 @@ MANDATORY_INDEXES = {
     "projection_tasks": {("status", "not_before", "priority", "task_id")},
     "outbox_events": {("published_at", "available_at", "event_id")},
     "entity_index": {("domain", "confirmed_projection_version", "entity_uuid")},
+    # PR3a п.5: `artifacts.latest_validators`.
+    "fetches": {("source_id", "requested_url_md5", "fetched_at")},
 }
 
 
@@ -173,3 +175,16 @@ def test_revision_columns_on_versioned_resources() -> None:
         "origin_rate_buckets",
     ):
         assert "revision" in Base.metadata.tables[name].columns, name
+
+
+def test_pr3a_validators_index_and_delivery_counter() -> None:
+    fetches = Base.metadata.tables["fetches"]
+    validators = next(ix for ix in fetches.indexes if ix.name == "ix_fetches_validators")
+    where = str(validators.dialect_options["postgresql"]["where"])
+    assert "outcome = 'success'" in where and "http_status IN (200, 206)" in where
+    computed = fetches.c.requested_url_md5.computed
+    assert computed is not None and computed.persisted
+    assert str(computed.sqltext) == "md5(requested_url)"
+    outbox = Base.metadata.tables["outbox_events"]
+    assert not outbox.c.delivery_attempts.nullable
+    assert "delivery_attempts >= 0" in _checks("outbox_events")

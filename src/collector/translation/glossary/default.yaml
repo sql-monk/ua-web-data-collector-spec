@@ -1,0 +1,28 @@
+# Glossary перекладу новин → українська (owner WP-04; формат — collector.translation.glossary).
+# Будь-яка зміна вмісту змінює glossary_version (SHA-256 canonical JSON) і, через TM key,
+# інвалідує translation memory для пар, яких вона стосується. Записи: `target` — українська
+# форма; `keep: true` — do-not-translate (назви видань, бренди).
+schema: 1
+target_language: uk
+pairs:
+  "*":
+    - term: NATO
+      target: НАТО
+    - term: Politico Europe
+      keep: true
+    - term: Euractiv
+      keep: true
+  de:
+    - term: Bundestag
+      target: Бундестаг
+    - term: Tagesschau
+      keep: true
+  fr:
+    - term: Assemblée nationale
+      target: Національні збори
+  pl:
+    - term: Sejm
+      target: Сейм
+  en:
+    - term: Brussels Times
+      keep: true

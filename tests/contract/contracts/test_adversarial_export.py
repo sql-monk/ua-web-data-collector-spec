@@ -66,7 +66,7 @@ def test_every_public_model_has_exactly_one_snapshot_on_disk() -> None:
     on_disk = sorted(p.relative_to(SCHEMAS_DIR).as_posix() for p in SCHEMAS_DIR.rglob("*.json"))
     expected = sorted(c.relative_path.as_posix() for c in EXPORTED_CONTRACTS)
     assert on_disk == expected
-    assert len(expected) == 32
+    assert len(expected) == 41  # PR1: 32; PR2: +9 (payload, records, news)
 
 
 PROBE_IMPORT_IS_PURE = r"""

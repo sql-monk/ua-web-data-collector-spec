@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,9 +44,15 @@ from collector.persistence.postgres.config import PostgresSettings
 from collector.persistence.postgres.engine import create_engine, create_session_factory
 from collector.persistence.postgres.migrations import upgrade_to_head
 from collector.persistence.postgres.models import EntityIndex
+from collector.persistence.postgres.ops import apply_database_roles
 from collector.persistence.postgres.partitions import ensure_month_partitions
 from collector.persistence.postgres.repositories import entities, projection
-from collector.persistence.postgres.roles import apply_roles
+from collector.persistence.postgres.roles import (
+    RUNTIME_ROLES,
+    apply_roles,
+    dsn_secret_name,
+    load_role_logins,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -326,3 +332,64 @@ def receipt(
         cluster_time=f"1790000000:{version}",
         **fields,
     )
+
+
+# --- LOGIN-ролі per component (PR2 `test_role_logins.py`; PR3a — нові операції) -------
+# Ролі кластерні (спільні для всіх тестових БД), тому `logins` після тесту повертає їх у
+# NOLOGIN без пароля. Паролі — одноразові `secrets.token_hex` у рантаймі (жодного secret у
+# fixtures).
+
+
+@dataclass(frozen=True, slots=True)
+class Logins:
+    database: PostgresSettings
+    secrets_dir: Path
+    urls: dict[str, URL]
+
+
+RoleEngine = Callable[[str], Awaitable[AsyncEngine]]
+
+
+async def reset_role_logins(admin: AsyncEngine) -> None:
+    async with admin.connect() as conn:
+        for role in RUNTIME_ROLES:
+            await conn.execute(text(f'ALTER ROLE "{role}" WITH NOLOGIN PASSWORD NULL'))
+
+
+def write_role_secrets(database: PostgresSettings, directory: Path) -> dict[str, URL]:
+    urls: dict[str, URL] = {}
+    for role in RUNTIME_ROLES:
+        url = database.url.set(username=role, password=secrets.token_hex(24))
+        (directory / dsn_secret_name(role)).write_text(
+            url.render_as_string(hide_password=False) + "\n", encoding="utf-8"
+        )
+        urls[role] = url
+    return urls
+
+
+@pytest.fixture
+async def logins(pg_database: PostgresSettings, tmp_path: Path) -> AsyncIterator[Logins]:
+    admin = create_async_engine(pg_database.url, isolation_level="AUTOCOMMIT", poolclass=None)
+    urls = write_role_secrets(pg_database, tmp_path)
+    try:
+        await apply_database_roles(pg_database, logins=load_role_logins(tmp_path))
+        yield Logins(database=pg_database, secrets_dir=tmp_path, urls=urls)
+    finally:
+        await reset_role_logins(admin)
+        await admin.dispose()
+
+
+@pytest.fixture
+async def role_engine(logins: Logins) -> AsyncIterator[RoleEngine]:
+    engines: list[AsyncEngine] = []
+
+    async def make(role: str) -> AsyncEngine:
+        engine = create_async_engine(logins.urls[role], poolclass=None)
+        engines.append(engine)
+        return engine
+
+    try:
+        yield make
+    finally:
+        for engine in engines:
+            await engine.dispose()

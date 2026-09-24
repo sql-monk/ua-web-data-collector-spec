@@ -49,7 +49,10 @@ APPENDIX_A_PACKAGES = (
 # (картка WP-01A, docs/plan/deps/WP-01A-to-WP-00.md), тож вони вибули зі списку;
 # `psycopg` лишається забороненим — runtime підтримує лише драйвер asyncpg
 # (collector.persistence.postgres.config.normalize_async_url).
-FORBIDDEN_FOUNDATION_DEPS = ("scrapy", "httpx", "psycopg")
+# WP-02 PR1 додав httpx як fetch core (docs/decisions/0008-fetch-core-on-httpx-not-scrapy.md,
+# рішення користувача U-1), тож він вибув зі списку; `scrapy` лишається забороненим тим самим
+# ADR-0008 — fetch core не використовує Scrapy в жодному компоненті.
+FORBIDDEN_FOUNDATION_DEPS = ("scrapy", "psycopg")
 SPEC_16_2_PYTHON_COMMANDS = (
     "uv sync --frozen",
     "uv run ruff check .",
@@ -76,12 +79,9 @@ def test_package_is_typed_and_python_pinned() -> None:
 def test_foundation_dependencies_exclude_domain_libraries() -> None:
     deps = [d.lower() for d in PYPROJECT["project"]["dependencies"]]
     dev = [d.lower() for d in PYPROJECT["dependency-groups"]["dev"]]
-    # Заборона картки стосується runtime [project.dependencies]; у dev-групі httpx дозволений
-    # лише для тестів мережевої політики (коментар у pyproject), решта — і там заборонена.
     for forbidden in FORBIDDEN_FOUNDATION_DEPS:
         assert not any(d.startswith(forbidden) for d in deps), forbidden
-        if forbidden != "httpx":
-            assert not any(d.startswith(forbidden) for d in dev), forbidden
+        assert not any(d.startswith(forbidden) for d in dev), forbidden
     assert any(d.startswith("pydantic>=2") for d in deps)
     for required in (
         "ruff",

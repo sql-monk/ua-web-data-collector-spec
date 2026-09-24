@@ -22,9 +22,9 @@ indent 2, LF; `$id` = `https://ua-collector.local/schemas/<group>/<name>.v<major
 
 | Група | Вміст | Споживачі |
 |---|---|---|
-| `common/` | value objects і shared блоки (identity, temporal, money/contacts, artifact refs, upload claim, lineage) | усі WP |
-| `events/` | повідомлення між компонентами: `projection_command`, `projection_acknowledgement`, `domain_changed_event`, `encoded_event` | WP-01A (outbox), WP-01D, consumers |
-| `mongo/` | документи MongoDB: `current_document_base`, `applied_projection_receipt` — з них WP-01B генерує `$jsonSchema` validators | WP-01B, WP-07, WP-09 |
+| `common/` | value objects і shared блоки (identity, temporal, money/contacts, artifact refs, upload claim, lineage, `observed_values`, `version_snapshot`) і shared records поза Mongo (`news_translation` — рядок `news_translations` WP-01A / результат WP-04) | усі WP |
+| `events/` | повідомлення між компонентами: `projection_command`, `projection_acknowledgement`, `domain_changed_event`, `encoded_event`, `news_version_created`, `normalized_projection_payload` (вміст normalized artifact: parser → projector) | WP-01A (outbox), WP-01B, WP-01D, WP-04, consumers |
+| `mongo/` | документи MongoDB collections: `current_document_base`, `applied_projection_receipt`, `entity_projection_version`, `observation_record`, `seller_contact_observation`, `review_question_record` — з них WP-01B генерує `$jsonSchema` validators | WP-01B, WP-07, WP-09 |
 | `releases/` | `release_manifest`, `release_part`, watermark/inclusion/versions, `resolution_decision`, `resolution_snapshot` | WP-11A, WP-11C |
 
 Major піднімається лише для breaking-змін (§9.4) — тоді з'являється новий файл `*.v2.json`;

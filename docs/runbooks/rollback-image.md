@@ -8,8 +8,10 @@ compose-стек до попереднього стану без втрати д
 
 - `COLLECTOR_IMAGE` (default `collector:dev`, CI — `collector:ci`) — єдина точка керування
   версією application image (`docker-compose.yml`, anchor `x-collector-image`). Vendor images
-  (`postgres`, `mongo`, `minio`) вже pinned `tag@digest` у базовому файлі — їхній rollback =
-  правка digest у `docker-compose.yml` і крок 3 нижче (без окремої процедури).
+  `postgres`/`mongo` pinned як `tag@digest`. MinIO збирається з pinned upstream module version,
+  commit і pinned Go/Alpine base digests; його rollback = правка `MINIO_VERSION`, commit,
+  release metadata та (за потреби) base digests у `deploy/compose/minio/Dockerfile`, після чого
+  крок 3 нижче з обов'язковим rebuild.
 - **Відоме обмеження (ADR-0002, знахідка пострев'ю F-3, owner WP-14):** `collector` зараз має
   лише mutable local/CI tag, без публікації в registry з immutable digest. Тому rollback «за
   digest» на одному хості можливий лише якщо потрібний image ще є в локальному Docker image
@@ -127,8 +129,9 @@ docker compose up -d --wait gui                                    # 3. замі
 
 - Rollback схеми БД (PostgreSQL migrations, MongoDB validators/indexes) — forward-only у PR2
   (`migrate-postgres` — стаб); down-migrations і сумісність схеми — owner WP-01A/WP-01B.
-- Rollback vendor images (`postgres`/`mongo`/`minio`) — зміна `tag@digest` у
-  `docker-compose.yml`, той самий крок 3 (без ребілду).
+- Rollback vendor images `postgres`/`mongo` — зміна `tag@digest` у `docker-compose.yml`, той
+  самий крок 3. MinIO — синхронна зміна pinned release/commit у його Dockerfile + rebuild,
+  описана в «Контекст і обмеження».
 - Автоматизований release/registry rollback (`collector release verify`, digest з registry
   у GUI-керованому процесі) — WP-11A/WP-14, поза PR2.
 - Те саме обмеження mutable tag стосується і `collector-gui`: у registry він ще не

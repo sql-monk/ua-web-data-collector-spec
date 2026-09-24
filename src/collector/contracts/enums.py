@@ -157,6 +157,37 @@ class ObservationReason(StrEnum):
 
 
 @unique
+class ReviewQuestionKind(StrEnum):
+    """Тип user-generated запису каталогу (§5.2, §9.2 `product_reviews`/`product_questions`)."""
+
+    REVIEW = "review"
+    QUESTION = "question"
+
+
+@unique
+class TranslationStatus(StrEnum):
+    """Статус версії перекладу новини (§5.4); єдиний enum статусу перекладу в проєкті (§5.5).
+
+    Закритий: рівно чотири значення; нове значення — major (споживачі читають як закритий).
+    """
+
+    PENDING = "pending"
+    TRANSLATED = "translated"
+    NOT_REQUIRED = "not_required"
+    TRANSLATION_FAILED = "translation_failed"
+
+
+@unique
+class TranslationQualityFlag(StrEnum):
+    """Прапорці якості перекладу (§5.4, §12.1); розширюється minor-версією через WP-01C."""
+
+    PRESERVATION_FAILED = "preservation_failed"
+    LOW_LANGUAGE_CONFIDENCE = "low_language_confidence"
+    PROVIDER_TRUNCATED = "provider_truncated"
+    LANGUAGE_UNSUPPORTED = "language_unsupported"
+
+
+@unique
 class ResolutionAction(StrEnum):
     """Дія entity resolution decision (§9.8)."""
 

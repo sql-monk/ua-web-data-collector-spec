@@ -1,6 +1,7 @@
 """`domain.changed` event і canonical serialization (§7.3, §9.5; R-30, R-37, R-42).
 
-`DomainChangedEvent` — єдина публічна подія домену; `projection.command` (`projection.py`)
+`DomainChangedEvent` — публічна подія зміни Mongo current state; `news.version_created`
+(`news.py`) — публічна подія нової версії статті; `projection.command` (`projection.py`)
 є внутрішньою командою projector і ніколи не публікується (R-30). `encode_event()` один раз
 формує ready-to-publish UTF-8 bytes зі стабільним `event_id`; receipt/outbox зберігають ці
 bytes без повторної серіалізації, тож replay після crash byte-equivalent. Inline payload
@@ -9,7 +10,7 @@ bytes без повторної серіалізації, тож replay післ
 
 from __future__ import annotations
 
-from typing import Annotated, Final
+from typing import Annotated, ClassVar, Final
 from uuid import UUID
 
 from pydantic import Field, StringConstraints, model_validator
@@ -18,6 +19,7 @@ from collector.contracts._base import ContractModel, JsonObject, SchemaVersion, 
 from collector.contracts.artifacts import ArtifactRef
 from collector.contracts.canonical import canonical_json_bytes, sha256_hex
 from collector.contracts.identity import EntityId, Sha256Hex
+from collector.contracts.news import NewsVersionCreatedEvent
 from collector.contracts.temporal import UtcDatetime
 
 EVENT_INLINE_LIMIT_BYTES: Final = 256 * 1024
@@ -46,6 +48,7 @@ class DomainChangedEvent(VersionedDocument):
 
     contract_version = "1.0"
     schema_version: SchemaVersion = "1.0"
+    media_type: ClassVar[str] = DOMAIN_CHANGED_MEDIA_TYPE
 
     event_id: UUID = Field(description="Стабільний ID події; той самий при replay.")
     aggregate_id: EntityId
@@ -85,8 +88,12 @@ class EncodedEvent(ContractModel):
         return self
 
 
-def encode_event(event: DomainChangedEvent) -> EncodedEvent:
-    """Детерміновані UTF-8 bytes події + media type + SHA-256.
+type PublishableEvent = DomainChangedEvent | NewsVersionCreatedEvent
+"""Події з canonical bytes: `domain.changed` (§7.3) і `news.version_created` (§9.1)."""
+
+
+def encode_event(event: PublishableEvent) -> EncodedEvent:
+    """Детерміновані UTF-8 bytes події + media type класу події + SHA-256.
 
     Byte-equivalent для рівних подій незалежно від порядку полів/процесу; `EventTooLargeError`,
     якщо bytes > 256 KiB — викликач переносить payload в immutable artifact.
@@ -97,7 +104,7 @@ def encode_event(event: DomainChangedEvent) -> EncodedEvent:
     return EncodedEvent(
         event_id=event.event_id,
         event_bytes=data,
-        event_media_type=DOMAIN_CHANGED_MEDIA_TYPE,
+        event_media_type=type(event).media_type,
         event_sha256=sha256_hex(data),
     )
 
@@ -105,3 +112,8 @@ def encode_event(event: DomainChangedEvent) -> EncodedEvent:
 def decode_event(data: bytes) -> DomainChangedEvent:
     """Зворотне перетворення canonical bytes → модель (round-trip для тестів/consumers)."""
     return DomainChangedEvent.model_validate_json(data)
+
+
+def decode_news_version_created(data: bytes) -> NewsVersionCreatedEvent:
+    """Canonical bytes `news.version_created` → модель (consumer WP-04, round-trip тести)."""
+    return NewsVersionCreatedEvent.model_validate_json(data)

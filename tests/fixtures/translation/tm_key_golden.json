@@ -1,0 +1,13 @@
+{
+  "description": "Зафіксоване значення TM key (FR-017) — стабільність між процесами/ОС; зміна = зміна алгоритму ключа й інвалідизація TM.",
+  "masked_text": "Der Stadtrat hat <x id=\"1\"/> Euro beschlossen.",
+  "normalized_segment_hash": "258cdd6484a0c92e06bdd6484833dc92c6c91393d6a834906340527c0a567cbd",
+  "components": {
+    "source_language": "de",
+    "target_language": "uk",
+    "provider": "google-cloud-translation-v3",
+    "model_version": "nmt",
+    "glossary_version": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "key": "2c7ddfa1ecf8b0b7fc8e3c6b68f0fb7a53bdc6703c3fc00fe7341e4863d73e7f"
+}

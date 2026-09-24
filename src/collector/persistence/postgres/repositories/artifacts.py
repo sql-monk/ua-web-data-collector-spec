@@ -1,7 +1,9 @@
 """Artifact store lineage і claimed/verified PUT protocol (§10 п.5, п.7; R-38, R-41).
 
 Операції: `record_fetch`, `record_raw_object`, `acquire_upload_claim`, `commit_reference`,
-`release_claim`, `expire_claims`, `list_orphan_candidates`, `get_claim`.
+`release_claim`, `expire_claims`, `list_orphan_candidates`, `get_claim`; читання fetch-історії
+для fetcher-а (PR3a): `latest_validators` (conditional GET), `count_retries_since` (денний
+retry budget).
 
 Протокол завантаження (§10 п.5) у трьох кроках producer-а:
 
@@ -23,13 +25,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import Select, and_, exists, select, update
+from sqlalchemy import ColumnElement, Select, and_, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.contracts import NormalizedArtifactRef, new_entity_id
 from collector.contracts.enums import ContentAccess, FetchOutcome, UploadClaimStatus
-from collector.persistence.postgres.clock import resolve_now
+from collector.persistence.postgres.clock import require_aware_utc, resolve_now
 from collector.persistence.postgres.errors import NotFoundError, StaleClaimError
 from collector.persistence.postgres.models import (
     ArtifactUploadClaim,
@@ -96,6 +98,83 @@ async def record_fetch(
     session.add(fetch)
     await session.flush()
     return fetch
+
+
+@dataclass(frozen=True, slots=True)
+class Validators:
+    """HTTP validators останньої відповіді з тілом (PR3a п.5, WP-02 п.2, FR-004)."""
+
+    etag: str | None
+    last_modified: str | None
+    """Сирий `Last-Modified` (як прийшов від джерела; парсинг — справа fetch-а)."""
+    fetched_at: datetime
+
+
+VALIDATOR_HTTP_STATUSES: tuple[int, ...] = (200, 206)
+"""Відповіді, що несуть тіло і тому оновлюють validators; 304 (O-7: `outcome=success`,
+`raw_sha256=NULL`) — ні."""
+
+
+async def latest_validators(
+    session: AsyncSession, source_uuid: UUID, normalized_url: str
+) -> Validators | None:
+    """`ETag`/`Last-Modified` з **останнього** `fetches` цього джерела і URL з `outcome =
+    success` і `http_status IN (200, 206)` (PR3a п.5).
+
+    - 304 validators не оновлює: пізніший 304 → повертаються validators попереднього 200;
+    - пізніший 200 без `ETag`/`Last-Modified` → `Validators(None, None, fetched_at)`, а не
+      старіші значення: вони описують тіло, якого вже немає;
+    - жодного такого fetch → `None`.
+
+    `normalized_url` порівнюється з `fetches.requested_url` (fetch пише туди вже
+    нормалізований URL, §9.3). Запит іде за partial index `ix_fetches_validators`
+    (`source_id, requested_url_md5, fetched_at`) — index scan назад у кожній партиції, без
+    seq scan (EXPLAIN — `test_fetch_preflight.py`); `requested_url` звіряється додатково, тож
+    колізія md5 не дає чужих validators. Transaction boundary: викликач; один SELECT.
+    """
+    row = (
+        await session.execute(
+            select(Fetch.etag, Fetch.last_modified_raw, Fetch.fetched_at)
+            .where(*validators_predicate(source_uuid, normalized_url))
+            .order_by(Fetch.fetched_at.desc())
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    etag, last_modified, fetched_at = row._tuple()
+    return Validators(etag=etag, last_modified=last_modified, fetched_at=fetched_at)
+
+
+def validators_predicate(source_uuid: UUID, normalized_url: str) -> tuple[ColumnElement[bool], ...]:
+    """WHERE `latest_validators`; окремо — щоб тест EXPLAIN перевіряв саме цей запит."""
+    return (
+        Fetch.source_id == source_uuid,
+        Fetch.requested_url_md5 == func.md5(normalized_url),
+        Fetch.requested_url == normalized_url,
+        Fetch.outcome == FetchOutcome.SUCCESS.value,
+        Fetch.http_status.in_(VALIDATOR_HTTP_STATUSES),
+    )
+
+
+async def count_retries_since(session: AsyncSession, source_uuid: UUID, since: datetime) -> int:
+    """Кількість `fetches` джерела з `outcome = retryable` і `fetched_at >= since` (PR3a п.8,
+    денний retry budget §10). Межу і реакцію на її перевищення визначає WP-02.
+
+    Агрегат за `ix_fetches_source_id_fetched_at`; предикат за `fetched_at` відсікає зайві
+    місячні партиції (partition pruning). Transaction boundary: викликач; один SELECT.
+    """
+    lower_bound = require_aware_utc(since, parameter="since")
+    total = await session.scalar(
+        select(func.count())
+        .select_from(Fetch)
+        .where(
+            Fetch.source_id == source_uuid,
+            Fetch.fetched_at >= lower_bound,
+            Fetch.outcome == FetchOutcome.RETRYABLE.value,
+        )
+    )
+    return int(total or 0)
 
 
 async def record_raw_object(
@@ -478,15 +557,20 @@ def normalized_artifact_values(
 
 
 __all__ = [
+    "VALIDATOR_HTTP_STATUSES",
     "FetchRecord",
+    "Validators",
     "acquire_upload_claim",
     "commit_reference",
+    "count_retries_since",
     "expire_claims",
     "get_claim",
     "get_normalized_artifact",
+    "latest_validators",
     "list_orphan_candidates",
     "normalized_artifact_values",
     "record_fetch",
     "record_raw_object",
     "release_claim",
+    "validators_predicate",
 ]
