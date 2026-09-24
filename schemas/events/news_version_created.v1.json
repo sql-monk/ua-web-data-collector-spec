@@ -178,6 +178,7 @@
     "source_locale_raw": {
       "anyOf": [
         {
+          "maxLength": 64,
           "type": "string"
         },
         {

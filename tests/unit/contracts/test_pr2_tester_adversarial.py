@@ -39,7 +39,7 @@ from collector.contracts._base import (
     MAX_JSON_DEPTH,
     MAX_JSON_OBJECT_KEYS,
 )
-from collector.contracts.canonical import canonical_json_bytes
+from collector.contracts.canonical import CanonicalEncodingError, canonical_json_bytes
 from collector.contracts.enums import (
     DataDomain,
     EffectiveAtBasis,
@@ -192,17 +192,16 @@ def test_lone_surrogate_json_escape_rejected_by_projector_path() -> None:
 
 
 def test_lone_surrogate_in_python_input_never_produces_canonical_bytes() -> None:
-    # Знахідка тестувальника (medium): у Python-input lone surrogate проходить валідацію моделі,
-    # а canonical bytes не будуються. Мінімальна гарантія, яку фіксує тест: замість «тихих»
-    # bytes — ValueError (UnicodeEncodeError), тобто permanent у викликача.
-    payload = build(core={"title": "x" + LONE_HIGH})
-    with pytest.raises(ValueError):
-        canonical_json_bytes(payload)
-    event = NewsVersionCreatedEvent.model_validate(
-        news_version_created_payload(source_locale_raw="de-" + LONE_LOW)
-    )
-    with pytest.raises(ValueError):
-        encode_event(event)
+    # Gate 2 L-1 (закрито): bounded-блоки відхиляють lone surrogate вже на валідації моделі;
+    # поза блоками (event-рядки) canonical_json_bytes/encode_event кидають CanonicalEncodingError.
+    with pytest.raises(ValidationError, match="сурогат"):
+        build(core={"title": "x" + LONE_HIGH})
+    with pytest.raises(ValidationError):  # constrained str (max_length=64) відхиляє сурогат
+        NewsVersionCreatedEvent.model_validate(
+            news_version_created_payload(source_locale_raw="de-" + LONE_LOW)
+        )
+    with pytest.raises(CanonicalEncodingError, match="сурогат"):
+        canonical_json_bytes({"title": "x" + LONE_LOW})
 
 
 def test_json_origin_payload_state_hash_is_deterministic() -> None:

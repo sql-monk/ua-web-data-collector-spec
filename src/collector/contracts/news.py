@@ -66,7 +66,7 @@ class NewsVersionCreatedEvent(VersionedDocument):
     version_number: int = Field(ge=1, description="Монотонна версія статті (aggregate_version).")
     source: SourceIdentity
     original_language: LanguageCode
-    source_locale_raw: str | None = Field(
+    source_locale_raw: Annotated[str, StringConstraints(max_length=64)] | None = Field(
         default=None, description="Declared locale джерела як отримано (`lang`, `og:locale`)."
     )
     content_access: ContentAccess

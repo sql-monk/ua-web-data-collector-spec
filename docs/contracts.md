@@ -200,6 +200,10 @@ media type береться з `ClassVar media_type` класу події, фо
 **Strict JSON у блоках (CR-01).** `core`, `attributes`, `latest_state` (і `DomainChangedEvent.payload`)
 типізовані як рекурсивний `JsonValue` = `str | int | float(finite) | bool | None | list | dict[str, …]`
 у strict-режимі: `datetime`, `Decimal`, `UUID`, `bytes`, NaN/inf відхиляються **на конструюванні**.
+Масив — лише `list`: `set`/`frozenset`/`tuple` відхиляються (gate 2 WP-01C PR2, M-1), бо порядок
+`set` залежить від `PYTHONHASHSEED` і `state_hash` різнився б між процесами; детерміноване
+сортування відкинуто — воно мовчки змінювало б порядок, який викликач міг вважати значущим.
+`canonical_json_bytes` для рядка з одиночним сурогатом кидає `CanonicalEncodingError`.
 Час у блоках — лише рядок у canonical-форматі (`…T12:00:00.000000Z`), гроші — `{"amount_minor": int,
 "currency": str}`. Наслідок: `state_hash` рахується над тими самими значеннями, що й після
 JSON/BSON round-trip, і документ, який пройшов validation при записі, читається назад без
@@ -267,8 +271,12 @@ Parser пише payload як `canonical_json_bytes(payload)` у immutable normal
   `source.canonical_url`; `identity_hash`, `entity_kind`, `entity_uuid`;
 - `core`/`attributes`/`latest_state` — `BoundedJsonObject`: strict JSON (як у PR1) + межі
   `MAX_JSON_DEPTH=8`, `MAX_JSON_ARRAY_ITEMS=256`, `MAX_JSON_OBJECT_KEYS=512` (§9.2: без unbounded
-  arrays; offers/observations/reviews/contacts — окремі collections). Межі перевіряє модель,
-  JSON Schema їх не містить;
+  arrays; offers/observations/reviews/contacts — окремі collections), рядок-значення ≤
+  `MAX_JSON_STRING_CHARS=65536` символів, ключ ≤ `MAX_JSON_KEY_CHARS=256`, цілі в межах BSON
+  int64, canonical UTF-8 bytes блоку ≤ `MAX_JSON_BLOCK_BYTES=1 MiB` (три блоки ≤ 3 MiB — запас під
+  16 MiB Mongo; межа більша за inline-ліміт події 256 KiB, бо великий `domain.changed` payload
+  іде через `payload_artifact`). Lone surrogate відхиляється на валідації. Межі перевіряє модель,
+  JSON Schema їх не містить (gate 2 M-2/L-1);
 - час — `source_time: SourceTime` (з raw text/locale, §9.6) і `system_time: SystemTime`;
   `entity_time()` збирає блок `time` current document (`EntityTime.combine`) і вже при валідації
   payload відхиляє `source_*_at == fetched_at` (R-43);
