@@ -92,3 +92,30 @@ worker і scheduler задають його від свого вікна self-fe
 `release(job_id, owner)` має не лише не інкрементувати `attempt`, а й **не писати**
 `last_error_code`/`last_error_message`: плановий drain — не помилка job-и, і слово
 «`drain_timeout`» у полі помилки вводить в оману оператора та псує статистику dead letters.
+
+## 6. Жорсткіша `verify_runtime_login` — resolved by orchestrator exception, 2026-09-24
+
+Джерело: WP-01D PR1b gate 3, `docs/plan/reports/WP-01D/security-pr1b.md` S-2, S-3 (low). Оркестратор
+дозволив WP-01D **як виняток із owned files** мінімальну правку
+`src/collector/persistence/postgres/roles.py` (owner WP-01A) замість окремого запиту. Що змінено:
+
+1. `verify_runtime_login`: вимагає `session_user = current_user` і `current_setting('is_superuser') =
+   'off'` (S-2: логін привілейованою роллю з default GUC `role` давав `current_user` = runtime-роль, а
+   `RESET ROLE` повертав би superuser).
+2. `privileged_memberships` (отже і `verify_runtime_login`, і `apply_logins`): привілейованим членством
+   тепер вважається також (S-3):
+   - будь-яка **інша** роль `collector_*` (`COMPONENT_ROLE_PATTERN = r"collector\_%"`): `GRANT
+     collector_scheduler TO collector_fetcher` непомітно дав би fetcher-у control plane, а
+     `collector_api_ro` — SELECT на все; у `roles.sql` role-to-role GRANT-ів між компонентами немає;
+   - вбудовані `pg_read_all_stats`, `pg_stat_scan_tables`, `pg_monitor` (тексти запитів і статистика
+     чужих сесій), `pg_read_all_settings` (усі GUC, шляхи й параметри сервера), `pg_create_subscription`
+     (логічна реплікація), `pg_checkpoint`, `pg_use_reserved_connections`, `pg_database_owner` (права
+     власника БД) — додано до `PRIVILEGED_BUILTIN_ROLES`. Runtime жодна з них не потрібна; імена, яких
+     немає в поточній версії PostgreSQL, просто не збігаються.
+3. Тести (у файлах WP-01D, тести WP-01A не змінювались):
+   `tests/integration/scaling/test_runtime_login.py::test_worker_refuses_a_privileged_session_with_a_default_role`,
+   `::test_worker_refuses_membership_in_another_component_or_monitoring_role[collector_scheduler|collector_api_ro|pg_read_all_stats|pg_monitor]`;
+   наявні `tests/integration/postgres/test_role_logins.py` лишаються зеленими.
+
+Прохання до WP-01A: прийняти зміну як свою (рев'ю у наступному PR WP-01A); за потреби винести
+перелік дозволених членств у явний allowlist.

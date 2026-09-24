@@ -20,7 +20,7 @@
 
 ## Вердикт
 
-**approve**
+Вердикт: **approve**.
 
 I-1 (runtime на superuser DSN міграцій) закрито фактично:
 

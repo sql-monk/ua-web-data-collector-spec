@@ -347,3 +347,77 @@ Acceptance: `pg_stat_activity` × `pg_roles` у БД `collector` (запит в�
 - «Acceptance на стеку» з розділу «Що не перевірено» виконано: усі runtime-процеси підключені
   не-superuser ролями згідно з мапінгом. CI job `integration (PostgreSQL 18)` як і раніше не
   запускався (push — за оркестратором).
+
+## Fixes after gate 3
+
+Вхід: `docs/plan/reports/WP-01D/security-pr1b.md` (approve; S-1 medium, S-2…S-4 low, S-5/S-6 info),
+`docs/plan/reports/WP-01D/code-review-pr1b.md` (approve; 3 low), вказівки оркестратора 2026-09-24.
+
+**Rebase (S-6).** WP-00 PR4 злито в `main` (PR #7, `ae63917`), гілку `wp/00-4-role-dsn-secrets`
+видалено. Виконано `git fetch && git rebase --onto origin/main 8775f7e wp/01d-1b-runtime-role-dsn`:
+усі 8 комітів PR1b (включно з `c32f4e1` тестувальника і `4201e1e` рев'юерів — зміст не змінено)
+лягли на `8be045d` без конфліктів (нові хеші: `c32f4e1` → `193928f`, `4201e1e` → `32eb25a`).
+
+| Знахідка | Рішення | Де / тест |
+|---|---|---|
+| S-1 (medium) `export-worker` під `collector_scheduler` | лишається тимчасово; у картці WP-01D «Відомі ризики» — жорсткий тригер «закрити до merge першого реального export handler (WP-11A) або до pilot, що раніше», owner WP-11A / WP-01A, дата 2026-09-24, перелік зайвих прав зі звіту безпеки; рядок §13 уточнено: «closed, крім export-worker — §13 для exporter закрито не повністю» | тест-вартовий `tests/unit/workers/test_db_login.py::test_export_worker_keeps_scheduler_role_only_while_its_handler_is_noop` (падає, якщо `resolve_handler(EXPORT)` не `NoopHandler` або в `src/` зареєстровано фабрику для EXPORT, поки export мапиться на `collector_scheduler`/монтує `postgres_dsn_scheduler`) |
+| S-2 (low) перевірявся лише `current_user` | виняток оркестратора з owned files: `verify_runtime_login` вимагає `session_user = current_user` і `is_superuser = off` | `tests/integration/scaling/test_runtime_login.py::test_worker_refuses_a_privileged_session_with_a_default_role` (superuser-логін з `server_settings role=collector_fetcher` → відмова до будь-якого запису) |
+| S-3 (low) неповний контроль членства | той самий виняток: `privileged_memberships` відмовляє також за членство в будь-якій іншій `collector_*` і в `pg_read_all_stats`, `pg_read_all_settings`, `pg_stat_scan_tables`, `pg_monitor`, `pg_create_subscription`, `pg_checkpoint`, `pg_use_reserved_connections`, `pg_database_owner` (обґрунтування — докстрінг `PRIVILEGED_BUILTIN_ROLES` і `docs/plan/deps/WP-01D-to-WP-01A.md` §6) | `::test_worker_refuses_membership_in_another_component_or_monitoring_role[collector_scheduler, collector_api_ro, pg_read_all_stats, pg_monitor]`; `tests/integration/postgres/test_role_logins.py` зелений |
+| S-4 (low) trust-auth у CI | **accepted**, owner **WP-13** (hardening CI/deploy: SCRAM + згенерований пароль admin, тест «неправильний пароль → відмова», порт `127.0.0.1:5432`), дата 2026-09-24. Перевірка ролі від trust не залежить; SCRAM/автентифікацію підтверджено на Docker-стеку | — |
+| S-5 (info) browser-worker ділить `postgres_dsn_fetcher` | **accepted** (мапінг узгоджено з карткою/§13); окрему `collector_browser` розглянути з browser handler (WP-02 PR3), 2026-09-24 | — |
+| CR low #1 backoff 30 с у тесті повного циклу | runtime у тесті отримує заморожений годинник `CYCLE_CLOCK = PAST + 1 h`: claim бачить jobs, покладені на `PAST`, а `retry` ставить `not_before = CYCLE_CLOCK + backoff`, тож `n=1` не claim-иться вдруге незалежно від тривалості тесту; додано `retried.not_before > CYCLE_CLOCK` і `handler.started.count(1) == 1` | `test_runtime_login_adversarial.py::test_full_worker_cycle_fits_the_grants_of_the_mapped_login_role` |
+| CR low #2 порядок teardown | фікстура `running` залежить від `role_engine`: pytest скасовує runtime раніше, ніж `dispose()` engine-ів і `ALTER ROLE … NOLOGIN` | `tests/integration/scaling/conftest.py` |
+| CR low #3 `_cli_env` | `COLLECTOR_POSTGRES_DSN_FILE: None` у env `CliRunner` (прибирає змінну хоста) | `test_runtime_login.py::_cli_env` |
+
+Інше: `pre-commit run --all-files` падав на `docs/plan/reports/WP-01D/security-pr1b.md:23` (MD036,
+`**approve**` як єдиний рядок абзацу) — рядок переписано на `Вердикт: **approve**.`; зміст звіту
+не змінено.
+
+### Команди та вивід
+
+`uv run ruff check . && uv run ruff format --check . && uv run mypy src`:
+
+```text
+All checks passed!
+265 files already formatted
+Success: no issues found in 78 source files
+```
+
+`uv run pytest -m "not live"`:
+
+```text
+1068 passed, 23 skipped, 9 warnings in 767.40s (0:12:47)
+```
+
+`uv run pytest -m integration tests/integration/scaling tests/integration/postgres/test_role_logins.py`:
+
+```text
+87 passed in 497.06s (0:08:17)
+```
+
+`uv run pre-commit run --all-files` — усі hooks `Passed` після виправлення MD036
+(`markdownlint-cli2........Passed`).
+
+Docker-стек (один раз після rebase): `init-secrets.sh` (12 файлів `gen`),
+`docker compose --profile core --profile workers up -d --wait --build` — усі сервіси `Healthy`,
+`migrate-postgres` `Exited (0)`, `ensure-mongo` `Exited`. `pg_stat_activity` × `pg_roles`:
+
+```text
+       application_name       |        usename        | rolsuper | conns
+------------------------------+-----------------------+----------+-------
+ collector-sch                | collector_scheduler   | f        |     2
+ collector-worker-discovery   | collector_fetcher     | f        |     1
+ collector-worker-export      | collector_scheduler   | f        |     1
+ collector-worker-fetch       | collector_fetcher     | f        |     2
+ collector-worker-maintenance | collector_scheduler   | f        |     1
+ collector-worker-parse       | collector_parser      | f        |     2
+ collector-worker-projector   | collector_projector   | f        |     1
+ collector-worker-translation | collector_translation | f        |     1
+ psql                         | collector             | t        |     1
+(9 rows)
+```
+
+(`psql | collector | t` — сам адмін-запит.) Пароль `collector_fetcher` у `docker inspect` / логах:
+`leaks inspect=0 logs=0`. `down -v` → `containers=0 volumes=0`; згенеровані секрети видалено, не
+комітились; стек `puluj-g-*` не чіпався. Жорсткіші перевірки S-2/S-3 не заважають реальним
+LOGIN-ролям стека: усі runtime-процеси стартували.
