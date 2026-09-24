@@ -69,9 +69,13 @@ projector 1, translation 1, export 1, maintenance 1, browser 0). `scheduler` —
 
 ### Stateful services
 
-`postgres:18`, `mongo:8.0`, `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` — pinned
-multi-arch index digest, named volumes (`postgres-data`, `mongo-data`, `mongo-config`,
-`minio-data`), без published ports у base-файлі; `deploy/compose/dev.override.yml` публікує
+`postgres:18` і `mongo:8.0` — pinned multi-arch index digest. MinIO
+`RELEASE.2025-09-07T16-13-09Z` збирається локально з exact upstream Go module
+`v0.0.0-20250907161309-07c3a429bfed`: builder/runtime bases pinned за multi-arch digest,
+release metadata містить повний upstream commit. Це замінило видалений у 2026 році Quay
+manifest, через який clean-host CI отримував `unauthorized`. Stateful data використовують named
+volumes (`postgres-data`, `mongo-data`, `mongo-config`, `minio-data`), без published ports у
+base-файлі; `deploy/compose/dev.override.yml` публікує
 5432/27017/9000/9001/8000 лише на `127.0.0.1`. PostgreSQL і MongoDB працюють non-root
 (`postgres`, `999:999`) із `cap_drop: ALL`. **MinIO лишається root** (прийняте відхилення):
 vendor image тримає `/data` під root, а non-root потребує окремого chown-init контейнера;
@@ -79,8 +83,8 @@ MinIO — не application image (§13 «де можливо»). Gate 3 (SEC M-1
 capabilities** (`cap_drop: ALL`, `no-new-privileges`) і з **read-only rootfs** + tmpfs `/tmp`
 (`MC_CONFIG_DIR`/`MINIO_CONFIG_DIR` у tmpfs) — запис лише у volume `/data`; перевірено
 `up --wait` + `mc mb/pipe/cat`. Залишкове відхилення — лише uid 0 (owner WP-01D, ADR для
-Swarm/production, 2026-09-22). MinIO Docker Hub образи більше не оновлюються; використовується
-`quay.io`.
+Swarm/production, 2026-09-22). Збірка MinIO перевіряє module version/commit через Go build info;
+Docker Hub/Quay MinIO image не є частиною clean-host supply chain.
 
 MongoDB — single-member replica set `rs0` з `--keyFile` (auth). Keyfile — Docker secret;
 file-secrets у Compose bind-mount-яться з правами хоста (на Docker Desktop — 0777, `mode`
@@ -229,7 +233,8 @@ WP-13 разом із security-тестами; до того unfixed CRITICAL б
   частота на активному репозиторії еквівалентна вимозі.
 - **F-3** (§7.5, low): application image `collector` має лише mutable tag
   (`collector:dev`/CI `collector:ci`), без публікації в registry з immutable digest (vendor
-  images — `postgres`/`mongo`/`minio` — уже `tag@digest`). Rollback за digest тому обмежений
+  images `postgres`/`mongo` — `tag@digest`; MinIO — pinned source + pinned build bases).
+  Rollback за digest тому обмежений
   локальним image cache або детермінованим ребілдом із попереднього Git SHA
   (`docs/runbooks/rollback-image.md`). Owner **WP-14** (registry/release pipeline) разом із
   PR3: опублікувати `collector` у registry з immutable digest і оновити runbook.
