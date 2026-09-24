@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "entity_kind": "catalog_offer",
+  "entity_uuid": "019997c0-0000-7000-8000-000000000001",
+  "source": {
+    "source_id": "catalog_ua_rozetka",
+    "source_item_id": "123456789-offer-1",
+    "canonical_url": "https://rozetka.com.ua/ua/123456789/p123456789/"
+  },
+  "identity_hash": "v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "core": {
+    "title": "Дриль Bosch GSB 13 RE",
+    "seller": "Магазин А"
+  },
+  "attributes": {
+    "color": "синій"
+  },
+  "latest_state": {
+    "price": {
+      "amount_minor": 259900,
+      "currency": "UAH"
+    },
+    "status": "active"
+  },
+  "source_time": {
+    "source_event_at": null,
+    "source_updated_at": "2026-08-31T10:00:00Z",
+    "source_timezone_raw": "Europe/Kyiv",
+    "source_time_precision": "minute",
+    "source_time_inferred": false,
+    "source_time_raw_text": "31.08.2026 13:00",
+    "source_locale_raw": "uk-UA"
+  },
+  "system_time": {
+    "observed_at": "2026-09-01T11:59:00Z",
+    "fetched_at": "2026-09-01T11:59:30.123456Z",
+    "ingested_at": "2026-09-01T12:00:00Z"
+  },
+  "observation": {
+    "price": {
+      "amount_minor": 259900,
+      "currency": "UAH"
+    },
+    "availability": "in_stock",
+    "values": {
+      "old_price_minor": 279900
+    }
+  }
+}

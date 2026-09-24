@@ -75,3 +75,9 @@ def test_contract_sources_have_no_io_or_network_imports() -> None:
         for needle in banned:
             assert needle not in text, f"{source.name}: {needle}"
         assert "open(" not in text or source.name == "source_registry.py", source.name
+
+
+def test_io_probe_covers_pr2_modules() -> None:
+    """PR2: нові модулі (payload, records, news) входять у перевірку «жодного I/O»."""
+    pr2 = {"collector.contracts.payload", "collector.contracts.records", "collector.contracts.news"}
+    assert pr2 <= set(CONTRACT_MODULES)

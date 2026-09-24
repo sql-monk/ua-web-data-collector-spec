@@ -1,0 +1,7 @@
+<!DOCTYPE html [<!ENTITY xxe SYSTEM "file:///etc/passwd"><!ENTITY boom "&xxe;&xxe;">]>
+<!ENTITY lol "lol">
+<div><p>Unclosed paragraph with &xxe; and &boom; references
+<p>Second paragraph <b>bold <i>crossed</b> tags</i> here.
+<li>Orphan list item without a list
+</span></div></section>
+<p>Tail text <a href="https://example.org/x">link
