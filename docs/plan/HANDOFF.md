@@ -33,7 +33,7 @@ CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (buil
 
 ## 4. Наступний крок
 
-1. **Блокер pilot §13 (у роботі, паралельно):** WP-00 PR4 `wp/00-4-role-dsn-secrets` (секрети `postgres_dsn_<component>`, `migrate-postgres` з `--with-login`, REVOKE PUBLIC) і WP-01D PR1b `wp/01d-1b-runtime-role-dsn` (runtime на власних DSN, позитивний тест §13 замість вартового, `verify_runtime_login`, drain через `queue.release`). Обидві гілки вставляють ідентичний блок top-level `secrets:`; WP-01D PR1b зливається після WP-00 PR4 і проходить clean-host `up --wait` уже після rebase. Картки — `cards/WP-00.md` PR4, `cards/WP-01D.md` PR1b.
+1. **Блокер pilot §13 — закрито** (2026-09-24): WP-00 PR4 (PR #7, `ae63917`) + WP-01D PR1b (PR #8, `de517cf`). Залишок — export-worker під `collector_scheduler` (S-1) до першого export handler (WP-11A) або pilot; уточнення ТЗ §13 для exporter-а — до WP-11A. Наступне — картки WP-01B (внести N-2: лічильник доставок outbox), WP-02 (врахувати `deps/WP-01A-to-WP-02.md`), WP-04.
 2. Далі паралельно: **WP-01B** (MongoDB projector, receipts, reconciler, compaction — головний споживач PR2), **WP-02** (fetch core), **WP-04** (translation core). Карток для них ще немає — писати за зразком WP-01A/WP-01D.
 3. Потім хвиля 2: WP-03, WP-05, WP-07, WP-09.
 
@@ -41,8 +41,8 @@ CI має 6 jobs: `python`, `web`, `integration (PostgreSQL 18)`, `docker` (buil
 
 | # | Що | Owner | Стан |
 |---|---|---|---|
-| 1 | Runtime-процеси ходять у PostgreSQL під superuser-роллю `collector` (ролі §13 створені NOLOGIN) — **блокер pilot** | WP-01D / WP-00 | WP-01A PR2 зробив LOGIN-ролі (`db roles --with-login`); лишилось перемкнути сервіси — `deps/WP-01A-to-WP-00.md` §4, `deps/WP-01A-to-WP-01D.md` §1 |
-| 2 | `queue.release` без інкременту `attempt` для планового drain | WP-01A PR2 | зроблено (`queue.release`); перехід runtime — WP-01D |
+| 1 | ~~Runtime-процеси на superuser DSN~~ — закрито PR #7 + PR #8; залишок: export-worker під `collector_scheduler` (§13 exporter read-only) | WP-11A / WP-01A | accepted до першого export handler або pilot, тест-вартовий |
+| 2 | `queue.release` для планового drain | WP-01D | закрито — runtime використовує `queue.release` (PR #8) |
 | 3 | `command_timeout` в engine — зміна у файлі WP-01A, потребує підтвердження owner | WP-01A PR2 | підтверджено |
 | 4 | Role-wide drain barrier (зараз per-instance), origin limiter runtime, Compose/Swarm adapters | WP-01D PR2/PR3 | картка WP-01D |
 | 5 | TOCTOU у scheduler-тіку (нешкідливо для ідемпотентного maintenance) | WP-01D | «Відомі ризики» картки |

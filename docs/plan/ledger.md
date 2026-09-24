@@ -22,7 +22,7 @@
 |---|---|---|
 | WP-01A | PR1 merged 758c68c (PR #3); PR2 merged 43ee69f (PR #6); PR3 pending | CI green (PR1: python, integration PostgreSQL 18, docker); ADR-0005, ADR-0007, `docs/persistence/postgres.md`; PR2 (`bad6a25`+fixes) — spec-review gate 4 `changes_requested` закрито (SR-1 gitleaks, SR-2 lineage, SR-5, N-1..N-5 fixed; D-1/D-2 задокументовані ADR-0007 + ТЗ §9.1); CI PR2 green 6/6 на `d83b627` |
 | WP-01B | pending | після WP-01A |
-| WP-01D | PR1 merged f87df17 (PR #5); PR1b `wp/01d-1b-runtime-role-dsn` in_progress (блокер pilot §13, паралельно з WP-00 PR4, worktree `.worktrees/wp-01d-1b`); PR2 pending | CI green 6/6; ADR-0006, `docs/workers.md`, runbook worker-recovery; флак ризик — `tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising` нестабільний під паралельним навантаженням (відтворено на WP-01A PR2 verification, не внесений PR2 — `docs/plan/reports/WP-01A/implementation-pr2.md`) |
+| WP-01D | PR1 merged f87df17 (PR #5); PR1b merged de517cf (PR #8) — runtime на per-component LOGIN-ролях, **блокер pilot §13 (I-1) закрито** разом з WP-00 PR4; залишок S-1: export-worker під `collector_scheduler` до першого export handler (WP-11A) або pilot; PR2 pending | CI green 6/6; ADR-0006, `docs/workers.md`, runbook worker-recovery; флак ризик — `tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising` нестабільний під паралельним навантаженням (відтворено на WP-01A PR2 verification, не внесений PR2 — `docs/plan/reports/WP-01A/implementation-pr2.md`) |
 | WP-02 | pending | після WP-01A |
 | WP-04 | pending | після WP-01A |
 
@@ -61,6 +61,7 @@
 | `WP-00-to-repo-config.md` | WP-00 PR1 | orchestrator | resolved — MD024 siblings_only у `.markdownlint-cli2.jsonc` (main) |
 | `WP-01C-to-WP-00.md` | WP-01C | WP-00 | resolved — п.1–3 застосовано у `wp/01c-contracts`; Dockerfile COPY реєстру → PR2 |
 | `WP-01A-to-WP-00.md` | WP-01A PR1/PR2 | WP-00 | resolved — п.1–3 у WP-01A PR1/WP-00 PR2; §4 і §6 (I-2 REVOKE PUBLIC) — WP-00 PR4 (PR #7, ae63917); §5 — resolved by orchestrator |
-| `WP-01D-to-WP-01A.md` | WP-01D | WP-01A | WP-01A part done, pending WP-00/WP-01D — LOGIN-ролі per component і `queue.release` зроблено на боці WP-01A PR2; лишились per-role DSN секрети (WP-00) і перехід runtime-сервісів на них (WP-01D). Ризик I-1 (runtime на superuser DSN до переходу — security-pr2.md) — owner WP-01D/WP-00, блокер pilot |
-| `WP-01A-to-WP-01D.md` | WP-01A PR2 | WP-01D | open — перевести `scheduler`/`worker-*` на власні `postgres_dsn_<component>`, замінити тест-вартовий на позитивний тест §13, викликати `verify_runtime_login`; §7 лічильник доставок outbox до `mark_failed` (N-2) |
+| `WP-01D-to-WP-01A.md` | WP-01D | WP-01A | resolved — LOGIN-ролі і `queue.release` (WP-01A PR2), секрети (WP-00 PR4, PR #7), runtime (WP-01D PR1b, PR #8); I-1 закрито |
+| `WP-01A-to-WP-01D.md` | WP-01A PR2 | WP-01D | resolved — §1–§2 у WP-01D PR1b (PR #8, de517cf); §7 N-2 (лічильник доставок outbox) → картка WP-01B (publisher loop) |
+| `WP-01D-to-WP-01A.md` §6 | WP-01D PR1b | WP-01A | resolved by orchestrator exception — правка `verify_runtime_login` (session_user, членство); WP-01A підтверджує в PR3 |
 | `WP-01A-to-WP-02.md` | WP-01A PR2 | WP-02 | open — умови D-2 `parse_key` для parser-а: ключ normalized artifact = `(sha256, entity_uuid)`, справжній `fetch_id` кожного запиту, зміна схеми = зміна `parser_version` |
