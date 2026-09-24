@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
+from collector.contracts import NormalizedArtifactRef
+from collector.contracts.enums import DataDomain
 from collector.storage import (
     ArtifactIntegrityError,
     ArtifactNotFoundError,
@@ -14,6 +18,9 @@ from collector.storage import (
     StorageConfigError,
     StorageSettings,
     load_credentials,
+    normalized_object_key,
+    put_normalized,
+    raw_object_key,
 )
 from collector.storage.testing import FakeArtifactStore
 
@@ -119,3 +126,33 @@ async def test_location_is_validated(bucket: str, key: str) -> None:
     store = FakeArtifactStore(buckets={"raw"})
     with pytest.raises(ValueError):
         await store.put(bucket, key, b"", sha256=digest(b""), media_type="text/plain")
+
+
+async def test_canonical_keys_and_normalized_put() -> None:
+    store = FakeArtifactStore(buckets={"normalized"})
+    body = b'{"name":"item"}'
+    sha256 = digest(body)
+    entity_uuid = UUID("018f0000-0000-7000-8000-000000000001")
+    key = normalized_object_key(entity_uuid, sha256)
+    assert key == f"normalized/{entity_uuid}/{sha256}.json"
+    assert raw_object_key(sha256) == f"raw/{sha256}"
+    ref = NormalizedArtifactRef(
+        uri=f"s3://normalized/{key}",
+        sha256=sha256,
+        size_bytes=len(body),
+        media_type="application/json",
+        schema_version="1.0",
+        entity_uuid=entity_uuid,
+        domain=DataDomain.CATALOG,
+        parser_version="catalog-1.0",
+        fetch_id=UUID("018f0000-0000-7000-8000-000000000002"),
+        raw_sha256="0" * 64,
+        raw_uri="s3://raw/raw/" + "0" * 64,
+        produced_at=datetime(2026, 9, 24, tzinfo=UTC),
+    )
+    stored = await put_normalized(store, "normalized", ref, body)
+    assert stored.key == key
+
+    invalid = ref.model_copy(update={"uri": f"s3://normalized/{sha256}.json"})
+    with pytest.raises(ValueError, match="normalized artifact uri"):
+        await put_normalized(store, "normalized", invalid, body)

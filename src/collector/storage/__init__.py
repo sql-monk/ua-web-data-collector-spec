@@ -1,5 +1,6 @@
 """Shared artifact/object storage API (owner WP-02)."""
 
+from collector.storage.keys import normalized_object_key, put_normalized, raw_object_key
 from collector.storage.store import (
     ArtifactIntegrityError,
     ArtifactNotFoundError,
@@ -40,5 +41,8 @@ __all__ = [
     "UploadBusyError",
     "UploadRetriesExhaustedError",
     "load_credentials",
+    "normalized_object_key",
+    "put_normalized",
+    "raw_object_key",
     "sweep_orphans",
 ]

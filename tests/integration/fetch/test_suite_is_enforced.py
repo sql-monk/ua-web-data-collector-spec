@@ -19,7 +19,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 REQUIRED = os.environ.get("COLLECTOR_TEST_REQUIRE_DOCKER") == "1"
-ENFORCED_MODULES = ("test_permits_pg.py",)
+ENFORCED_MODULES = (
+    "test_claimed_upload.py",
+    "test_permits_pg.py",
+    "test_storage_minio.py",
+)
 
 pytestmark = [
     pytest.mark.integration,
