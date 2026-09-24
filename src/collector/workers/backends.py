@@ -22,8 +22,7 @@ version, task `succeeded` і `domain.changed` з bytes receipt комітять�
 
 Залежність від WP-01A PR3a: `not_before` у `queue.retry`/`queue.release`/
 `retry_projection_task`/`release_projection_task` і `owner` в `acknowledge_projection`
-(картка WP-01A, PR3a п.1, п.7). До rebase на PR3a ці виклики типізовані через `cast` до
-задокументованих сигнатур (`_Pr3a*` нижче); прибрати `cast` після rebase.
+(картка WP-01A, PR3a п.1, п.7; merged у PR #12).
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from collector.contracts.events import DomainChangedEvent
@@ -138,83 +137,6 @@ class QueueBackend(Protocol):
     ) -> list[UUID]: ...
 
 
-# --- задокументовані сигнатури WP-01A PR3a (прибрати cast після rebase) -------------------
-
-
-class _Pr3aQueueRetry(Protocol):
-    async def __call__(
-        self,
-        session: AsyncSession,
-        job_id: UUID,
-        owner: str,
-        *,
-        error_code: str,
-        error_message: str | None = None,
-        policy: queue_repo.BackoffPolicy | None = None,
-        not_before: datetime | None = None,
-        now: datetime | None = None,
-    ) -> CrawlJob: ...
-
-
-class _Pr3aQueueRelease(Protocol):
-    async def __call__(
-        self,
-        session: AsyncSession,
-        job_id: UUID,
-        owner: str,
-        *,
-        not_before: datetime | None = None,
-        now: datetime | None = None,
-    ) -> CrawlJob: ...
-
-
-class _Pr3aProjectionRetry(Protocol):
-    async def __call__(
-        self,
-        session: AsyncSession,
-        task_id: UUID,
-        owner: str,
-        *,
-        error_code: str,
-        error_message: str | None = None,
-        policy: queue_repo.BackoffPolicy | None = None,
-        not_before: datetime | None = None,
-        now: datetime | None = None,
-    ) -> ProjectionTask: ...
-
-
-class _Pr3aProjectionRelease(Protocol):
-    async def __call__(
-        self,
-        session: AsyncSession,
-        task_id: UUID,
-        owner: str,
-        *,
-        not_before: datetime | None = None,
-        now: datetime | None = None,
-    ) -> ProjectionTask: ...
-
-
-class _Pr3aAcknowledge(Protocol):
-    async def __call__(
-        self,
-        session: AsyncSession,
-        task_id: UUID,
-        receipt: AppliedProjectionReceipt,
-        *,
-        event: DomainChangedEvent | None = None,
-        owner: str | None = None,
-        now: datetime | None = None,
-    ) -> projection_repo.AcknowledgeResult: ...
-
-
-_queue_retry = cast("_Pr3aQueueRetry", queue_repo.retry)
-_queue_release = cast("_Pr3aQueueRelease", queue_repo.release)
-_projection_retry = cast("_Pr3aProjectionRetry", projection_repo.retry_projection_task)
-_projection_release = cast("_Pr3aProjectionRelease", projection_repo.release_projection_task)
-_acknowledge = cast("_Pr3aAcknowledge", projection_repo.acknowledge_projection)
-
-
 # --- crawl_jobs -----------------------------------------------------------------------------
 
 
@@ -289,7 +211,7 @@ class CrawlJobsBackend:
                 session, job_id, owner, error_code=error_code, error_message=error_message, now=now
             )
         else:
-            job = await _queue_retry(
+            job = await queue_repo.retry(
                 session,
                 job_id,
                 owner,
@@ -306,7 +228,7 @@ class CrawlJobsBackend:
     ) -> None:
         # Саме `release`, а не `retry`: retry спалив би спробу, записав би помилку і на
         # останній спробі відправив би job у карантин (PR1c п.1).
-        await _queue_release(session, job_id, owner, not_before=until, now=now)
+        await queue_repo.release(session, job_id, owner, not_before=until, now=now)
 
     async def quarantine(
         self,
@@ -416,7 +338,9 @@ class ProjectionTasksBackend:
         # Ack і є перехід task → `succeeded`: окремого `complete` для projection_tasks немає.
         # `owner` — fencing у тій самій транзакції (WP-01A PR3a п.7): чужий lease →
         # `LeaseNotOwnedError`, і жодного запису ack не з'являється.
-        await _acknowledge(session, task.job_id, ack.receipt, event=ack.event, owner=owner, now=now)
+        await projection_repo.acknowledge_projection(
+            session, task.job_id, ack.receipt, event=ack.event, owner=owner, now=now
+        )
 
     async def retry(
         self,
@@ -434,7 +358,7 @@ class ProjectionTasksBackend:
                 session, job_id, owner, error_code=error_code, error_message=error_message, now=now
             )
         else:
-            task = await _projection_retry(
+            task = await projection_repo.retry_projection_task(
                 session,
                 job_id,
                 owner,
@@ -449,7 +373,9 @@ class ProjectionTasksBackend:
     async def defer(
         self, session: AsyncSession, job_id: UUID, owner: str, *, until: datetime, now: datetime
     ) -> None:
-        await _projection_release(session, job_id, owner, not_before=until, now=now)
+        await projection_repo.release_projection_task(
+            session, job_id, owner, not_before=until, now=now
+        )
 
     async def quarantine(
         self,

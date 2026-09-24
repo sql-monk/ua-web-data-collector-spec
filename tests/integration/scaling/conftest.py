@@ -145,18 +145,6 @@ record_parse_result = _postgres_fixtures.record
 projection_receipt = _postgres_fixtures.receipt
 PROJECTION_COLLECTION: str = _postgres_fixtures.COLLECTION
 
-NEEDS_PR3A = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "WP-01A PR3a ще не в main: `not_before` у queue.retry/release і їхніх аналогах для "
-        "projection_tasks, `owner` в acknowledge_projection (картка WP-01A PR3a п.1, п.7). "
-        "Перевіряється після rebase на PR3a: тоді тест дає XPASS(strict) і червоніє — маркер "
-        "треба прибрати (звіт docs/plan/reports/WP-01D/implementation-pr1c.md)."
-    ),
-)
-"""Тести PR1c, що потребують API WP-01A PR3a. Не skip: тест виконується і мусить впасти."""
-
-
 # --- LOGIN-ролі §13 для runtime ------------------------------------------------------------
 
 

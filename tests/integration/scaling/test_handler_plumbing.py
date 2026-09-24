@@ -10,8 +10,7 @@ PostgreSQL 18 і LOGIN-ролі (`collector_fetcher`), як у PR1b. Годин�
 - без `retry_schedule` — `BackoffPolicy` черги, як до PR1c (регресія);
 - фабрика з реєстру отримує `HandlerContext` з тими самими `sessions` і id зареєстрованого instance.
 
-Тести з `NEEDS_PR3A` потребують API WP-01A PR3a (`queue.retry/release(not_before=)`) і
-перевіряються після rebase (`xfail(strict=True)`, див. докстрінг маркера в conftest).
+API WP-01A PR3a (`queue.retry/release(not_before=)`) merged у PR #12 і перевіряється напряму.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ from collector.workers.handlers import (
 from collector.workers.roles import WorkerRole
 from collector.workers.runtime import DEFAULT_BACKOFF, WorkerRuntime
 
-from .conftest import NEEDS_PR3A, PAST, PATIENT_TIMEOUT, T0, WaitFor
+from .conftest import PAST, PATIENT_TIMEOUT, T0, WaitFor
 
 pytestmark = pytest.mark.integration
 
@@ -156,7 +155,6 @@ def harness(
 # --- defer ----------------------------------------------------------------------------------
 
 
-@NEEDS_PR3A
 async def test_deferred_job_keeps_its_attempt_and_writes_no_error(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,
@@ -179,7 +177,6 @@ async def test_deferred_job_keeps_its_attempt_and_writes_no_error(
     await run.close()
 
 
-@NEEDS_PR3A
 async def test_five_defers_in_a_row_never_dead_letter_a_job_with_four_attempts(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,
@@ -208,7 +205,6 @@ async def test_five_defers_in_a_row_never_dead_letter_a_job_with_four_attempts(
 # --- retry: нижня межа і табличний розклад -------------------------------------------------
 
 
-@NEEDS_PR3A
 async def test_retry_after_lower_bound_beats_a_short_schedule(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,
@@ -233,7 +229,6 @@ async def test_retry_after_lower_bound_beats_a_short_schedule(
     await run.close()
 
 
-@NEEDS_PR3A
 async def test_retry_schedule_gives_exactly_the_spec_10_delays(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,
@@ -256,7 +251,6 @@ async def test_retry_schedule_gives_exactly_the_spec_10_delays(
     await run.close()
 
 
-@NEEDS_PR3A
 async def test_fourth_failure_with_four_attempts_is_quarantined_with_a_dead_letter(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,

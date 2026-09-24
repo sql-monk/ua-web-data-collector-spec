@@ -13,8 +13,8 @@ Runtime ролі `projector` під LOGIN-роллю `collector_projector`; proj
 - дві прив'язки (`projection_tasks` + `crawl_jobs` `projection.reconcile`) з
   `desired_concurrency=1` → обидві черги обслуговуються, жодна не голодує.
 
-`NEEDS_PR3A` — потрібні `owner` в `acknowledge_projection` і `release_projection_task(not_before=)`
-WP-01A PR3a; перевіряються після rebase (`xfail(strict=True)`).
+`owner` в `acknowledge_projection` і `release_projection_task(not_before=)` надає merged
+WP-01A PR3a (PR #12); ці контракти перевіряються напряму.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ from collector.workers.roles import WorkerRole
 from collector.workers.runtime import WorkerRuntime
 
 from .conftest import (
-    NEEDS_PR3A,
     PATIENT_TIMEOUT,
     PROJECTION_COLLECTION,
     T0,
@@ -219,7 +218,6 @@ def projector(
 # --- ack у report-транзакції ----------------------------------------------------------------
 
 
-@NEEDS_PR3A
 async def test_receipt_is_acknowledged_in_the_report_transaction(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,
@@ -239,7 +237,6 @@ async def test_receipt_is_acknowledged_in_the_report_transaction(
     await run.close()
 
 
-@NEEDS_PR3A
 async def test_fault_between_ack_and_commit_leaves_no_partial_rows(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,
@@ -262,7 +259,6 @@ async def test_fault_between_ack_and_commit_leaves_no_partial_rows(
     await run.close()
 
 
-@NEEDS_PR3A
 async def test_lost_lease_blocks_the_ack_and_the_next_owner_acks_exactly_once(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,
@@ -322,7 +318,6 @@ async def test_projection_task_retry_writes_the_error_and_burns_the_attempt(
     await run.close()
 
 
-@NEEDS_PR3A
 async def test_projection_task_defer_keeps_the_attempt(
     pg_sessions: async_sessionmaker[AsyncSession],
     make_pool: MakePool,
