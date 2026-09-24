@@ -25,10 +25,19 @@ from collector.contracts.artifacts import (
 from collector.contracts.current import CurrentDocumentBase, Lineage, SourceRef
 from collector.contracts.events import DomainChangedEvent, EncodedEvent
 from collector.contracts.identity import NormalizedUrl, SourceIdentity
+from collector.contracts.news import NewsTranslation, NewsVersionCreatedEvent
+from collector.contracts.payload import NormalizedProjectionPayload, ObservedValues
 from collector.contracts.projection import (
     AppliedProjectionReceipt,
     ProjectionAcknowledgement,
     ProjectionCommand,
+)
+from collector.contracts.records import (
+    EntityProjectionVersion,
+    ObservationRecord,
+    ReviewQuestionRecord,
+    SellerContactObservation,
+    VersionSnapshot,
 )
 from collector.contracts.release import (
     ComponentVersions,
@@ -88,14 +97,25 @@ EXPORTED_CONTRACTS: tuple[ExportedContract, ...] = (
     ExportedContract("common", "upload_claim", UploadClaim),
     ExportedContract("common", "lineage", Lineage),
     ExportedContract("common", "source_ref", SourceRef),
+    ExportedContract("common", "observed_values", ObservedValues),
+    ExportedContract("common", "version_snapshot", VersionSnapshot),
+    # common також — shared records поза Mongo (PostgreSQL row + повідомлення WP-04 → WP-01A)
+    ExportedContract("common", "news_translation", NewsTranslation),
     # events — повідомлення між компонентами (§7.3)
     ExportedContract("events", "projection_command", ProjectionCommand),
     ExportedContract("events", "projection_acknowledgement", ProjectionAcknowledgement),
     ExportedContract("events", "domain_changed_event", DomainChangedEvent),
     ExportedContract("events", "encoded_event", EncodedEvent),
+    ExportedContract("events", "news_version_created", NewsVersionCreatedEvent),
+    # вміст normalized artifact: повідомлення parser → projector, не Mongo collection
+    ExportedContract("events", "normalized_projection_payload", NormalizedProjectionPayload),
     # mongo — документи MongoDB (§9.2); WP-01B генерує з них $jsonSchema validators
     ExportedContract("mongo", "current_document_base", CurrentDocumentBase),
     ExportedContract("mongo", "applied_projection_receipt", AppliedProjectionReceipt),
+    ExportedContract("mongo", "entity_projection_version", EntityProjectionVersion),
+    ExportedContract("mongo", "observation_record", ObservationRecord),
+    ExportedContract("mongo", "seller_contact_observation", SellerContactObservation),
+    ExportedContract("mongo", "review_question_record", ReviewQuestionRecord),
     # releases — dataset release і resolution snapshot (§9.8, §9.9)
     ExportedContract("releases", "release_manifest", ReleaseManifest),
     ExportedContract("releases", "release_part", ReleasePart),

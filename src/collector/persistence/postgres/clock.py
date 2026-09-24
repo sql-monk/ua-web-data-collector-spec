@@ -20,7 +20,17 @@ def resolve_now(now: datetime | None) -> datetime:
     """`now` викликача або системний час; naive datetime відхиляється (§9.6 — UTC only)."""
     if now is None:
         return utcnow()
-    if now.tzinfo is None or now.utcoffset() is None:
-        msg = "now має бути aware datetime (UTC)"
+    return require_aware_utc(now, parameter="now")
+
+
+def require_aware_utc(value: datetime, *, parameter: str) -> datetime:
+    """Відхиляє naive datetime і нормалізує aware значення до UTC (§9.6).
+
+    PostgreSQL/asyncpg може мовчки трактувати naive значення як timezone сесії. Репозиторії
+    викликають цей helper до SQL, щоб одна й та сама точка часу не залежала від конфігурації
+    з'єднання, а помилка називала саме публічний параметр API.
+    """
+    if value.tzinfo is None or value.utcoffset() is None:
+        msg = f"{parameter} має бути aware datetime (UTC)"
         raise ValueError(msg)
-    return now.astimezone(UTC)
+    return value.astimezone(UTC)

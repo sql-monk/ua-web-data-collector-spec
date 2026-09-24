@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "article_id": "55555555-5555-4555-8555-555555555551",
+  "article_version_id": "55555555-5555-4555-8555-555555555552",
+  "target_language": "uk",
+  "source_language": "de",
+  "provider": "google-translate-v3",
+  "model_version": "nmt",
+  "glossary_version": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "source_content_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "status": "translated",
+  "title": "Заголовок перекладу",
+  "lead": "Лід перекладу",
+  "body_text": null,
+  "body_artifact": {
+    "uri": "s3://artifacts/news/44/4444444444444444444444444444444444444444444444444444444444444444",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "size_bytes": 512,
+    "media_type": "text/html",
+    "schema_version": null
+  },
+  "quality_flags": [],
+  "character_count": 1834,
+  "cost": {
+    "amount_minor": 37,
+    "currency": "USD"
+  },
+  "translation_idempotency_key": "1bbee95db6ef5f99de97bf6e79238148746c7613a4ef6f17219bc8d19eaa4eaa",
+  "created_at": "2026-09-01T12:05:00Z"
+}

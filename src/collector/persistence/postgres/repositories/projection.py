@@ -68,7 +68,11 @@ from collector.persistence.postgres.models import (
     ProjectionTask,
 )
 from collector.persistence.postgres.repositories.artifacts import normalized_artifact_values
-from collector.persistence.postgres.repositories.queue import BackoffPolicy
+from collector.persistence.postgres.repositories.queue import (
+    BackoffPolicy,
+    clamp_not_before,
+    next_attempt_at,
+)
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"succeeded", "quarantined"})
 
@@ -100,7 +104,9 @@ class ParseResult:
     artifact: NormalizedArtifact
     task: ProjectionTask
     command: ProjectionCommand
-    outbox_event: OutboxEvent
+    outbox_event: OutboxEvent | None
+    """Рядок `projection.command`; `None` лише для повтору (`created=False`) уже acknowledged
+    task, чий рядок прибрав `outbox.purge_published` (PR3a п.3)."""
     created: bool
     """`False` — повторний виклик для того самого artifact: повернено наявні task/command."""
 
@@ -429,21 +435,26 @@ async def retry_projection_task(
     error_code: str,
     error_message: str | None = None,
     policy: BackoffPolicy | None = None,
+    not_before: datetime | None = None,
     now: datetime | None = None,
 ) -> ProjectionTask:
     """Retryable-помилка projector-а: `leased` → `retry` з backoff; після `max_attempts` —
-    `quarantined` (reconciler §7.3 п.5 розбирає такі tasks окремо)."""
+    `quarantined` (reconciler §7.3 п.5 розбирає такі tasks окремо).
+
+    `not_before` — та сама семантика, що `queue.retry` (PR3a п.1): задано → рівно
+    `max(not_before, now)` без `policy`; `None` → `now + policy.delay_for(attempt)`."""
     current = resolve_now(now)
     task = await _lock_owned(session, task_id, owner)
     if task.attempt >= task.max_attempts:
         return _quarantine_locked(
             task, error_code=error_code, error_message=error_message, now=current
         )
-    delay = (policy or BackoffPolicy()).delay_for(task.attempt, random.SystemRandom())
     task.status = "retry"
     task.lease_owner = None
     task.lease_expires_at = None
-    task.not_before = current + delay
+    task.not_before = next_attempt_at(
+        current, task.attempt, policy=policy, rng=random.SystemRandom(), not_before=not_before
+    )
     task.last_error_code = error_code
     task.last_error_message = _truncate(error_message)
     task.updated_at = current
@@ -452,11 +463,16 @@ async def retry_projection_task(
 
 
 async def release_projection_task(
-    session: AsyncSession, task_id: UUID, owner: str, *, now: datetime | None = None
+    session: AsyncSession,
+    task_id: UUID,
+    owner: str,
+    *,
+    not_before: datetime | None = None,
+    now: datetime | None = None,
 ) -> ProjectionTask:
-    """Плановий drain projector-а: `leased` → `pending`, `attempt = GREATEST(attempt - 1, 0)`
-    (компенсує інкремент claim, gate 3 CR-5), без помилки — та сама семантика, що
-    `queue.release`."""
+    """Плановий drain або defer projector-а: `leased` → `pending`, `attempt =
+    GREATEST(attempt - 1, 0)` (компенсує інкремент claim, gate 3 CR-5), без помилки — та сама
+    семантика, що `queue.release`; `not_before` задано → `max(not_before, now)` (PR3a п.1)."""
     current = resolve_now(now)
     task = await session.scalar(
         update(ProjectionTask)
@@ -466,7 +482,7 @@ async def release_projection_task(
             lease_owner=None,
             lease_expires_at=None,
             leased_at=None,
-            not_before=current,
+            not_before=clamp_not_before(not_before, current),
             attempt=func.greatest(ProjectionTask.attempt - 1, 0),
             updated_at=current,
         )
@@ -541,9 +557,19 @@ async def acknowledge_projection(
     receipt: AppliedProjectionReceipt,
     *,
     event: DomainChangedEvent | None = None,
+    owner: str | None = None,
     now: datetime | None = None,
 ) -> AcknowledgeResult:
     """§7.3 крок 4 / §9.5 — **одна транзакція**, викликач лише робить commit.
+
+    **Fencing (PR3a п.7, WP-01D PR1c п.5):** `owner` задано (runtime projector-а робить ack у
+    report-транзакції) → task блокується лише якщо `status = 'leased' AND lease_owner =
+    owner`, інакше `LeaseNotOwnedError` **до** будь-якого запису. Так worker, у якого lease
+    забрали (recover/claim іншим instance), не підтвердить чужу спробу. Прострочений, але ще
+    не відновлений lease власник підтвердити може — та сама семантика, що `queue.complete`.
+    Повторний ack уже `succeeded` task з `owner` теж `LeaseNotOwnedError` (lease більше не
+    існує). `owner=None` — поведінка PR2 без перевірки lease: reconciler підтверджує зі
+    збереженого receipt (рішення WP-01B п.1), повтор ідемпотентний.
 
     Послідовність:
 
@@ -568,10 +594,14 @@ async def acknowledge_projection(
     if receipt.projection_task_id != task_id:
         msg = f"receipt належить task {receipt.projection_task_id}, а ack робиться для {task_id}"
         raise ConflictError(msg)
-    task = await session.get(ProjectionTask, task_id, with_for_update=True)
-    if task is None:
-        msg = f"projection task {task_id} не знайдено"
-        raise NotFoundError(msg)
+    if owner is not None:
+        task = await _lock_owned(session, task_id, owner)
+    else:
+        found = await session.get(ProjectionTask, task_id, with_for_update=True)
+        if found is None:
+            msg = f"projection task {task_id} не знайдено"
+            raise NotFoundError(msg)
+        task = found
     if (
         task.entity_uuid != receipt.entity_uuid
         or task.projection_version != receipt.projection_version
@@ -880,8 +910,10 @@ async def _existing_parse_result(
     outbox_event = (
         await session.execute(select(OutboxEvent).where(OutboxEvent.event_id == task.task_id))
     ).scalar_one_or_none()
-    if outbox_event is None:  # pragma: no cover — пишеться в тій самій транзакції, що й task
-        msg = f"outbox-рядок команди для task {task.task_id} відсутній"
+    if outbox_event is None and not await _is_acknowledged(session, task):
+        # Рядок пишеться в тій самій транзакції, що й task; прибрати його може лише
+        # `purge_published`, і лише після ack (PR3a п.3).
+        msg = f"outbox-рядок команди для task {task.task_id} відсутній, а task не acknowledged"
         raise ConflictError(msg)
     parse_attempt = (
         await session.get(ParseAttempt, task.parse_attempt_id)
@@ -910,6 +942,17 @@ async def _existing_parse_result(
         outbox_event=outbox_event,
         created=False,
     )
+
+
+async def _is_acknowledged(session: AsyncSession, task: ProjectionTask) -> bool:
+    if task.status != "succeeded":
+        return False
+    ack = await session.scalar(
+        select(ProjectionAcknowledgement.task_id).where(
+            ProjectionAcknowledgement.task_id == task.task_id
+        )
+    )
+    return ack is not None
 
 
 async def _confirmed_version(session: AsyncSession, entity_uuid: UUID) -> int:

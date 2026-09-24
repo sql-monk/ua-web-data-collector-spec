@@ -122,7 +122,11 @@ def canonical_json_bytes(value: object) -> bytes:
         ensure_ascii=False,
         allow_nan=False,
     )
-    return text.encode("utf-8")
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as exc:  # lone surrogate: немає валідного UTF-8 (gate 2 L-1)
+        msg = f"рядок містить одиночний сурогат на позиції {exc.start}: немає UTF-8 представлення"
+        raise CanonicalEncodingError(msg) from None
 
 
 def sha256_hex(data: bytes) -> str:

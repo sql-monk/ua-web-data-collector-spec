@@ -1,23 +1,26 @@
-"""Unit-тести контракту handler-ів (`Task`, `TaskResult`, `NoopHandler`, реєстр) — WP-01D PR1."""
+"""Unit-тести контракту handler-ів (`Task`, `TaskResult`, `RetrySchedule`, `NoopHandler`) — WP-01D.
+
+PR1: базовий контракт; PR1c: `defer`, `retry(not_before=)`, `output`, `RetrySchedule`. Реєстр
+і lazy import — `test_registry.py`.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from datetime import UTC, datetime
+import random
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from collector.contracts import new_entity_id
 from collector.workers.handlers import (
-    HANDLER_FACTORIES,
     NoopHandler,
     PermanentTaskError,
+    RetrySchedule,
     Task,
     TaskHandler,
     TaskResult,
     check_handler_contract,
     redact,
-    resolve_handler,
     result_for_exception,
 )
 from collector.workers.roles import WorkerRole
@@ -35,16 +38,6 @@ def make_task(job_type: str = "fetch") -> Task:
         run_id=None,
         source_id=None,
     )
-
-
-@pytest.fixture
-def clean_registry() -> Iterator[None]:
-    saved = dict(HANDLER_FACTORIES)
-    try:
-        yield
-    finally:
-        HANDLER_FACTORIES.clear()
-        HANDLER_FACTORIES.update(saved)
 
 
 def test_success_result_has_no_error_code() -> None:
@@ -69,28 +62,6 @@ async def test_noop_handler_claims_role_job_type_and_succeeds() -> None:
     assert handler.job_types == ("projector",)
     await handler.check_ready()
     assert await handler.handle(make_task("projector")) == TaskResult.success()
-
-
-def test_resolve_handler_falls_back_to_noop(clean_registry: None) -> None:
-    HANDLER_FACTORIES.clear()
-    for role in WorkerRole:
-        assert isinstance(resolve_handler(role), NoopHandler)
-
-
-def test_resolve_handler_uses_registered_domain_handler(clean_registry: None) -> None:
-    class DomainHandler(TaskHandler):
-        @property
-        def job_types(self) -> tuple[str, ...]:
-            return ("fetch.http", "fetch.head")
-
-        async def handle(self, task: Task) -> TaskResult:
-            return TaskResult.success()
-
-    HANDLER_FACTORIES[WorkerRole.FETCH] = lambda _role: DomainHandler()
-    handler = resolve_handler(WorkerRole.FETCH)
-    assert isinstance(handler, DomainHandler)
-    assert handler.job_types == ("fetch.http", "fetch.head")
-    assert isinstance(resolve_handler(WorkerRole.PARSE), NoopHandler)
 
 
 def test_unexpected_exception_is_retryable() -> None:
@@ -161,3 +132,113 @@ def test_result_for_exception_redacts_too() -> None:
     result = result_for_exception(ValueError("https://u:p@example.test/x?password=qq"))
     assert "p@example.test" not in (result.error_message or "")
     assert "[redacted]" in (result.error_message or "")
+
+
+# --- PR1c: defer, not_before, output, RetrySchedule ------------------------------------------
+
+UNTIL = datetime(2026, 9, 22, 12, 10, tzinfo=UTC)
+
+
+def test_deferred_carries_until_and_code_and_no_error_text() -> None:
+    result = TaskResult.deferred(UNTIL, "rate_limited")
+    assert (result.disposition, result.not_before, result.error_code) == (
+        "defer",
+        UNTIL,
+        "rate_limited",
+    )
+    assert result.error_message is None
+
+
+@pytest.mark.parametrize("code", ["", None])
+def test_deferred_without_error_code_is_rejected(code: str | None) -> None:
+    with pytest.raises(ValueError, match="error_code"):
+        TaskResult.deferred(UNTIL, code)  # type: ignore[arg-type]  # навмисно невалідне
+
+
+def test_defer_without_until_is_rejected() -> None:
+    with pytest.raises(ValueError, match="until"):
+        TaskResult(disposition="defer", error_code="rate_limited")
+
+
+def test_defer_does_not_accept_an_error_message_it_would_silently_drop() -> None:
+    with pytest.raises(ValueError, match="error_message"):
+        TaskResult(
+            disposition="defer", error_code="rate_limited", error_message="x", not_before=UNTIL
+        )
+
+
+def test_retryable_accepts_a_lower_bound() -> None:
+    result = TaskResult.retryable("http_429", "Retry-After", not_before=UNTIL)
+    assert (result.disposition, result.not_before) == ("retry", UNTIL)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: TaskResult(disposition="complete", not_before=UNTIL),
+        lambda: TaskResult(disposition="quarantine", error_code="x", not_before=UNTIL),
+    ],
+    ids=["complete", "quarantine"],
+)
+def test_not_before_only_for_retry_and_defer(build: object) -> None:
+    with pytest.raises(ValueError, match="not_before"):
+        build()  # type: ignore[operator]  # параметризовані фабрики
+
+
+def test_naive_not_before_is_rejected() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        TaskResult.retryable("x", not_before=datetime(2026, 9, 22, 12, 0))  # noqa: DTZ001
+
+
+def test_output_only_for_complete() -> None:
+    receipt = object()
+    assert TaskResult.success(output=receipt).output is receipt
+    with pytest.raises(ValueError, match="output"):
+        TaskResult(disposition="retry", error_code="x", output=receipt)
+    with pytest.raises(ValueError, match="output"):
+        TaskResult(disposition="quarantine", error_code="x", output=receipt)
+
+
+def test_success_rejects_an_error_message() -> None:
+    with pytest.raises(ValueError, match="error_message"):
+        TaskResult(disposition="complete", error_message="oops")
+
+
+SPEC_10 = (
+    timedelta(seconds=5),
+    timedelta(seconds=30),
+    timedelta(minutes=2),
+    timedelta(minutes=10),
+)
+
+
+def test_retry_schedule_is_the_table_by_attempt_and_sticks_to_the_last_step() -> None:
+    schedule = RetrySchedule(SPEC_10)
+    rng = random.Random(0)  # noqa: S311 — детермінізм тесту, не криптографія
+    assert [schedule.delay(n, rng) for n in range(1, 7)] == [*SPEC_10, SPEC_10[-1], SPEC_10[-1]]
+    assert schedule.delay(0, rng) == SPEC_10[0], "attempt < 1 → перший крок"
+
+
+def test_retry_schedule_jitter_is_bounded_above() -> None:
+    schedule = RetrySchedule(SPEC_10, jitter_ratio=0.2)
+    rng = random.Random(1)  # noqa: S311 — детермінізм тесту, не криптографія
+    for attempt, base in enumerate(SPEC_10, start=1):
+        for _ in range(200):
+            delay = schedule.delay(attempt, rng)
+            assert base <= delay <= base * 1.2
+
+
+@pytest.mark.parametrize(
+    ("delays", "jitter"),
+    [((), 0.0), ((timedelta(0),), 0.0), ((timedelta(seconds=1),), 1.5)],
+    ids=["empty", "zero-delay", "jitter>1"],
+)
+def test_retry_schedule_rejects_invalid_tables(
+    delays: tuple[timedelta, ...], jitter: float
+) -> None:
+    with pytest.raises(ValueError, match="RetrySchedule|jitter_ratio"):
+        RetrySchedule(delays, jitter_ratio=jitter)
+
+
+def test_handler_without_schedule_keeps_the_default_backoff() -> None:
+    assert NoopHandler(WorkerRole.FETCH).retry_schedule is None

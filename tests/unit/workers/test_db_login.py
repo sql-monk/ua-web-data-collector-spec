@@ -22,6 +22,8 @@ import yaml
 from typer.testing import CliRunner
 
 from collector.cli import app
+from collector.contracts import new_entity_id
+from collector.persistence.postgres.clock import utcnow
 from collector.persistence.postgres.roles import (
     MIGRATE_ROLE,
     RUNTIME_ROLES,
@@ -29,7 +31,8 @@ from collector.persistence.postgres.roles import (
     dsn_secret_name,
 )
 from collector.workers import login
-from collector.workers.handlers import NoopHandler, resolve_handler
+from collector.workers.handlers import HANDLER_FACTORIES, HandlerContext, NoopHandler
+from collector.workers.registry import ROLE_HANDLER_MODULES, load_role_bindings
 from collector.workers.roles import (
     DB_ROLE_BY_WORKER_ROLE,
     SCHEDULER_DB_ROLE,
@@ -222,8 +225,19 @@ def test_export_worker_keeps_scheduler_role_only_while_its_handler_is_noop() -> 
         "export-worker досі під collector_scheduler (ризик S-1 картки WP-01D): спершу окрема "
         "роль для експорту, потім реальний handler"
     )
-    handler = resolve_handler(WorkerRole.EXPORT)
-    assert type(handler) is NoopHandler, reason
+    # PR1c: реєстр із lazy import — export не має ні модуля в мапі, ні фабрики, і прив'язка
+    # ролі — рівно одна `NoopHandler` (сесії не потрібні: Noop-шлях у БД не ходить).
+    assert WorkerRole.EXPORT not in ROLE_HANDLER_MODULES, reason
+    assert WorkerRole.EXPORT not in HANDLER_FACTORIES, reason
+    context = HandlerContext(
+        role=WorkerRole.EXPORT,
+        sessions=cast("Any", None),
+        worker_instance_id=new_entity_id(),
+        clock=utcnow,
+        env={},
+    )
+    bindings = load_role_bindings(context)
+    assert [type(binding.handler) for binding in bindings] == [NoopHandler], reason
     # Реєстр наповнюється при імпорті доменного модуля, тож перевіряємо й джерела: жоден модуль
     # не реєструє фабрику для EXPORT.
     registrations = re.compile(r"HANDLER_FACTORIES\s*(\[|\.update|\.setdefault)[^\n]*EXPORT")

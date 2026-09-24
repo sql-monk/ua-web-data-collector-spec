@@ -31,6 +31,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -82,6 +83,15 @@ class Fetch(Base):
         Index("ix_fetches_job_id", "job_id"),
         Index("ix_fetches_source_id_fetched_at", "source_id", "fetched_at"),
         Index("ix_fetches_raw_sha256", "raw_sha256"),
+        # `artifacts.latest_validators` (PR3a, WP-02 п.2): останній 200/206 за URL джерела;
+        # btree читається назад для `ORDER BY fetched_at DESC LIMIT 1` у кожній партиції.
+        Index(
+            "ix_fetches_validators",
+            "source_id",
+            "requested_url_md5",
+            "fetched_at",
+            postgresql_where=text("outcome = 'success' AND http_status IN (200, 206)"),
+        ),
         {"postgresql_partition_by": "RANGE (fetched_at)"},
     )
 
@@ -90,6 +100,12 @@ class Fetch(Base):
     job_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     source_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     requested_url: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_url_md5: Mapped[str] = mapped_column(
+        String(32), Computed("md5(requested_url)", persisted=True), nullable=False
+    )
+    """Ключ індексу `ix_fetches_validators` (TEXT URL задовгий для btree); не захисний хеш —
+    запит завжди звіряє й сам `requested_url`. `md5(text)` IMMUTABLE, `sha256(convert_to())`
+    — ні (міграція `0006`)."""
     final_url: Mapped[str | None] = mapped_column(Text)
     request_variant: Mapped[str | None] = mapped_column(String(64))
     http_method: Mapped[str] = mapped_column(String(8), nullable=False, server_default="GET")

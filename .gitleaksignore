@@ -7,3 +7,12 @@
 # потрапляє в повідомлення помилки); не секрет. У наступному коміті значення будується в
 # рантаймі й більше не матчиться.
 bad6a259ba02126bec66cfc1febbdb846d0c0e3d:tests/unit/persistence/postgres/test_role_logins.py:generic-api-key:126
+
+# 19dfb23: golden SHA-256 translation-memory key у JSON fixture; це детермінований хеш
+# canonical payload, не credential або API key.
+19dfb231dd1db5c03ac3b3984a08741b38b5a012:tests/fixtures/translation/tm_key_golden.json:generic-api-key:12
+
+# 9d9f1de: `translation_idempotency_key` у compatibility fixture WP-01C PR2 — SHA-256 hex
+# детермінованого ключа ідемпотентності (§9.3 п.7), обчислений із синтетичних компонентів
+# fixture; не секрет. Виняток дозволено оркестратором (фінальний раунд WP-01C PR2).
+9d9f1de7ffa2ea108a3eb7d03e5c395682fae8f3:tests/fixtures/contracts/documents/news_translation.v1.0.json:generic-api-key:28

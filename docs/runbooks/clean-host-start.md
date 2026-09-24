@@ -7,7 +7,8 @@
 ## Передумови
 
 - Docker Engine 27+ з Compose plugin v2.30+ (перевірено на Docker 29.8 / Compose v5.5.1);
-- доступ до registry: `docker.io` (python, postgres, mongo), `ghcr.io` (uv), `quay.io` (minio);
+- доступ до `docker.io` (python, postgres, mongo, pinned Go/Alpine bases), `ghcr.io` (uv) і
+  Go module proxy/GitHub (збірка exact MinIO release; Quay image більше не використовується);
 - `git clone` репозиторію; `uv`/Python на хості **не потрібні** — image збирається у Docker;
 - вільні ресурси: ліміти сумарно **16 CPU / 16 ГіБ** для core+workers за замовчуванням
   (`deploy.resources.limits` у `docker-compose.yml`: postgres 2/2G + mongo 2/2G + minio 1/1G +

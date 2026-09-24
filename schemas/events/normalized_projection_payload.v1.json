@@ -1,0 +1,348 @@
+{
+  "$defs": {
+    "EntityKind": {
+      "description": "`entity_kind` current document (§9.2); розширюється WP-07/WP-09 через dependency-запит.",
+      "enum": [
+        "catalog_item",
+        "catalog_offer",
+        "vehicle_listing",
+        "seller"
+      ],
+      "title": "EntityKind",
+      "type": "string"
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "Грошове значення без float: `amount_minor` у мінімальних одиницях + `currency` (§5.1).",
+      "properties": {
+        "amount_minor": {
+          "description": "Сума в мінімальних одиницях валюти (копійки, центи); лише int (§5.1).",
+          "title": "Amount Minor",
+          "type": "integer"
+        },
+        "currency": {
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount_minor",
+        "currency"
+      ],
+      "title": "Money",
+      "type": "object"
+    },
+    "ObservedValues": {
+      "additionalProperties": false,
+      "description": "Спостережені значення offer/listing snapshot (§5.2, §5.3): ціна, наявність, решта bounded.\n\n`observed_at` не дублюється: час спостереження — `SystemTime.observed_at` payload-а\n(одне джерело правди). Доменні поля (old price, mileage, promoted, view counters) до\nтипізації WP-07/WP-09 лежать у `values`.",
+      "properties": {
+        "availability": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Наявність/stock text як нормалізовано адаптером.",
+          "title": "Availability"
+        },
+        "price": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Money"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "values": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "description": "Інші observed значення (bounded, §9.2).",
+          "title": "Values",
+          "type": "object"
+        }
+      },
+      "title": "ObservedValues",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "description": "Блок `source` current document: identity + canonical URL (§9.2).",
+      "properties": {
+        "canonical_url": {
+          "minLength": 1,
+          "title": "Canonical Url",
+          "type": "string"
+        },
+        "source_id": {
+          "description": "ID джерела з docs/research/source-registry.yaml.",
+          "maxLength": 64,
+          "pattern": "^(news|vehicle|catalog)_[a-z]{2}_[a-z0-9]+(_[a-z0-9]+)*$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_item_id": {
+          "description": "Стабільний ID сутності на джерелі.",
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Source Item Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "canonical_url",
+        "source_id",
+        "source_item_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    },
+    "SourceTime": {
+      "additionalProperties": false,
+      "description": "Час, заявлений джерелом (§5.1, §9.6); `None` ніколи не заповнюється crawler time.\n\nЗберігаються вихідний текст часу, timezone/offset, declared locale і precision (§9.6).",
+      "properties": {
+        "source_event_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Event At"
+        },
+        "source_locale_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Declared locale джерела як отримано (`uk-UA`, `de`, `lang` атрибут); §9.6.",
+          "title": "Source Locale Raw"
+        },
+        "source_time_inferred": {
+          "default": false,
+          "title": "Source Time Inferred",
+          "type": "boolean"
+        },
+        "source_time_precision": {
+          "$ref": "#/$defs/TimePrecision",
+          "default": "unknown"
+        },
+        "source_time_raw_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Time Raw Text"
+        },
+        "source_timezone_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Timezone Raw"
+        },
+        "source_updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Updated At"
+        }
+      },
+      "title": "SourceTime",
+      "type": "object"
+    },
+    "SystemTime": {
+      "additionalProperties": false,
+      "description": "System/knowledge time (§9.6): усі три обов'язкові, aware UTC.",
+      "properties": {
+        "fetched_at": {
+          "description": "Завершення HTTP fetch.",
+          "format": "date-time",
+          "title": "Fetched At",
+          "type": "string"
+        },
+        "ingested_at": {
+          "description": "Commit normalized record.",
+          "format": "date-time",
+          "title": "Ingested At",
+          "type": "string"
+        },
+        "observed_at": {
+          "description": "Логічний час source snapshot.",
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fetched_at",
+        "ingested_at",
+        "observed_at"
+      ],
+      "title": "SystemTime",
+      "type": "object"
+    },
+    "TimePrecision": {
+      "description": "Точність часу, заявленого джерелом (§9.6).",
+      "enum": [
+        "second",
+        "minute",
+        "hour",
+        "day",
+        "month",
+        "year",
+        "unknown"
+      ],
+      "title": "TimePrecision",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/events/normalized_projection_payload.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Вміст normalized artifact (§7.3 п.1–3): усе, з чого projector будує Mongo-документи.\n\n`schema_version` payload-а дорівнює `NormalizedArtifactRef.schema_version` (перевіряє\n`check_payload_matches_artifact`). `source` — `SourceRef` (identity + `canonical_url`), бо\ncurrent document §9.2 вимагає `source.canonical_url`. Час — окремо `source_time` (§9.6,\nз raw text/locale) і `system_time`; `entity_time()` збирає блок `time` current document\nі при валідації payload відхиляє підміну source time через `fetched_at` (R-43).",
+  "properties": {
+    "attributes": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "description": "Source-specific поля (bounded).",
+      "title": "Attributes",
+      "type": "object"
+    },
+    "core": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "description": "Versioned normalized поля домену (bounded).",
+      "title": "Core",
+      "type": "object"
+    },
+    "entity_kind": {
+      "$ref": "#/$defs/EntityKind"
+    },
+    "entity_uuid": {
+      "format": "uuid",
+      "title": "Entity Uuid",
+      "type": "string"
+    },
+    "identity_hash": {
+      "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+      "title": "Identity Hash",
+      "type": "string"
+    },
+    "latest_state": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "description": "Price/status/mileage summary (bounded).",
+      "title": "Latest State",
+      "type": "object"
+    },
+    "observation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ObservedValues"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Observation-поля offer/listing; None — сутність без observations."
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceRef"
+    },
+    "source_time": {
+      "$ref": "#/$defs/SourceTime"
+    },
+    "system_time": {
+      "$ref": "#/$defs/SystemTime"
+    }
+  },
+  "required": [
+    "core",
+    "entity_kind",
+    "entity_uuid",
+    "identity_hash",
+    "source",
+    "system_time"
+  ],
+  "title": "NormalizedProjectionPayload",
+  "type": "object",
+  "x-contract-version": "1.0"
+}
