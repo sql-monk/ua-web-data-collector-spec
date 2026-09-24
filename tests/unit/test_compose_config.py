@@ -19,12 +19,25 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
+MINIO_DOCKERFILE_PATH = REPO_ROOT / "deploy" / "compose" / "minio" / "Dockerfile"
 DEV_OVERRIDE_PATH = REPO_ROOT / "deploy" / "compose" / "dev.override.yml"
 SECRETS_DIR = REPO_ROOT / "deploy" / "compose" / "secrets"
 
 # §7.5 таблиця profiles → services (observability/tools ще без сервісів).
+# `ensure-minio` (WP-00 PR5) — one-shot ініціалізації object store поруч із `ensure-mongo`:
+# buckets і per-component користувачі MinIO (§13). У таблиці §7.5 окремо не названий, але
+# належить profile `core` разом із `minio` (відхилення зафіксоване у звіті PR5).
 SPEC_7_5_PROFILES: dict[str, set[str]] = {
-    "core": {"postgres", "mongo", "minio", "migrate-postgres", "ensure-mongo", "api", "scheduler"},
+    "core": {
+        "postgres",
+        "mongo",
+        "minio",
+        "migrate-postgres",
+        "ensure-mongo",
+        "ensure-minio",
+        "api",
+        "scheduler",
+    },
     "workers": {
         "discovery-worker",
         "fetch-worker",
@@ -39,7 +52,9 @@ SPEC_7_5_PROFILES: dict[str, set[str]] = {
 }
 WORKERS = SPEC_7_5_PROFILES["workers"] | SPEC_7_5_PROFILES["browser"]
 STATEFUL = {"postgres", "mongo", "minio"}
-ONE_SHOTS = {"migrate-postgres", "ensure-mongo"}
+ONE_SHOTS = {"migrate-postgres", "ensure-mongo", "ensure-minio"}
+# One-shots на vendor image (не `collector`): їхні інваріанти — у test_secrets_object_store.py.
+VENDOR_ONE_SHOTS = {"ensure-minio"}
 SPEC_7_5_NETWORKS = {
     "ingress",
     "frontend",
@@ -216,8 +231,9 @@ def test_application_services_are_read_only_non_root_with_tmpfs(
     services: dict[str, dict[str, Any]],
 ) -> None:
     app_services = {name for name, svc in services.items() if _is_application(svc)}
-    # gui — окремий image (nginx), його інваріанти перевіряє test_gui_* нижче.
-    assert app_services == set(services) - STATEFUL - {"gui"}
+    # gui — окремий image (nginx), його інваріанти перевіряє test_gui_* нижче; ensure-minio —
+    # vendor `mc` (tests/unit/test_secrets_object_store.py).
+    assert app_services == set(services) - STATEFUL - {"gui"} - VENDOR_ONE_SHOTS
     for name in app_services:
         svc = services[name]
         assert svc["read_only"] is True, name
@@ -269,7 +285,12 @@ def test_one_shot_commands_match_spec_16_2(services: dict[str, dict[str, Any]]) 
         "-c",
         "collector db migrate && exec collector db roles --with-login",
     ]
-    assert services["ensure-mongo"]["command"] == ["collector", "db", "ensure-mongo"]
+    # WP-00 PR5: перемикач `--validators --indexes --users` — поведінка і вартовий у
+    # tests/unit/test_secrets_object_store.py.
+    ensure_mongo = services["ensure-mongo"]["command"]
+    assert ensure_mongo[:2] == ["sh", "-c"], ensure_mongo
+    assert "exec collector db ensure-mongo ;;" in ensure_mongo[2]
+    assert "exec collector db ensure-mongo --validators --indexes --users ;;" in ensure_mongo[2]
     assert services["api"]["command"] == ["collector", "api"]
 
 
@@ -309,7 +330,13 @@ def test_stateful_image_pinned_by_digest_and_named_volumes(
     compose: dict[str, Any], services: dict[str, dict[str, Any]], name: str
 ) -> None:
     svc = services[name]
-    assert PINNED_IMAGE.match(svc["image"]), svc["image"]
+    if name == "minio":
+        # Quay manifests were removed in 2026; MinIO is built from a pinned source release
+        # and pinned builder/runtime bases instead of pulling an unavailable vendor digest.
+        assert svc["pull_policy"] == "build"
+        assert svc["build"]["args"]["MINIO_VERSION"] == "RELEASE.2025-09-07T16-13-09Z"
+    else:
+        assert PINNED_IMAGE.match(svc["image"]), svc["image"]
     volumes = svc["volumes"]
     assert volumes, f"{name}: stateful без named volume"
     named = [v for v in volumes if not str(v).startswith(".")]
@@ -330,7 +357,29 @@ def test_stateful_versions_match_spec_8(services: dict[str, dict[str, Any]]) -> 
     assert services["mongo"]["image"].startswith("mongo:8.0@")
     assert "--replSet" in "".join(services["mongo"]["entrypoint"])
     assert "--keyFile" in "".join(services["mongo"]["entrypoint"])
-    assert "minio" in services["minio"]["image"]
+    minio = services["minio"]
+    assert (
+        minio["image"] == "${COLLECTOR_MINIO_IMAGE:-collector-minio:RELEASE.2025-09-07T16-13-09Z}"
+    )
+    assert minio["pull_policy"] == "build"
+    assert minio["build"]["context"] == "./deploy/compose/minio"
+    assert minio["build"]["args"]["MINIO_VERSION"] == "RELEASE.2025-09-07T16-13-09Z"
+
+
+def test_minio_source_build_is_reproducibly_pinned() -> None:
+    text = MINIO_DOCKERFILE_PATH.read_text(encoding="utf-8")
+    assert re.search(
+        r"^ARG GO_IMAGE=golang:1\.24\.8-alpine3\.22@sha256:[0-9a-f]{64}$", text, re.MULTILINE
+    )
+    assert re.search(r"^ARG RUNTIME_IMAGE=alpine:3\.22\.1@sha256:[0-9a-f]{64}$", text, re.MULTILINE)
+    assert text.count("ARG MINIO_VERSION=RELEASE.2025-09-07T16-13-09Z") == 2
+    assert "ARG MINIO_COMMIT=07c3a429bfed433e49018cb0f78a52145d4bedeb" in text
+    assert '"github.com/minio/minio@${MINIO_VERSION}"' in text
+    assert "cmd.ReleaseTag=${MINIO_VERSION}" in text
+    assert "CGO_ENABLED=0" in text
+    assert "go install -tags kqueue -trimpath" in text
+    assert "COPY --from=builder /out/LICENSE /out/CREDITS /licenses/" in text
+    assert "ca-certificates.crt" in text
 
 
 def test_named_volumes_only_for_stateful(compose: dict[str, Any]) -> None:

@@ -138,6 +138,12 @@ pg_engine = _postgres_fixtures.pg_engine
 pg_sessions = _postgres_fixtures.pg_sessions
 pg_session = _postgres_fixtures.pg_session
 
+# Builders projection-даних WP-01A (entity → parse result → projection task, receipt) — ті самі,
+# що в `tests/integration/postgres`, без дублювання (PR1c: projection backend).
+make_entity = _postgres_fixtures.make_entity
+record_parse_result = _postgres_fixtures.record
+projection_receipt = _postgres_fixtures.receipt
+PROJECTION_COLLECTION: str = _postgres_fixtures.COLLECTION
 
 # --- LOGIN-ролі §13 для runtime ------------------------------------------------------------
 
@@ -257,6 +263,29 @@ def wait_for() -> WaitFor:
             await asyncio.sleep(POLL_SECONDS)
 
     return _wait_for
+
+
+PATIENT_TIMEOUT = 60.0
+"""Бюджет очікування стану для тестів PR1c (`patient_wait_for`).
+
+Очікування рахує і boot runtime під LOGIN-роллю (перевірка ролі, bootstrap pool, реєстрація,
+ready), і кілька повних циклів claim → handle → report. На спільному хості під навантаженням
+(CPU ~90 %) boot projector-а займав до 8 с, а повний scaling-набір — 45 хв замість 3.75 хв
+(звіт `docs/plan/reports/WP-01D/implementation-pr1c.md`), тож 15 с давали хибні падіння. Довший
+бюджет лише відкладає падіння справді зламаного тесту; успішний тест чекає рівно до стану.
+"""
+
+
+@pytest.fixture
+def patient_wait_for(wait_for: WaitFor) -> WaitFor:
+    """`wait_for` із типовим таймаутом `PATIENT_TIMEOUT` замість `DEFAULT_TIMEOUT`."""
+
+    async def _patient(
+        predicate: Callable[[], bool], *, what: str, timeout: float = PATIENT_TIMEOUT
+    ) -> None:
+        await wait_for(predicate, what=what, timeout=timeout)
+
+    return _patient
 
 
 class ControlledHandler(TaskHandler):

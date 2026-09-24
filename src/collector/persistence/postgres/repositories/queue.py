@@ -35,7 +35,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from collector.contracts import new_entity_id
-from collector.persistence.postgres.clock import resolve_now
+from collector.persistence.postgres.clock import require_aware_utc, resolve_now
 from collector.persistence.postgres.errors import (
     LeaseNotOwnedError,
     NotFoundError,
@@ -91,6 +91,31 @@ class BackoffPolicy:
         delay = min(self.base.total_seconds() * (self.multiplier**exponent), maximum)
         jitter = rng.uniform(0.0, delay * self.jitter_ratio) if self.jitter_ratio > 0 else 0.0
         return timedelta(seconds=min(delay + jitter, maximum))
+
+
+def clamp_not_before(not_before: datetime | None, now: datetime) -> datetime:
+    """`max(not_before, now)` у UTC; naive datetime відхиляється до будь-якого запису."""
+    current = require_aware_utc(now, parameter="now")
+    if not_before is None:
+        return current
+    lower_bound = require_aware_utc(not_before, parameter="not_before")
+    return current if lower_bound < current else lower_bound
+
+
+def next_attempt_at(
+    now: datetime,
+    attempt: int,
+    *,
+    policy: BackoffPolicy | None = None,
+    rng: random.Random | None = None,
+    not_before: datetime | None = None,
+) -> datetime:
+    """Час наступної спроби для `retry`: явний `not_before` (стиснутий до `now`) або
+    `now + BackoffPolicy.delay_for(attempt)` — див. docstring `retry`."""
+    current = require_aware_utc(now, parameter="now")
+    if not_before is not None:
+        return clamp_not_before(not_before, current)
+    return current + (policy or BackoffPolicy()).delay_for(attempt, rng or random.SystemRandom())
 
 
 async def enqueue(session: AsyncSession, job: NewJob, *, now: datetime | None = None) -> CrawlJob:
@@ -257,10 +282,23 @@ async def retry(
     error_message: str | None = None,
     policy: BackoffPolicy | None = None,
     rng: random.Random | None = None,
+    not_before: datetime | None = None,
     now: datetime | None = None,
 ) -> CrawlJob:
-    """Retryable-помилка: `leased` → `retry` з `not_before = now + backoff(attempt) + jitter`;
-    якщо `attempt >= max_attempts` — `quarantined` + `dead_letters(reason=max_attempts)`.
+    """Retryable-помилка: `leased` → `retry`; якщо `attempt >= max_attempts` — `quarantined`
+    + `dead_letters(reason=max_attempts)` (незалежно від `not_before`).
+
+    Наступна спроба (`not_before` рядка):
+
+    - `not_before=None` → `now + policy.delay_for(attempt)` (експоненційний `BackoffPolicy`,
+      поведінка PR1);
+    - `not_before` задано → **рівно** `max(not_before, now)`, `policy` не застосовується
+      (PR3a п.1). Викликач передає вже обчислену межу: табличну затримку §10 разом із
+      `Retry-After` (runtime WP-01D рахує `max(now + schedule.delay(attempt), retry_after)`).
+      Додавати поверх неї ще й дефолтний `BackoffPolicy` не можна — 30 с × 2 перекрили б
+      таблицю 5 с/30 с/2 хв/10 хв. Минуле значення стискається до `now` (job claimable
+      одразу, без «подорожі в минуле» в порядку claim).
+
     Transaction boundary: викликач; статус і dead letter — одна транзакція."""
     current = resolve_now(now)
     job = await _lock_owned(session, job_id, owner)
@@ -273,11 +311,12 @@ async def retry(
             error_message=error_message,
             now=current,
         )
-    delay = (policy or BackoffPolicy()).delay_for(job.attempt, rng or random.SystemRandom())
     job.status = "retry"
     job.lease_owner = None
     job.lease_expires_at = None
-    job.not_before = current + delay
+    job.not_before = next_attempt_at(
+        current, job.attempt, policy=policy, rng=rng, not_before=not_before
+    )
     job.last_error_code = error_code
     job.last_error_message = _truncate(error_message)
     job.updated_at = current
@@ -342,9 +381,15 @@ async def quarantine(
 
 
 async def release(
-    session: AsyncSession, job_id: UUID, owner: str, *, now: datetime | None = None
+    session: AsyncSession,
+    job_id: UUID,
+    owner: str,
+    *,
+    not_before: datetime | None = None,
+    now: datetime | None = None,
 ) -> CrawlJob:
-    """Плановий drain: `leased` → `pending` **без** інкременту `attempt` і **без** помилки.
+    """Плановий drain або defer: `leased` → `pending` **без** спалювання спроби і **без**
+    помилки.
 
     Запит WP-01D (`docs/plan/deps/WP-01D-to-WP-01A.md` §3, §5): при scale-down контейнер
     зупиняють, і незавершені jobs треба повернути в чергу негайно. `retry` для цього не
@@ -360,6 +405,12 @@ async def release(
     «згоряє» (інакше `max_attempts=2` давав би карантин після однієї справжньої помилки).
     `not_before = now`, тож job стає claimable одразу.
 
+    **Defer (PR3a п.1; WP-01D PR1c `TaskResult.deferred`, WP-02, WP-04):** `not_before`
+    задано → job повертається в `pending` з `not_before = max(not_before, now)` і не
+    claim-иться раніше. Семантика та сама: `attempt` компенсовано, `last_error_*` не
+    змінюються, dead letter не створюється — скільки завгодно defer поспіль не ведуть у
+    карантин. Верхню межу defer (clamp) тримає викликач (runtime WP-01D).
+
     Чужий/відсутній lease → `LeaseNotOwnedError`: повертати чужу job не можна, її вже виконує
     інший instance. Transaction boundary: викликач (одна коротка транзакція на job).
     """
@@ -373,7 +424,7 @@ async def release(
                 lease_owner=None,
                 lease_expires_at=None,
                 leased_at=None,
-                not_before=current,
+                not_before=clamp_not_before(not_before, current),
                 attempt=func.greatest(CrawlJob.attempt - 1, 0),
                 updated_at=current,
             )
@@ -507,11 +558,13 @@ __all__ = [
     "BackoffPolicy",
     "NewJob",
     "claim",
+    "clamp_not_before",
     "complete",
     "enqueue",
     "get_job",
     "heartbeat",
     "list_dead_letters",
+    "next_attempt_at",
     "quarantine",
     "recover_expired_leases",
     "release",

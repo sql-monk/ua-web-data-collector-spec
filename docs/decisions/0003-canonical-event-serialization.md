@@ -180,6 +180,19 @@ canonical-кодуванні: `datetime`/`Decimal`/`UUID`/`bytes`/NaN/inf у ц�
   `event_artifact` лишається fallback-ом; знизити ліміт — потенційно breaking для вже
   записаних receipt.
 
+## Amendment 2026-09-24 (WP-01C PR2)
+
+`encode_event` кодує дві події: `DomainChangedEvent` і `NewsVersionCreatedEvent`
+(`collector.contracts.news`, outbox `news.version_created`, WP-01A PR3b → WP-04). Тип параметра —
+`PublishableEvent = DomainChangedEvent | NewsVersionCreatedEvent`; media type береться з
+`ClassVar media_type` класу події (`application/vnd.ua-collector.domain-changed.v1+json` /
+`application/vnd.ua-collector.news-version-created.v1+json`). **Байтовий формат не змінився**:
+той самий `canonical_json_bytes`, ті самі правила скалярів, ліміт 256 KiB і `EncodedEvent`
+(перевірено handwritten golden у `testing-pr2.md`). Зворотне декодування — `decode_event`
+(domain.changed) і `decode_news_version_created`. PR2 також посилив strict `JsonValue`: масив —
+лише `list`, ключ — лише `str`; одиночний сурогат → `CanonicalEncodingError`
+(`docs/contracts.md` §6–7).
+
 ## Related
 
 - Реалізація: `src/collector/contracts/canonical.py`, `src/collector/contracts/events.py`,
