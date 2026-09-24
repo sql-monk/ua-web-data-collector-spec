@@ -18,7 +18,7 @@ import html
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Literal
 
@@ -161,6 +161,18 @@ def reassemble(document: SegmentedDocument, translations: Sequence[str]) -> str:
     return _ATTR_SLOT_RE.sub(attribute, joined)
 
 
+@dataclass(slots=True)
+class _Skip:
+    """Захищений/пропущений елемент: куди піде (`to_run` — токен у сегменті, інакше parts),
+    глибина однойменних тегів і лічильник інших тегів, відкритих усередині."""
+
+    name: str
+    to_run: bool
+    buffer: list[str]
+    depth: int = 1
+    inner: Counter[str] = field(default_factory=Counter)
+
+
 class _Segmenter(HTMLParser):
     def __init__(self, attributes: frozenset[str], max_chars: int | None) -> None:
         super().__init__(convert_charrefs=False)
@@ -173,7 +185,7 @@ class _Segmenter(HTMLParser):
         self._run: list[Token] = []
         self._run_context: tuple[str, str | None] = ("", None)
         # Захищений/пропущений елемент: (тег, глибина, куди: run чи parts, буфер).
-        self._skip: tuple[str, int, bool, list[str]] | None = None
+        self._skip: _Skip | None = None
         self._root_lang: str | None = None
         self._top_level = 0
 
@@ -190,14 +202,24 @@ class _Segmenter(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         raw = f"</{tag}>"
-        if self._skip is not None:
-            name, depth, to_run, buffer = self._skip
-            buffer.append(raw)
-            if tag == name:
-                self._skip = (name, depth - 1, to_run, buffer) if depth > 1 else None
-                if depth == 1:
-                    self._finish_skip(to_run, buffer)
+        skip = self._skip
+        if skip is not None and skip.inner[tag] > 0:
+            skip.inner[tag] -= 1
+            skip.buffer.append(raw)
             return
+        if skip is not None and tag == skip.name:
+            skip.buffer.append(raw)
+            skip.depth -= 1
+            if skip.depth == 0:
+                self._end_skip()
+            return
+        if skip is not None and not self._open[tag]:
+            skip.buffer.append(raw)
+            return
+        if skip is not None:
+            # Закривається предок незакритого захищеного елемента (`<p><code>ls</p>`): як і
+            # браузер, обмежуємо захищену область батьківським блоком — далі звичайний текст.
+            self._end_skip()
         if tag in INLINE_TAGS:
             self._append(Token("tag", raw, tag, closing=True))
             return
@@ -225,7 +247,8 @@ class _Segmenter(HTMLParser):
         self._opaque(f"<!{decl}>")
 
     def unknown_decl(self, data: str) -> None:
-        self._opaque(f"<![{data}]>")
+        # stdlib віддає `CDATA[x` без завершального `]]`; інші марковані секції — без `]`.
+        self._opaque(f"<![{data}]]>" if data.startswith("CDATA[") else f"<![{data}]>")
 
     def handle_pi(self, data: str) -> None:
         self._opaque(f"<?{data}>")
@@ -233,9 +256,7 @@ class _Segmenter(HTMLParser):
     def close(self) -> None:
         super().close()
         if self._skip is not None:
-            _, _, to_run, buffer = self._skip
-            self._skip = None
-            self._finish_skip(to_run, buffer)
+            self._end_skip()
         self._flush()
 
     # --- внутрішнє -----------------------------------------------------------------------
@@ -243,11 +264,16 @@ class _Segmenter(HTMLParser):
     def _start(
         self, tag: str, attrs: list[tuple[str, str | None]], raw: str, *, void: bool
     ) -> None:
-        if self._skip is not None:
-            name, depth, to_run, buffer = self._skip
-            buffer.append(raw)
-            if tag == name and not void:
-                self._skip = (name, depth + 1, to_run, buffer)
+        skip = self._skip
+        if skip is not None and skip.to_run and tag not in INLINE_TAGS | PROTECTED_INLINE_TAGS:
+            # Блочний тег не може бути всередині inline `code`/`translate="no"`: область закрита.
+            self._end_skip()
+        elif skip is not None:
+            skip.buffer.append(raw)
+            if tag == skip.name and not void:
+                skip.depth += 1
+            elif not void:
+                skip.inner[tag] += 1
             return
         attr_map = {key.lower(): value for key, value in attrs}
         lang = attr_map.get("lang")
@@ -266,7 +292,7 @@ class _Segmenter(HTMLParser):
                 return
             if not inline:
                 self._flush()
-            self._skip = (tag, 1, inline, [raw])
+            self._skip = _Skip(tag, inline, [raw])
             return
         raw = self._attribute_slots(raw, tag, attrs, lang)
         if tag in INLINE_TAGS:
@@ -321,9 +347,12 @@ class _Segmenter(HTMLParser):
             raw = raw[: match.start()] + slot + raw[match.end() :]
         return raw
 
-    def _finish_skip(self, to_run: bool, buffer: list[str]) -> None:
-        raw = "".join(buffer)
-        if to_run:
+    def _end_skip(self) -> None:
+        skip, self._skip = self._skip, None
+        if skip is None:
+            return
+        raw = "".join(skip.buffer)
+        if skip.to_run:
             self._append(Token("protected", raw))
         else:
             self._parts.append(raw)
@@ -342,13 +371,13 @@ class _Segmenter(HTMLParser):
 
     def _text(self, raw: str) -> None:
         if self._skip is not None:
-            self._skip[3].append(raw)
+            self._skip.buffer.append(raw)
         else:
             self._append(Token("text", raw))
 
     def _opaque(self, raw: str) -> None:
         if self._skip is not None:
-            self._skip[3].append(raw)
+            self._skip.buffer.append(raw)
         elif self._run:
             self._append(Token("protected", raw))
         else:

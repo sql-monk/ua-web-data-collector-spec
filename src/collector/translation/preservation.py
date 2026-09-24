@@ -47,7 +47,12 @@ _DATE_RE = re.compile(r"(?<!\d)(?:\d{1,2}[./]\d{1,2}[./]\d{2,4}|\d{4}-\d{2}-\d{2
 _AMOUNT_RE = re.compile(
     rf"(?<![\w.,])(?:{_CURRENCY}\s?)?(?:{_NUMBER})(?:\s?(?:%|‰|{_CURRENCY}(?!\w)))?(?!\d)"
 )
-_BARE_NUMBER_RE = re.compile(rf"(?<![\d.,])(?:{_NUMBER})")
+# Знак перед числом (дефіс-мінус, U+2212, en dash — типографський мінус у de/fr/pl): лише
+# впритул до цифри і не після літери/цифри, тож `COVID-19` і діапазон `10\N{EN DASH}15` знаком не є.
+# Знак лишається текстом для провайдера (може локалізувати форму мінуса), але валідатор
+# порівнює числа зі знаком: втрата мінуса (інверсія значення) — `number_mismatch`.
+_SIGNS = "-\N{MINUS SIGN}\N{EN DASH}"
+_BARE_NUMBER_RE = re.compile(rf"(?<![\d.,])(?:(?<![\w.,])[{_SIGNS}](?=\d))?(?:{_NUMBER})")
 _NUMERIC_PATTERNS: tuple[tuple[re.Pattern[str], PlaceholderKind], ...] = (
     (_DATE_RE, "date"),
     (_AMOUNT_RE, "number"),
@@ -152,7 +157,12 @@ def normalize_number(raw: str) -> str:
     Останній із двох різних роздільників — десятковий; одиночний роздільник із рівно трьома
     цифрами після нього — групування (у джерелі й перекладі трактується однаково).
     """
-    digits = "".join(ch for ch in raw if ch not in _GROUP_SEPARATORS)
+    sign = "-" if raw[:1] in _SIGNS else ""
+    digits = "".join(ch for ch in raw.lstrip(_SIGNS) if ch not in _GROUP_SEPARATORS)
+    return sign + _normalize_unsigned(digits)
+
+
+def _normalize_unsigned(digits: str) -> str:
     marks = [ch for ch in digits if ch in ".,"]
     if not marks:
         return digits
@@ -200,7 +210,12 @@ def _mask_text(
 
 def _url_spans(plain: str) -> Iterable[tuple[int, int]]:
     for match in _URL_RE.finditer(plain):
-        url = match.group(0).rstrip(_URL_TRAILING)
+        url = match.group(0)
+        # Кінцева пунктуація — не частина URL, окрім збалансованої `)` (`/wiki/Bus_(Verkehr)`).
+        while url and url[-1] in _URL_TRAILING:
+            if url[-1] == ")" and url.count("(") >= url.count(")"):
+                break
+            url = url[:-1]
         yield match.start(), match.start() + len(url)
 
 

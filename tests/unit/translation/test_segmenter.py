@@ -177,3 +177,39 @@ def test_root_lang_requires_single_top_level_element() -> None:
         segment_html('<!DOCTYPE html>\n<html lang="lt"><body><p>A</p></body></html>').root_lang
         == "lt"
     )
+
+
+# --- виправлення після gate 2 (T-1, T-2) ----------------------------------------------------
+
+
+@pytest.mark.parametrize("opener", ["<code>", "<kbd>", '<span translate="no">'])
+def test_unclosed_protected_inline_is_bounded_by_parent_block(opener: str) -> None:
+    source = f"<div><p>Befehl {opener}ls -la</p><p>Zweiter Absatz.</p><ul><li>Punkt</li></ul></div>"
+    document = segment_html(source)
+    assert [s.text.strip() for s in document.segments] == ["Befehl", "Zweiter Absatz.", "Punkt"]
+    assert "ls -la" in document.segments[0].html  # захищений токен лишився в першому сегменті
+    assert dom_events(reassemble(document, _identity(document))) == dom_events(source)
+
+
+def test_unclosed_pre_is_bounded_by_parent_element() -> None:
+    source = "<section><div><pre>code line</div><p>Nach dem Block.</p></section>"
+    document = segment_html(source)
+    assert [s.text for s in document.segments] == ["Nach dem Block."]
+
+
+def test_nested_same_block_inside_translate_no_does_not_end_scope_early() -> None:
+    source = (
+        '<section><div translate="no"><section><p>Geheim</p></section><p>Auch geheim</p></div>'
+        "<p>Offen</p></section>"
+    )
+    assert [s.text for s in segment_html(source).segments] == ["Offen"]
+
+
+def test_cdata_is_byte_exact_and_conditional_comment_dom_equivalent() -> None:
+    cdata = "<p>a <![CDATA[x < y]]> b</p>"
+    document = segment_html(cdata)
+    assert reassemble(document, _identity(document)) == cdata
+    # `<![if …]>` stdlib і браузер трактують як bogus comment — порівнюється DOM.
+    conditional = "<p>a <![if !IE]> b <![endif]> c</p>"
+    document = segment_html(conditional)
+    assert dom_events(reassemble(document, _identity(document))) == dom_events(conditional)

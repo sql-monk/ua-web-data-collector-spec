@@ -218,3 +218,42 @@ def test_locale_reformatting_of_unmasked_number_is_accepted() -> None:
     result = validate_preservation(masked, translated)
     assert "number_mismatch" not in result.issues
     assert result.issues == ("placeholder_missing",)  # placeholder усе одно обов'язковий
+
+
+# --- виправлення після gate 2 (T-3, T-4) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "minus", ["-", "\N{MINUS SIGN}", "\N{EN DASH}"], ids=["hyphen", "U+2212", "en-dash"]
+)
+def test_lost_minus_sign_is_number_mismatch(minus: str) -> None:
+    masked = _masked(f"Die Temperatur sank auf {minus}5 Grad.")
+    assert minus in masked.text  # знак — текст для провайдера, не частина placeholder-а
+    assert validate_preservation(masked, _translate(masked)).ok
+    lost = validate_preservation(masked, _translate(masked).replace(minus, ""))
+    assert "number_mismatch" in lost.issues
+
+
+def test_minus_form_may_be_localized_by_provider() -> None:
+    masked = _masked("Die Temperatur sank auf -5 Grad.")
+    localized = _translate(masked).replace("-", "\N{MINUS SIGN}")
+    assert validate_preservation(masked, localized).ok
+
+
+@pytest.mark.parametrize(
+    "text", ["Die COVID-19-Pandemie endete.", "Zwischen 10\N{EN DASH}15 Grad.", "Jahre 2020-2024."]
+)
+def test_hyphen_between_word_or_digits_is_not_a_sign(text: str) -> None:
+    masked = _masked(text)
+    translated = _translate(masked).replace("-", " - ").replace("\N{EN DASH}", " до ")
+    assert "number_mismatch" not in validate_preservation(masked, translated).issues
+
+
+def test_balanced_trailing_parenthesis_stays_in_url_mask() -> None:
+    masked = _masked(
+        "Siehe https://de.wikipedia.org/wiki/Bus_(Verkehr) und (https://example.org/x)."
+    )
+    urls = [p.source for p in masked.placeholders if p.kind == "url"]
+    assert urls == ["https://de.wikipedia.org/wiki/Bus_(Verkehr)", "https://example.org/x"]
+    result = validate_preservation(masked, _translate(masked))
+    assert result.ok and "wiki/Bus_(Verkehr)" in result.html

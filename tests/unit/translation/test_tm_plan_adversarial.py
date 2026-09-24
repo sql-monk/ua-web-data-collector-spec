@@ -129,11 +129,6 @@ def test_distinct_text_does_not_collide_after_normalization(left: str, right: st
     assert normalized_segment_hash(left) != normalized_segment_hash(right)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding T-5: normalize_text прибирає всі Cf (ZWJ/ZWNJ/RLM) — emoji ZWJ-послідовність "
-    "і окремі emoji дають один TM hash",
-)
 def test_zwj_emoji_sequence_does_not_collide_with_separate_emoji() -> None:
     family = "\N{MAN}\N{ZERO WIDTH JOINER}\N{WOMAN}\N{ZERO WIDTH JOINER}\N{GIRL}"
     separate = "\N{MAN}\N{WOMAN}\N{GIRL}"
@@ -391,11 +386,6 @@ def test_plan_decisions_are_identical_between_runs(classifier: LinguaClassifier)
     assert all(run == runs[0] for run in runs)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding T-2 (pipeline): після незакритого <code> наступний абзац не надсилається "
-    "перекладачу, а version збирається як complete без quality flag",
-)
 async def test_unclosed_code_does_not_yield_complete_version_with_untranslated_text(
     classifier: LinguaClassifier, glossary: Glossary
 ) -> None:

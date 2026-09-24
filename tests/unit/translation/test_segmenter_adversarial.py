@@ -193,21 +193,12 @@ def test_parser_normalizations_keep_dom_equivalent(name: str, source: str) -> No
 # --- знайдені дефекти (strict xfail: червоніє, щойно дефект виправлено) -----------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding T-1: unknown_decl відновлює CDATA як `<![...]>` — губиться один `]`",
-)
 def test_cdata_section_is_byte_exact() -> None:
     source = "<p>a <![CDATA[x < y]]> b</p>"
     document = segment_html(source)
     assert reassemble(document, _identity(document)) == source
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding T-2: незакритий inline <code> ковтає всі наступні абзаци як захищений "
-    "токен — їхній текст мовчки не перекладається",
-)
 def test_unclosed_inline_code_does_not_swallow_following_paragraphs() -> None:
     source = "<p>Befehl <code>ls</p><p>Dieser Absatz muss übersetzt werden.</p>"
     document = segment_html(source)

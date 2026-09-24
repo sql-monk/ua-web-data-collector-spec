@@ -192,11 +192,6 @@ def test_swapping_two_numeric_placeholders_is_accepted_as_reordering() -> None:
 # --- знайдені дефекти (strict xfail) -----------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding T-3: знак мінуса не входить у число маски/валідатора — втрата `−`/`-` "
-    "(інверсія значення) не виявляється",
-)
 @pytest.mark.parametrize("minus", ["\N{MINUS SIGN}", "-"], ids=["U+2212", "hyphen"])
 def test_dropped_minus_sign_is_detected(minus: str) -> None:
     masked = _mask(f"<p>Die Temperatur sank auf {minus}5 Grad.</p>")

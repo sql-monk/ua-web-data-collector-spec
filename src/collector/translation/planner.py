@@ -29,7 +29,8 @@ from collector.translation.segmenter import Segment, SegmentedDocument, segment_
 ArticleField = Literal["title", "lead", "body"]
 SegmentAction = Literal["translate", "keep", "unsupported"]
 # TODO(WP-01C PR2 п.4): замінити на `collector.contracts.TranslationQualityFlag`, коли
-# контракт з'явиться; значення збігаються з мінімальним набором картки WP-01C + О-5.
+# контракт з'явиться; значення збігаються з мінімальним набором картки WP-01C, а
+# `language_unsupported` (О-5) WP-01C PR2 додає під тією самою назвою.
 QualityFlag = Literal[
     "preservation_failed", "low_language_confidence", "provider_truncated", "language_unsupported"
 ]

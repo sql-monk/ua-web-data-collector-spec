@@ -79,9 +79,9 @@ glossary-файлу), без провайдера перекладу і без �
   `pyproject.toml`. Обґрунтування: §8 називає lingua/fastText; fastText потребує окремого
   завантаження моделі (мережа/артефакт), lingua має моделі у wheel, працює offline,
   підтримує всі 16 + `uk` + `ru` + `ca`, дає confidence і має `py.typed`/`.pyi` (mypy strict
-  без ignore). Заміри (Windows, 19 мов): побудова детектора + перша класифікація ≈ 0,04 с;
-  working set процесу 16,5 → 26,6 МБ (і з `with_preloaded_language_models`). **Ризик:** wheel
-  ≈ 170 МБ, у venv ≈ 291 МБ — збільшить образ воркера (див. «Ризики»).
+  без ignore). Побудова детектора + перша класифікація ≈ 0,04 с. Пам'ять і розмір — див.
+  «Ризики» (виправлено після gate 2, T-11): моделі вантажаться ліниво по мовах, після
+  класифікації текстів усіх 19 мов working set +45 МБ (вимір тестувальника).
 - **HTML-парсер — stdlib `html.parser`, `lxml` не додано.** Причини: без нової залежності й
   бінарного wheel; не обробляє DTD/`<!ENTITY>` і не резолвить зовнішні сутності (невідомі
   `&name;` лишаються буквально); ітеративний (libxml2 має ліміт глибини 256 без `HUGE`);
@@ -201,8 +201,8 @@ AST-скриптом): `segmenter` 343, `preservation` 172, `pipeline` 143, `pla
 
 | Ризик | Статус / пом'якшення |
 |---|---|
-| **Обсяг PR1 ≈ 1019 логічних рядків > ~800** картки | open. Коміти згруповані так, що PR розбивається без переписування: `4a61109`+`877df0f` (segmenter, preservation, glossary, TM key ≈ 671) → PR1a; `2ff0e7e` (detection, planner, pipeline ≈ 348) → PR1b; тести розкладаються за модулями. Рішення — за gate/оркестратором |
-| Wheel `lingua-language-detector` ≈ 170 МБ (≈ 291 МБ у venv) збільшить runtime-образ | open (ризик картки). Приріст пам'яті ≈ 10 МБ на 19 мов. Варіанти для оркестратора/WP-01D: окремий образ `translation-worker` або extra-група залежностей; WP-04 Dockerfile не змінює |
+| **Обсяг PR1 ≈ 1019 логічних рядків > ~800** картки | accepted оркестратором одним PR (gate 2). Раніше пропонувалося: Коміти згруповані так, що PR розбивається без переписування: `4a61109`+`877df0f` (segmenter, preservation, glossary, TM key ≈ 671) → PR1a; `2ff0e7e` (detection, planner, pipeline ≈ 348) → PR1b; тести розкладаються за модулями. Рішення — за gate/оркестратором |
+| `lingua-language-detector`: wheel ≈ 170 МБ, розпакований ≈ 291 МБ, wheels лише cp313 (див. `uv.lock`); збільшить runtime-образ | open — рішення щодо залежності ухвалює рев'ю. Пам'ять (T-11, вимір тестувальника): після класифікації текстів усіх 19 мов working set 18,9 → 64,4 МБ (**+45 МБ**), private 11,8 → 13,9 МБ — переважно file-backed сторінки `.pyd`. Моя попередня оцінка «≈ +10 МБ» стосувалась лише однієї мови й була занижена. Варіанти для оркестратора/WP-01D: окремий образ `translation-worker` або extra-група залежностей; WP-04 Dockerfile не змінює |
 | Локальні типи замість контрактів WP-01C PR2: `ArticleText`, `QualityFlag` (Literal), `not_required` як властивість плану замість `TranslationStatus` | accepted до PR2. Перехід: `QualityFlag` → `collector.contracts.TranslationQualityFlag` (`preservation_failed`, `low_language_confidence`, `provider_truncated` збігаються з мінімумом WP-01C; `language_unsupported` — О-5); `ArticleText` будується з `NewsVersionCreatedEvent` + artifact-ів; статус версії (`not_required`/`translated`/`translation_failed`) виставляє handler PR2 з `TranslationOutcome` |
 | `SegmentTranslator` — мінімальний callable, не `TranslationProvider` | accepted: PR2 п.1 вводить Protocol з класифікованими помилками; `execute_plan` лишається, змінюється тип параметра |
 | TM-запис спільний для сегментів, що відрізняються лише числами/URL/термінами glossary (masked-хеш) | accepted — ключ від нормалізованого masked-тексту (FR-017); ризик — узгодження відмінків навколо підставленої форми glossary; покаже golden corpus PR3 і human QA WP-06x |
@@ -222,3 +222,43 @@ PR1 — бібліотечний код без викликачів у runtime (
 files не змінювались. Нагадування для PR2 (не запит): `TranslationQualityFlag` WP-01C має
 містити `language_unsupported` (рішення О-5); якщо ні — WP-04 PR2 подасть
 `docs/plan/deps/WP-04-to-WP-01C.md`.
+
+## Fixes after gate 2
+
+Джерело: `docs/plan/reports/WP-04/testing-pr1.md` (тести тестувальника — коміт `0e06048`).
+Розмір PR (~1019 рядків) оркестратор прийняв одним PR, тож ділити не треба. У тестах
+тестувальника змінено лише одне: прибрано `xfail(strict=True)` для виправлених знахідок.
+
+| Знахідка | Що зроблено | Тест |
+|---|---|---|
+| T-2 (medium) — незакритий inline `<code>`/`<kbd>`/`<samp>`/`<var>`/`translate="no"` ковтав усі наступні абзаци | Segmenter: область захищеного/пропущеного елемента тепер обмежена. Inline-елемент закриває будь-який блочний тег, а будь-який елемент — end-tag його предка (як у браузері, де `</p>` закриває `code`). Однойменні й інші теги, відкриті всередині області, рахуються окремо (`_Skip.inner`), тож вкладений `<section>` у `translate="no"` не закриває область передчасно. Весь текст після межі стає звичайними сегментами. Окремий quality flag не потрібен: неперекладеного обсягу більше немає | xfail прибрано: `test_unclosed_inline_code_does_not_swallow_following_paragraphs`, `test_unclosed_code_does_not_yield_complete_version_with_untranslated_text`; нові: `test_unclosed_protected_inline_is_bounded_by_parent_block[code,kbd,translate-no]`, `test_unclosed_pre_is_bounded_by_parent_element`, `test_nested_same_block_inside_translate_no_does_not_end_scope_early` |
+| T-3 (medium) — втрата знака мінус не ловилась | Валідатор рахує числа зі знаком: `-`, U+2212 і en dash U+2013 (у de/fr/pl типографи ставлять його як мінус: «–5 °C»). Знак рахується, лише якщо стоїть впритул до цифри і не після літери чи цифри, тож `COVID-19`, `2020-2024` і `10–15` знаком не вважаються. Знак не маскується: провайдер може локалізувати форму мінуса, а `normalize_number` зводить усі три форми до `-`. Втрата знака дає `number_mismatch` | xfail прибрано: `test_dropped_minus_sign_is_detected[U+2212,hyphen]`; нові: `test_lost_minus_sign_is_number_mismatch[hyphen,U+2212,en-dash]`, `test_minus_form_may_be_localized_by_provider`, `test_hyphen_between_word_or_digits_is_not_a_sign[*]` |
+| T-1 (low) — CDATA втрачав `]` | `unknown_decl`: для `CDATA[` дописується `]]>`. `<![if …]>` stdlib, як і браузер, трактує як bogus comment, тож для нього лишається DOM-еквівалентність | xfail прибрано: `test_cdata_section_is_byte_exact`; новий: `test_cdata_is_byte_exact_and_conditional_comment_dom_equivalent` |
+| T-4 (low) — `)` відрізалась від URL | Виправлено: кінцева `)` лишається в URL, якщо дужки збалансовані (`/wiki/Bus_(Verkehr)`); незбалансована, як у `(https://…/x)`, і далі відрізається. **xfail тестувальника лишено**: після фіксу `)` потрапляє всередину URL-placeholder-а, тож `masked.text.replace(")", "")` нічого не псує, переклад коректний, а тест вимагає провалу. Його передумова застаріла, а переписувати чужий тест заборонено — прошу тестувальника замінити тест | новий: `test_balanced_trailing_parenthesis_stays_in_url_mask`; `test_url_with_trailing_parenthesis_is_preserved` — XFAIL (застаріла передумова) |
+| T-5 (low) — колізія ZWJ | `normalize_text` більше не прибирає ZWJ/ZWNJ, бо вони змінюють зміст. Soft hyphen, ZWSP і bidi-мітки прибираються, як і раніше | xfail прибрано: `test_zwj_emoji_sequence_does_not_collide_with_separate_emoji` |
+| T-11 (info) — пам'ять і розмір `lingua` | Оцінку в «Залежності»/«Ризики» виправлено: +45 МБ working set на 19 мов (вимір тестувальника); wheel ≈ 170 МБ, розпакований ≈ 291 МБ, wheels лише cp313. Рішення щодо залежності — за рев'ю | — |
+| `language_unsupported` | Назва локального `QualityFlag` збігається з тією, яку додає WP-01C PR2; TODO у `planner.py` уточнено | — |
+
+T-6…T-10 (low/info) не виправлялись: вони поза запитом gate і описані у звіті тестувальника.
+
+### Команди та вивід після фіксів
+
+```text
+$ uv run ruff check .
+All checks passed!
+$ uv run ruff format --check .
+294 files already formatted
+$ uv run mypy src
+Success: no issues found in 87 source files
+$ uv run pytest tests/unit/translation
+1529 passed, 1 xfailed in 11.01s          # xfailed = T-4 (застаріла передумова, див. вище)
+$ uv run pytest -m "not live" -rs -q
+2597 passed, 23 skipped, 1 xfailed, 8 warnings in 1300.87s (0:21:40)
+$ uv run pre-commit run --all-files
+... усі хуки Passed (ruff, format, gitleaks, markdownlint, detect-private-key, check-yaml/toml)
+```
+
+Skipped (23), усі поза WP-04: `tests/e2e/test_gui_runtime_contract.py` (20, gui не запущено),
+`tests/e2e/test_runtime_suite_is_enforced.py` (2, `COLLECTOR_E2E_REQUIRED` не задано),
+`tests/unit/test_network_blocked.py` (1, Windows). Таймінгових scaling-флейків WP-01D у цьому
+прогоні не було (0 failed).
