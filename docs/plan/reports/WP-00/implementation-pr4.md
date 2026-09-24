@@ -281,3 +281,54 @@ secrets-модулів на завантаженій машині (Docker вик
 Три окремі повтори, прогін обох secrets-модулів і повний прогін вище — зелені. Ймовірна
 причина — повільний fork у Git Bash під навантаженням; на Linux CI це не очікується. Щоб
 зменшити кількість процесів, `write_secret` не викликає `basename`.
+
+## Fixes after gate 3'/4
+
+Відповідь на `code-review-pr4.md` («Re-review (gate 3')») і `spec-review-pr4.md` (коміт
+`2d6f93e`, не змінювався). Docker не піднімався.
+
+| Знахідка | Статус | Що зроблено |
+|---|---|---|
+| Re-review low #1 / SR-3: флейк Windows (timeout 60 с, `bin\bash.exe` — launcher) | **fixed** | Тести, що запускають `init-secrets.sh`, мають timeout 180 с: `_run_init_secrets_raw` у `test_secrets_role_dsn.py`, `_run` і stub-прогін `migrate-postgres` у `test_secrets_role_dsn_adversarial.py`. На Windows першим обирається справжній `<Git>\usr\bin\bash.exe`, launcher `<Git>\bin\bash.exe` лишається fallback-ом. Без launcher-а тест сам додає `usr\bin` і `mingw64\bin` у PATH. Linux-гілка (`shutil.which`) не змінена, skip не додано |
+| Re-review low #3: stale lock | **fixed (документація + діагностика)** | Новий розділ runbook «Завислий lock `init-secrets.sh`»: як розпізнати (`.init-secrets.lock/pid`, `ps -p`) і як прибрати (`rm -r`). Скрипт записує PID власника в lock і показує його в помилці timeout. Автоматичного зняття stale lock немає, і це свідомо: два процеси, що одночасно визнали lock мертвим, можуть зняти вже новий живий lock, а PID у Git Bash (MSYS) не збігається з PID Windows. Тести `test_init_secrets_waits_for_lock_and_gives_up_with_hint` (PID у підказці, чужий lock не чіпається) і `test_init_secrets_records_its_pid_in_lock_and_removes_it` |
+| Re-review low #2: ~4 процеси на секрет | **fixed частково / решта accepted** | DSN тепер будуються через `printf -v`, без subshell. `mktemp` і `chmod` лишено свідомо: непередбачуване ім'я tmp не дає писати крізь підкладений symlink, а `mktemp` створює 0600, тож потрібен явний 0644 (ADR-0002). На Linux CI різниця несуттєва |
+| SR-1: owner/date для accepted | **fixed** | Таблиця нижче |
+| SR-2: зелений CI job `docker` на Linux | not applicable тут | Умова злиття, виконує оркестратор після push |
+
+### Accepted-ризики PR4
+
+| Ризик | Джерело | Owner | Дата | Умова перегляду |
+|---|---|---|---|---|
+| `init-secrets.sh` працює лише під bash (не POSIX `sh`) | gate 2 F-4 | WP-00 | 2026-09-24 | якщо з'явиться виклик через `sh`/dash |
+| `migrate-postgres` тримає всі вісім DSN (least privilege) | security I-1 | WP-00 (compose), WP-01D (runtime-сервіси) | 2026-09-24 | WP-01D PR1b: кожен runtime-сервіс монтує лише свій DSN |
+| Файли секретів 0644, world-readable на хості | security I-2 | WP-01D (Swarm secrets, Q-013); відхилення ADR-0002 | 2026-09-22 (ADR-0002), підтверджено 2026-09-24 | production / багатокористувацький хост |
+| БД, створені в кластері пізніше, знову отримують PUBLIC CONNECT/TEMP (datacl не успадковується) | security I-3 | WP-00 | 2026-09-24 | поява другої БД у кластері |
+| Витік у CI: DSN короткочасно видно в argv `psql` усередині контейнера; SCRAM verifier може потрапити в server log при збої `ALTER ROLE`; `::add-mask::` не використовується | security I-4 | WP-00 (CI) | 2026-09-24 | перехід CI на спільні/довгоживучі runner-и |
+| REVOKE PUBLIC лише при першому initdb | security L-2 | WP-00 / оператор | 2026-09-24 | tripwire у `db roles` (WP-01A), якщо знадобиться |
+| Флейк на Windows під навантаженням (повільний fork Git Bash) — пом'якшено timeout 180 с і прямим `usr\bin\bash.exe` | gate 3' low #1 | WP-00 | 2026-09-24 | повторний флейк при 180 с |
+| Кілька процесів на секрет (`mktemp`, `chmod`, `mv`) | gate 3' low #2 | WP-00 | 2026-09-24 | якщо час запуску стане проблемою на Linux |
+| Завислий lock після `kill -9` знімається вручну (runbook) | gate 3' low #3 | WP-00 / оператор | 2026-09-24 | часті завислі lock у CI |
+
+```text
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run pytest -m "not live"
+All checks passed!
+257 files already formatted
+Success: no issues found in 77 source files
+FAILED tests/integration/scaling/test_worker_runtime.py::test_self_fencing_cancels_active_tasks_when_the_database_stops_confirming_the_lease
+FAILED tests/integration/scaling/test_worker_runtime.py::test_self_fencing_fires_when_the_database_hangs_without_raising
+2 failed, 1032 passed, 23 skipped in 2285.46s (0:38:05)
+
+$ uv run pytest <ці два тести>
+2 passed in 33.65s
+
+$ uv run pre-commit run --all-files          # markdownlint-cli2, gitleaks, ruff, …
+precommit exit=0 (усі hooks Passed/Skipped)
+```
+
+Два падіння — timing-sensitive тести self-fencing WP-01D. У логах `worker.event_loop_stalled`
+і `lease not confirmed by database`: хост був перевантажений, паралельно йшов ще один
+testcontainers-прогін іншого агента, і повний прогін тривав 38 хв замість звичних 13. PR4 не
+змінює ні `src/**`, ні `tests/integration/**` (`git diff --stat bc1af47..HEAD -- src
+tests/integration` порожній). Окремий повтор обох тестів зелений. Усі secrets-тести
+(`test_secrets_role_dsn*.py`, `test_compose_config.py`) пройшли і в повному прогоні, і окремо
+(120 passed).

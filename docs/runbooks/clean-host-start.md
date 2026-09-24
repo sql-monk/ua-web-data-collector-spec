@@ -86,6 +86,30 @@ owner WP-00 / оператор, 2026-09-24).
 Секрети, створені до WP-00 PR4, лишаються (скрипт не перезаписує наявні файли) — повторний
 запуск `init-secrets.sh` лише додасть сім нових DSN.
 
+### Завислий lock `init-secrets.sh` (`.init-secrets.lock`)
+
+Скрипт серіалізує паралельні запуски каталогом `deploy/compose/secrets/.init-secrets.lock`, а
+PID власника записує в `.init-secrets.lock/pid`. Після звичайного завершення, помилки,
+Ctrl+C чи `kill` (SIGTERM) lock прибирається сам. Лишається він лише після `kill -9`, краху
+VM або обриву сесії посеред запуску. Тоді кожен наступний запуск через 30 с (змінна
+`INIT_SECRETS_LOCK_TIMEOUT`) завершується помилкою
+`error: інший init-secrets.sh тримає …/.init-secrets.lock понад 30 с (PID власника: N)`.
+
+Як розпізнати й прибрати:
+
+```bash
+cat deploy/compose/secrets/.init-secrets.lock/pid      # PID власника
+ps -p "$(cat deploy/compose/secrets/.init-secrets.lock/pid)" || echo "процесу немає — lock завислий"
+rm -r deploy/compose/secrets/.init-secrets.lock        # лише якщо процесу немає
+./deploy/compose/secrets/init-secrets.sh
+```
+
+Автоматично скрипт завислий lock не знімає, і це свідомо. Два запуски, що одночасно визнали
+lock мертвим, могли б зняти вже новий, живий lock. До того ж PID у Git Bash (MSYS) не
+збігається з PID Windows. Секрети при завислому lock не пошкоджуються: кожен файл пишеться
+атомарно (tmp + `mv`), напівзаписаних файлів не буває. Тимчасові `.<name>.tmp.*`, якщо
+лишилися після `kill -9`, можна видалити.
+
 ## Локальна розробка з портами на 127.0.0.1
 
 ```bash

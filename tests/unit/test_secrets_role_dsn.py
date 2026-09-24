@@ -164,11 +164,23 @@ def _bash() -> str:
     git = shutil.which("git")
     if git:
         # git.exe лежить у `<Git>\cmd`, `<Git>\bin` або `<Git>\mingw64\bin` — шукаємо вгору.
+        # Спершу справжній `usr\bin\bash.exe`: `<Git>\bin\bash.exe` — лише launcher, і kill
+        # по timeout зупиняє його, а не bash (gate 3' low #1); launcher лишається fallback-ом.
         for root in Path(git).resolve().parents:
-            for candidate in (root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"):
+            for candidate in (root / "usr" / "bin" / "bash.exe", root / "bin" / "bash.exe"):
                 if candidate.is_file():
                     return str(candidate)
     pytest.skip("Git Bash не знайдено (лише Windows; у CI на Linux тест обов'язковий)")
+
+
+def _bash_path_env(bash: str) -> dict[str, str]:
+    """Windows: `usr/bin/bash.exe` без launcher-а сам не додає утиліти MSYS/mingw у PATH."""
+    if sys.platform != "win32":
+        return {}
+    bash_dir = Path(bash).parent
+    extra = [bash_dir, bash_dir.parents[1] / "mingw64" / "bin"]
+    dirs = [str(d) for d in extra if d.is_dir()]
+    return {"PATH": os.pathsep.join([*dirs, os.environ.get("PATH", "")])}
 
 
 def _run_init_secrets(target: Path, extra_env: dict[str, str] | None = None) -> str:
@@ -185,15 +197,18 @@ def _run_init_secrets_raw(
     shutil.copy2(SECRETS_DIR / "init-secrets.sh", target / "init-secrets.sh")
     for example in SECRETS_DIR.glob("*.example"):
         shutil.copy2(example, target / example.name)
+    bash = _bash()
     env = {k: v for k, v in os.environ.items() if not k.startswith("POSTGRES_")}
+    env.update(_bash_path_env(bash))
     env.update(extra_env or {})
     proc = subprocess.run(  # noqa: S603 — фіксований argv, без shell
-        [_bash(), (target / "init-secrets.sh").as_posix()],
+        [bash, (target / "init-secrets.sh").as_posix()],
         capture_output=True,
         encoding="utf-8",  # скрипт пише UTF-8; locale-кодування Windows його зіпсувало б
         env=env,
         check=False,
-        timeout=60,
+        # Git Bash на завантаженому Windows-хості: 3–7 с на запуск і більше (gate 3' low #1).
+        timeout=180,
     )
     return proc
 
@@ -389,12 +404,21 @@ def test_init_secrets_waits_for_lock_and_gives_up_with_hint(tmp_path: Path) -> N
     for name in ("postgres_dsn", *ROLE_DSN_SECRETS):
         (tmp_path / name).unlink()
     (tmp_path / ".init-secrets.lock").mkdir()
+    (tmp_path / ".init-secrets.lock" / "pid").write_text("424242\n", encoding="ascii")
     proc = _run_init_secrets_raw(tmp_path, {"INIT_SECRETS_LOCK_TIMEOUT": "1"})
     assert proc.returncode != 0
-    assert ".init-secrets.lock" in proc.stderr and "rmdir" in proc.stderr
+    assert ".init-secrets.lock" in proc.stderr and "rm -r" in proc.stderr
+    # PID власника в підказці — щоб відрізнити живий запуск від stale lock (gate 3' low #3).
+    assert "424242" in proc.stderr
     assert not (tmp_path / "postgres_dsn").exists()
-    # Чужий lock не видаляється.
-    assert (tmp_path / ".init-secrets.lock").is_dir()
+    # Чужий lock не видаляється (автоматичного зняття stale lock немає — див. скрипт).
+    assert (tmp_path / ".init-secrets.lock" / "pid").is_file()
+
+
+def test_init_secrets_records_its_pid_in_lock_and_removes_it() -> None:
+    script = (SECRETS_DIR / "init-secrets.sh").read_text(encoding="utf-8")
+    assert 'echo "$$" > "$lock/pid"' in script
+    assert 'trap \'rm -f "$tmp" "$lock/pid"; rmdir' in script
 
 
 def test_init_secrets_refuses_new_postgres_password_when_dsn_exists(tmp_path: Path) -> None:

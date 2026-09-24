@@ -79,18 +79,25 @@ write_secret() {  # $1 — шлях, $2 — вміст (із завершаль�
 # разом, інакше два процеси згенерують різні postgres_password/postgres_dsn). `mkdir` —
 # атомарний і переносний (Git Bash, Linux, macOS), на відміну від flock(1). Чекаємо до
 # INIT_SECRETS_LOCK_TIMEOUT с (типово 30); lock, що лишився після kill -9, оператор видаляє
-# вручну (підказка в помилці).
+# вручну (підказка в помилці і runbook docs/runbooks/clean-host-start.md).
+# У lock пишеться PID власника (`$lock/pid`) — лише для діагностики. Автоматично «stale» lock
+# не знімається (gate 3' low #3): два процеси, що одночасно визнали lock мертвим, можуть
+# зняти вже новий живий lock, а перевірка PID у Git Bash (MSYS PID ≠ Windows PID) ненадійна.
 lock="$here/.init-secrets.lock"
 lock_timeout="${INIT_SECRETS_LOCK_TIMEOUT:-30}"
 waited=0
 until mkdir "$lock" 2>/dev/null; do
-  [ "$waited" -lt "$lock_timeout" ] || die "інший init-secrets.sh тримає $lock понад" \
-    "$lock_timeout с; якщо жодного" \
-    "запуску немає — видаліть каталог (rmdir) і повторіть"
+  if [ "$waited" -ge "$lock_timeout" ]; then
+    owner="$(cat "$lock/pid" 2>/dev/null || true)"
+    die "інший init-secrets.sh тримає $lock понад $lock_timeout с (PID власника:" \
+      "${owner:-невідомо}). Якщо такого процесу немає (ps -p ${owner:-PID}) — видаліть" \
+      "каталог (rm -r \"$lock\") і повторіть"
+  fi
   sleep 1
   waited=$((waited + 1))
 done
-trap 'rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true' EXIT
+trap 'rm -f "$tmp" "$lock/pid"; rmdir "$lock" 2>/dev/null || true' EXIT
+echo "$$" > "$lock/pid"
 
 # Чи є на місці секрету готовий файл (gate 2 WP-00 PR4, F-1). Compose bind-mount-ить
 # file-secret, і якщо файла немає, Docker Desktop створює на його місці ПОРОЖНІЙ КАТАЛОГ —
@@ -146,9 +153,11 @@ for example in "$here"/*.example; do
         echo "gen   postgres_password (random, для DSN)"
       fi
       password="$(tr -d '\r\n' < "$here/postgres_password")"
-      write_secret "$target" "$(printf 'postgresql://%s:%s@%s:%s/%s' \
+      # `printf -v` — без subshell (gate 3' low #2: менше fork-ів у Git Bash).
+      printf -v dsn 'postgresql://%s:%s@%s:%s/%s\n' \
         "${POSTGRES_USER:-collector}" "$password" \
-        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}")"$'\n'
+        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}"
+      write_secret "$target" "$dsn"
       echo "gen   $name (з postgres_password)" ;;
     postgres_dsn_*)
       # DSN runtime-ролі §13 (WP-01A PR2 `collector db roles --with-login`): користувач —
@@ -158,9 +167,10 @@ for example in "$here"/*.example; do
       # монтує той самий файл як COLLECTOR_POSTGRES_DSN_FILE.
       component="${name#postgres_dsn_}"
       new_hex "$name"
-      write_secret "$target" "$(printf 'postgresql://collector_%s:%s@%s:%s/%s' \
+      printf -v dsn 'postgresql://collector_%s:%s@%s:%s/%s\n' \
         "$component" "$value" \
-        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}")"$'\n'
+        "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "${POSTGRES_DB:-collector}"
+      write_secret "$target" "$dsn"
       echo "gen   $name (random, роль collector_$component)" ;;
     *)
       write_secret "$target" "$(tr -d '\r' < "$example")"$'\n'

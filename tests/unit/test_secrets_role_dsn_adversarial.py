@@ -52,8 +52,10 @@ def _git_bash_dir() -> Path | None:
     git = shutil.which("git")
     if not git:
         return None
+    # Спершу `usr\bin` (справжній bash/sh): `bin\bash.exe` — launcher, kill по timeout його
+    # зупиняє, а bash — ні (WP-00 PR4 gate 3' low #1); `bin` лишається fallback-ом.
     for root in Path(git).resolve().parents:
-        for candidate in (root / "bin", root / "usr" / "bin"):
+        for candidate in (root / "usr" / "bin", root / "bin"):
             if (candidate / "bash.exe").is_file() and (candidate / "sh.exe").is_file():
                 return candidate
     return None
@@ -82,14 +84,20 @@ def _prepare(target: Path, *, crlf_examples: bool = False) -> None:
 
 
 def _run(target: Path, *, bash_args: tuple[str, ...] = ()) -> str:
+    bash = _shell("bash")
     env = {k: v for k, v in os.environ.items() if not k.startswith("POSTGRES_")}
+    if sys.platform == "win32":
+        # `usr\bin\bash.exe` без launcher-а: утиліти MSYS/mingw у PATH додаємо самі.
+        extra = [Path(bash).parent, Path(bash).parents[2] / "mingw64" / "bin"]
+        dirs = [str(d) for d in extra if d.is_dir()]
+        env["PATH"] = os.pathsep.join([*dirs, env.get("PATH", "")])
     proc = subprocess.run(  # noqa: S603 — фіксований argv, без shell
-        [_shell("bash"), *bash_args, (target / "init-secrets.sh").as_posix()],
+        [bash, *bash_args, (target / "init-secrets.sh").as_posix()],
         capture_output=True,
         text=True,
         env=env,
         check=False,
-        timeout=60,
+        timeout=180,  # Git Bash на завантаженому Windows-хості (gate 3' low #1)
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
@@ -245,7 +253,7 @@ def _run_migrate_with_stub(tmp_path: Path, *, migrate_rc: int, roles_rc: int) ->
         text=True,
         env=env,
         check=False,
-        timeout=60,
+        timeout=180,
     )
     return proc.returncode, journal.read_text() if journal.exists() else ""
 
