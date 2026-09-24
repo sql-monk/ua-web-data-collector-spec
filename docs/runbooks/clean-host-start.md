@@ -63,6 +63,53 @@ non-root uid контейнерів (999, 10001) — 0600 від користу�
 обмежте каталог (`chmod 0700 deploy/compose/secrets` не допоможе контейнерам — потрібні
 Swarm secrets, WP-01D).
 
+Окрім паролів stateful-сервісів, скрипт створює вісім DSN: `postgres_dsn` (міграції, пароль =
+`postgres_password`) і сім `postgres_dsn_<component>` для runtime-ролей §13 — користувач
+`collector_<component>`, у кожного **власний** випадковий пароль. One-shot `migrate-postgres`
+виконує `collector db migrate && collector db roles --with-login` і робить ці ролі LOGIN-ролями.
+Перевірка після `up -d --wait`:
+
+```bash
+docker compose exec -T postgres sh -c 'PGPASSWORD="$(cat /run/secrets/postgres_password)" \
+  psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
+  "SELECT rolname FROM pg_roles WHERE rolcanlogin AND rolname <> current_user ORDER BY 1"'
+# 7 рядків: collector_api_ro … collector_translation (collector_migrate — NOLOGIN)
+```
+
+`REVOKE … FROM PUBLIC` на БД кластера (`deploy/compose/postgres/init/02-revoke-public.sql`)
+виконується **лише при першому initdb** — на порожньому томі `postgres-data`. На кластері,
+створеному до WP-00 PR4, PUBLIC і далі має CONNECT/TEMP, доки оператор один раз не виконає
+команду з `deploy/compose/postgres/init/README.md` («Кластер, створений до WP-00 PR4») або
+`docker compose down -v`. Автоматичної перевірки немає — прийнятий ризик (security-pr4 L-2,
+owner WP-00 / оператор, 2026-09-24).
+
+Секрети, створені до WP-00 PR4, лишаються (скрипт не перезаписує наявні файли) — повторний
+запуск `init-secrets.sh` лише додасть сім нових DSN.
+
+### Завислий lock `init-secrets.sh` (`.init-secrets.lock`)
+
+Скрипт серіалізує паралельні запуски каталогом `deploy/compose/secrets/.init-secrets.lock`, а
+PID власника записує в `.init-secrets.lock/pid`. Після звичайного завершення, помилки,
+Ctrl+C чи `kill` (SIGTERM) lock прибирається сам. Лишається він лише після `kill -9`, краху
+VM або обриву сесії посеред запуску. Тоді кожен наступний запуск через 30 с (змінна
+`INIT_SECRETS_LOCK_TIMEOUT`) завершується помилкою
+`error: інший init-secrets.sh тримає …/.init-secrets.lock понад 30 с (PID власника: N)`.
+
+Як розпізнати й прибрати:
+
+```bash
+cat deploy/compose/secrets/.init-secrets.lock/pid      # PID власника
+ps -p "$(cat deploy/compose/secrets/.init-secrets.lock/pid)" || echo "процесу немає — lock завислий"
+rm -r deploy/compose/secrets/.init-secrets.lock        # лише якщо процесу немає
+./deploy/compose/secrets/init-secrets.sh
+```
+
+Автоматично скрипт завислий lock не знімає, і це свідомо. Два запуски, що одночасно визнали
+lock мертвим, могли б зняти вже новий, живий lock. До того ж PID у Git Bash (MSYS) не
+збігається з PID Windows. Секрети при завислому lock не пошкоджуються: кожен файл пишеться
+атомарно (tmp + `mv`), напівзаписаних файлів не буває. Тимчасові `.<name>.tmp.*`, якщо
+лишилися після `kill -9`, можна видалити.
+
 ## Локальна розробка з портами на 127.0.0.1
 
 ```bash
@@ -109,4 +156,6 @@ docker compose down -v         # + видалення volumes (усі дані!)
 | `gui` `unhealthy`, але `curl http://localhost/` віддає сторінку | так і задумано: healthcheck `gui` — це **readiness** (nginx + `api` через proxy), тому падіння `api` робить `gui` unhealthy за ~45 с (`interval 15s × retries 3`), хоча статика далі 200. Діагностика: `curl -s http://localhost/api/v1/health/components` → `not_ready` означає проблему в `api`, не в nginx. Liveness самого nginx — окремий `curl -s http://localhost/healthz` → `ok` (не залежить від `api`). Після відновлення `api` gui стає healthy сам (перевірено — ~20 с) |
 | `up -d --wait` падає з `container collector-gui-1 is unhealthy` | той самий механізм: на деградованому стеку (`api` не healthy) команда з `--wait` впаде свідомо. Спершу полагодьте `api` (`docker compose logs api`, `docker compose exec api python -m collector.api.health`), потім повторіть `up -d --wait` — вона ідемпотентна |
 | порт 80 на хості зайнятий | `GUI_PORT=8081 docker compose up -d --wait` |
+| після `git pull` (хост до WP-00 PR4) `up` без `init-secrets.sh`: `migrate-postgres` `Exited (1)` або помилка монтування secret; у `deploy/compose/secrets/` з'явились **каталоги** `postgres_dsn_<component>/` | Compose не знайшов файл секрету, і Docker Desktop створив на його місці порожній каталог (на Linux engine `up` натомість падає з помилкою про відсутній файл). Запустіть `./deploy/compose/secrets/init-secrets.sh`: він прибирає порожні каталоги-заглушки (`fix   … прибрано`) і додає лише відсутні секрети, наявні не чіпає; потім `docker compose up -d --wait`. Якщо скрипт зупинився з `error: … каталог, а не файл секрету` — каталог не порожній: перевірте вміст, видаліть його (`rm -r`) і повторіть |
+| `migrate-postgres` `Exited (1)`, `у /run/secrets бракує DSN-секретів: …` | у контейнер не змонтовано частину `postgres_dsn_<component>` (напр. власний override без них): поверніть монтування всіх семи в `migrate-postgres` |
 | secret file `Permission denied` у контейнері | файли секретів мають бути readable для uid 10001/999 (`chmod 0644`) |

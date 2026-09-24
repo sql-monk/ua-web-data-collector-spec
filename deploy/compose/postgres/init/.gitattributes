@@ -1,0 +1,2 @@
+# gate 2 WP-00 PR4 (F-3): SQL виконує psql у Linux-контейнері — LF незалежно від core.autocrlf.
+*.sql text eol=lf

@@ -53,6 +53,20 @@ SECRET_CONSUMERS: dict[str, set[str]] = {
         "maintenance-worker",
         "browser-worker",
     },
+    # WP-00 PR4: per-component DSN §13. Поки що — лише `migrate-postgres` (`db roles
+    # --with-login` бере з них паролі ролей); runtime-сервіси монтують свій у WP-01D PR1b.
+    **{
+        f"postgres_dsn_{component}": {"migrate-postgres"}
+        for component in (
+            "scheduler",
+            "fetcher",
+            "parser",
+            "projector",
+            "translation",
+            "api_ro",
+            "export_ro",
+        )
+    },
 }
 COMPONENT_NAMES = ("postgres", "mongo", "minio")
 ONE_SHOTS = {"migrate-postgres", "ensure-mongo"}

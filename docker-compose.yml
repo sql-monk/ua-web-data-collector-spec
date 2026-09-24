@@ -337,19 +337,33 @@ services:
   # -------------------------------------------------------------------------------------------
 
   migrate-postgres:
-    # Стаб WP-00: перевіряє з'єднання, «no migrations yet; owner WP-01A». WP-01A замінює тіло
-    # `collector db migrate` на Alembic (§16.2) із migration role (§13).
+    # Alembic-міграції (§16.2, WP-01A), потім ролі §13: GRANT для нових таблиць і LOGIN
+    # runtime-ролей з паролями з їхніх DSN-секретів (WP-00 PR4, `db roles --with-login`).
+    # `sh -c` з `&&` + `exec`: exit code — першої невдалої команди; `db roles` не виконується,
+    # якщо міграції впали. Обидві команди ідемпотентні, тож повторний `up` безпечний.
     <<: *collector-runtime
     profiles: [core]
     restart: "no"
-    command: ["collector", "db", "migrate"]  # + collector db roles після merge WP-01A PR1
+    command:
+      - sh
+      - -c
+      - collector db migrate && exec collector db roles --with-login
     environment:
       <<: *collector-env
       # DSN міграційної ролі — лише цьому one-shot (§13: migration role не використовується
-      # runtime-процесами). Per-role DSN для api/workers додають WP-01A/WP-01D.
+      # runtime-процесами). Сім `postgres_dsn_<component>` він читає з каталогу
+      # /run/secrets (типовий COLLECTOR_POSTGRES_ROLE_SECRETS_DIR), лише щоб узяти з них паролі
+      # ролей; бракує хоч одного — exit 1 без змін.
       COLLECTOR_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn
     secrets:
       - postgres_dsn
+      - postgres_dsn_scheduler
+      - postgres_dsn_fetcher
+      - postgres_dsn_parser
+      - postgres_dsn_projector
+      - postgres_dsn_translation
+      - postgres_dsn_api_ro
+      - postgres_dsn_export_ro
     networks:
       - backend
     depends_on:
@@ -680,6 +694,22 @@ secrets:
   # `COLLECTOR_POSTGRES_DSN_FILE`; пароль не потрапляє в `environment`/`docker inspect`.
   postgres_dsn:
     file: ./deploy/compose/secrets/postgres_dsn
+  # Per-component LOGIN-ролі §13 (WP-01A PR2 `db roles --with-login`): кожен runtime-сервіс
+  # монтує лише свій DSN; `migrate-postgres` монтує всі, щоб виставити паролі ролям.
+  postgres_dsn_scheduler:
+    file: ./deploy/compose/secrets/postgres_dsn_scheduler
+  postgres_dsn_fetcher:
+    file: ./deploy/compose/secrets/postgres_dsn_fetcher
+  postgres_dsn_parser:
+    file: ./deploy/compose/secrets/postgres_dsn_parser
+  postgres_dsn_projector:
+    file: ./deploy/compose/secrets/postgres_dsn_projector
+  postgres_dsn_translation:
+    file: ./deploy/compose/secrets/postgres_dsn_translation
+  postgres_dsn_api_ro:
+    file: ./deploy/compose/secrets/postgres_dsn_api_ro
+  postgres_dsn_export_ro:
+    file: ./deploy/compose/secrets/postgres_dsn_export_ro
   mongo_root_password:
     file: ./deploy/compose/secrets/mongo_root_password
   mongo_keyfile:

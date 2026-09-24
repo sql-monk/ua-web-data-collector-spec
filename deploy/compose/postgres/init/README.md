@@ -11,6 +11,12 @@
   канонічного скрипта `src/collector/persistence/postgres/sql/roles.sql`: GRANT потребує
   таблиць, які з'являються після `collector db migrate`.
 
+- `02-revoke-public.sql` (WP-00 PR4, `security-pr2.md` I-2) — звужує кластерні default-права
+  `PUBLIC`: на БД застосунку (`POSTGRES_DB`) `REVOKE CONNECT, TEMPORARY … FROM PUBLIC` і явний
+  `GRANT CONNECT` восьми group-ролям §13; на службових `postgres`/`template1` —
+  `REVOKE ALL … FROM PUBLIC` (туди ходить лише superuser, який перевірку CONNECT оминає;
+  `pg_isready` не автентифікується). Жодних GRANT на таблиці, паролів чи LOGIN.
+
 Порядок у dev: `docker compose up -d postgres` → `collector db migrate` → `collector db roles`.
 
 Зміна ролей після першого старту не застосовується автоматично: або `docker compose down -v`
@@ -32,3 +38,14 @@ collector db roles --with-login --secrets-dir /run/secrets   # або $COLLECTOR
 `--with-login` уже видані логіни не вимикає. Кожен сервіс після цього монтує **свій**
 `postgres_dsn_<component>` як `COLLECTOR_POSTGRES_DSN_FILE` (генерація секретів і compose —
 dependency-запит `docs/plan/deps/WP-01A-to-WP-00.md` §4). `collector_migrate` LOGIN не отримує.
+
+## Кластер, створений до WP-00 PR4
+
+Init-скрипти не виконуються на наявному data directory, тож `02-revoke-public.sql` треба
+застосувати один раз вручну (або `docker compose down -v`, якщо дані не потрібні):
+
+```bash
+docker compose exec -T postgres sh -c 'PGPASSWORD="$(cat /run/secrets/postgres_password)" \
+  psql -h 127.0.0.1 -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < deploy/compose/postgres/init/02-revoke-public.sql
+```

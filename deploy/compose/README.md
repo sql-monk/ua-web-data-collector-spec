@@ -48,6 +48,9 @@ Parse/projector/export/maintenance/scheduler/one-shots — лише `backend`, �
 0600 → `Permission denied` на Linux. У `environment` сервісів дозволені лише
 `*_FILE`-посилання.
 
+Кластер PostgreSQL при першому старті звужує default-права `PUBLIC` (`postgres/init/02-revoke-public.sql`):
+на БД застосунку CONNECT мають лише group-ролі §13, на `postgres`/`template1` — лише superuser.
+
 | Secret | Споживач |
 |---|---|
 | `postgres_password` | `postgres` (`POSTGRES_PASSWORD_FILE`) |
@@ -55,6 +58,7 @@ Parse/projector/export/maintenance/scheduler/one-shots — лише `backend`, �
 | `mongo_keyfile` | `mongo` (`--keyFile`, копія в tmpfs 0400) |
 | `minio_root_user`, `minio_root_password` | `minio` (`MINIO_ROOT_*_FILE`) |
 | `postgres_dsn` | `migrate-postgres`, `scheduler` і `*-worker` (`COLLECTOR_POSTGRES_DSN_FILE`); будується з `postgres_password`. **Тимчасово спільний:** §13 хоче окремі per-component DSN, але LOGIN-ролей ще немає — запит у `docs/plan/deps/WP-01D-to-WP-01A.md` (WP-01D PR1) |
+| `postgres_dsn_<component>` (`scheduler`, `fetcher`, `parser`, `projector`, `translation`, `api_ro`, `export_ro`) | `migrate-postgres` (усі сім, каталог `/run/secrets` = типовий `COLLECTOR_POSTGRES_ROLE_SECRETS_DIR`): `collector db roles --with-login` бере з кожного пароль і робить `collector_<component>` LOGIN-роллю (SCRAM verifier). Користувач = роль, пароль — власний випадковий hex на кожен компонент (WP-00 PR4). Runtime-сервіси переходять на свій DSN у WP-01D PR1b |
 
 ## Override для розробки
 
