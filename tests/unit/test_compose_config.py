@@ -19,6 +19,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
+MINIO_DOCKERFILE_PATH = REPO_ROOT / "deploy" / "compose" / "minio" / "Dockerfile"
 DEV_OVERRIDE_PATH = REPO_ROOT / "deploy" / "compose" / "dev.override.yml"
 SECRETS_DIR = REPO_ROOT / "deploy" / "compose" / "secrets"
 
@@ -309,7 +310,13 @@ def test_stateful_image_pinned_by_digest_and_named_volumes(
     compose: dict[str, Any], services: dict[str, dict[str, Any]], name: str
 ) -> None:
     svc = services[name]
-    assert PINNED_IMAGE.match(svc["image"]), svc["image"]
+    if name == "minio":
+        # Quay manifests were removed in 2026; MinIO is built from a pinned source release
+        # and pinned builder/runtime bases instead of pulling an unavailable vendor digest.
+        assert svc["pull_policy"] == "build"
+        assert svc["build"]["args"]["MINIO_VERSION"] == "RELEASE.2025-09-07T16-13-09Z"
+    else:
+        assert PINNED_IMAGE.match(svc["image"]), svc["image"]
     volumes = svc["volumes"]
     assert volumes, f"{name}: stateful без named volume"
     named = [v for v in volumes if not str(v).startswith(".")]
@@ -330,7 +337,29 @@ def test_stateful_versions_match_spec_8(services: dict[str, dict[str, Any]]) -> 
     assert services["mongo"]["image"].startswith("mongo:8.0@")
     assert "--replSet" in "".join(services["mongo"]["entrypoint"])
     assert "--keyFile" in "".join(services["mongo"]["entrypoint"])
-    assert "minio" in services["minio"]["image"]
+    minio = services["minio"]
+    assert (
+        minio["image"] == "${COLLECTOR_MINIO_IMAGE:-collector-minio:RELEASE.2025-09-07T16-13-09Z}"
+    )
+    assert minio["pull_policy"] == "build"
+    assert minio["build"]["context"] == "./deploy/compose/minio"
+    assert minio["build"]["args"]["MINIO_VERSION"] == "RELEASE.2025-09-07T16-13-09Z"
+
+
+def test_minio_source_build_is_reproducibly_pinned() -> None:
+    text = MINIO_DOCKERFILE_PATH.read_text(encoding="utf-8")
+    assert re.search(
+        r"^ARG GO_IMAGE=golang:1\.24\.8-alpine3\.22@sha256:[0-9a-f]{64}$", text, re.MULTILINE
+    )
+    assert re.search(r"^ARG RUNTIME_IMAGE=alpine:3\.22\.1@sha256:[0-9a-f]{64}$", text, re.MULTILINE)
+    assert text.count("ARG MINIO_VERSION=RELEASE.2025-09-07T16-13-09Z") == 2
+    assert "ARG MINIO_COMMIT=07c3a429bfed433e49018cb0f78a52145d4bedeb" in text
+    assert '"github.com/minio/minio@${MINIO_VERSION}"' in text
+    assert "cmd.ReleaseTag=${MINIO_VERSION}" in text
+    assert "CGO_ENABLED=0" in text
+    assert "go install -tags kqueue -trimpath" in text
+    assert "COPY --from=builder /out/LICENSE /out/CREDITS /licenses/" in text
+    assert "ca-certificates.crt" in text
 
 
 def test_named_volumes_only_for_stateful(compose: dict[str, Any]) -> None:

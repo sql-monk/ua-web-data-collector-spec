@@ -298,3 +298,18 @@ toml, large files, merge conflict, private key, ruff check, ruff format, gitleak
 
 Після виправлень: 392 unit/security tests і 9 PostgreSQL integration tests passed; mypy strict,
 ruff/format і всі pre-commit hooks зелені. Попередні gate-2 тести не змінювались.
+
+## CI recovery before merge
+
+Перший GitHub CI і повторний запуск єдиного failed job двічі завершилися до старту стека:
+`quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493...` повернув
+`unauthorized`; локальний `docker manifest inspect` підтвердив, що tag і digest більше не
+існують. Це дрейф зовнішнього registry в успадкованому `main`, не помилка fetch-коду.
+
+Щоб clean-host acceptance знову був відтворюваним, `deploy/compose/minio/Dockerfile` збирає
+exact upstream release з Go module `v0.0.0-20250907161309-07c3a429bfed`; повний commit,
+release ldflags та Go/Alpine multi-arch digests pinned. Compose має `pull_policy: build`, тому
+не звертається до видаленого MinIO image. Локально підтверджено: image build успішний,
+`minio --version` показує release і commit, isolated `docker compose up -d --wait minio` дає
+healthy, після тесту тимчасовий container/volume видалено. Контракт захищений unit-тестом
+`test_minio_source_build_is_reproducibly_pinned`.
