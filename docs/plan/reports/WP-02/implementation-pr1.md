@@ -238,3 +238,51 @@ markdownlint-cli2........................................................Passed
 Немає. Чужі owned files не редагувались; єдиний файл поза `src/collector/fetch/**`,
 `tests/**/fetch/**`, `pyproject.toml`/`uv.lock` і звітом — `tests/unit/test_foundation_config.py`
 у межах винятку оркестратора (рядок `FORBIDDEN_FOUNDATION_DEPS` і гілка `if forbidden != "httpx"`).
+
+## Fixes after gate 2
+
+Вхід: `docs/plan/reports/WP-02/testing-pr1.md` (коміти тестувальника `d4c7e74`, `c1441a6` — не
+змінювались). Розмір PR прийнято оркестратором. Коміт `8ae0c99 fix(wp-02): close gate-2
+findings F-1..F-3`; 5 навмисно червоних тестів тестувальника зелені без змін тестів.
+
+| Знахідка | Виправлення | Тест (тестувальника) |
+|---|---|---|
+| F-1 high — sitemap `.xml.gz` розпізнавався лише за першим мережевим чанком; перший байт `\x1f` окремим сегментом вимикав ліміт 100 МБ після розпакування і ratio-guard | `decoding.py::read_body`: для `request_kind=sitemap` рішення «entity — gzip-файл» приймається за **накопиченим префіксом** entity (≥ 2 байти після `Content-Encoding`), незалежно від меж чанків; до рішення bytes буферизуються (≤ 1 байт), entity коротший за magic — не gzip. Коли дані стиснені (будь-який `Content-Encoding` або gzip-файл sitemap), ліміт і ratio-guard рахують **розпаковані** байти; для нестиснених — отримані. Deflate/brotli як «файли» sitemap не визначені (sitemaps.org — лише gzip); як `Content-Encoding` вони декодуються з тим самим лічильником | `test_adversarial_limits.py::test_sitemap_gzip_bomb_with_split_magic_bytes_is_still_counted`, `::test_sitemap_split_magic_legit_gz_is_stored_compressed` |
+| F-2 medium — `Retry-After: ²` → `ValueError` з `fetch()`, 429 без `block_origin` | `classify.py::parse_retry_after`: секунди лише з ASCII-цифр (`isascii() and isdigit()`), інакше HTTP-date, інакше default 10 хв; `block_origin` ставиться завжди для 429. Те саме для `Content-Length` у `client.py::_complete` | `test_adversarial_retry_logs.py::test_non_ascii_digit_retry_after_does_not_crash_fetch[²]`, `[¹²³]` |
+| F-3 low — `Location`, який відкидає парсер httpx (`http://0177.0.0.01/`), давав retryable `network_error` | `client.py::_detach_location` — response event hook клієнта забирає `Location` redirect-відповіді в `response.extensions` до того, як httpx будує `next_request`; далі hop іде через наш guard/SSRF і класифікується як `policy_blocked` (`ssrf_forbidden_address`) | `test_adversarial_ssrf.py::test_forbidden_literal_forms_on_redirect_hop_never_connect[http://0177.0.0.01/-ssrf_forbidden_address]` |
+
+**zlib CVE (ADR-0002, борг #6 HANDOFF; тригер перегляду — цей PR).** Розпакування недовірених
+body обмежене на кожному кроці: `src/collector/fetch/decoding.py:67`
+(`ZlibDecoder.feed` → `zlib.decompressobj().decompress(data, CHUNK_LIMIT)`, `max_length` =
+64 КБ, решта входу — `unconsumed_tail`; gzip, multi-member gzip, zlib, raw deflate і внутрішній
+gzip sitemap), `:87` і `:91` (`brotli.Decompressor.process(..., output_buffer_limit=CHUNK_LIMIT)`).
+Після кожного шматка — ліміт розпакованих байтів (20 МБ / 100 МБ sitemap) і ratio-guard
+(> 200 після 1 МБ). httpx-декодери (`zlib` без `max_length`) не використовуються: body читається
+`aiter_raw()`. Це обмежує обсяг виходу й пам'ять, але не усуває вразливість самої бібліотеки zlib
+на зловмисному потоці — рішення щодо risk acceptance/блоку лишається за security-reviewer (WP-13).
+
+Команди (HEAD `8ae0c99`):
+
+`uv run ruff check . && uv run ruff format --check . && uv run mypy src`:
+
+```text
+All checks passed!
+299 files already formatted
+Success: no issues found in 87 source files
+```
+
+`uv run pytest tests/unit/fetch` (разом із тестами тестувальника):
+
+```text
+387 passed in 13.37s
+```
+
+`COLLECTOR_TEST_REQUIRE_DOCKER=1 uv run pytest -m integration tests/integration/fetch -rs`:
+
+```text
+.........                                                                [100%]
+9 passed in 111.38s (0:01:51)
+```
+
+`uv run pre-commit run --all-files`: усі hooks `Passed` (end-of-file, trailing whitespace, yaml,
+toml, large files, merge conflict, private key, ruff check, ruff format, gitleaks, markdownlint).

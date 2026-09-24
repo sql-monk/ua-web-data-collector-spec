@@ -196,3 +196,24 @@ Linux-контейнер: власний прогін **не виконано** 
 **fail** — F-1 (high: обхід ліміту розпакування sitemap, §13 / PR1 п.6) і F-2 (medium: hostile
 `Retry-After` ламає fetch і обходить `block_origin`). Після виправлення F-1/F-2 (і бажано F-3)
 червоні тести з `d4c7e74` мають стати зеленими без змін.
+
+## Повторна перевірка після виправлень
+
+Перевірений коміт `8ae0c99`; тести тестувальника не змінювалися. F-1, F-2 і F-3 відтворено
+зеленими разом з усім fetch-набором:
+
+```text
+$ uv run ruff check src/collector/fetch tests/unit/fetch
+All checks passed!
+$ uv run ruff format --check src/collector/fetch tests/unit/fetch
+24 files already formatted
+$ uv run mypy src/collector/fetch
+Success: no issues found in 10 source files
+$ uv run pytest -q -rs tests/unit/fetch
+387 passed in 11.73s
+$ COLLECTOR_TEST_REQUIRE_DOCKER=1 uv run pytest -m integration -q -rs tests/integration/fetch
+9 passed in 31.11s
+```
+
+Результат повторного gate 2: **pass**. F-1—F-3 закриті без послаблення або видалення
+adversarial-тестів. F-4—F-6 лишаються інформаційними й не блокують PR1.
