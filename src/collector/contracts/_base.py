@@ -9,9 +9,10 @@ minor-версії того самого major валідується новою
 
 from __future__ import annotations
 
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar, Final
 
 from pydantic import (
+    AfterValidator,
     AllowInfNan,
     BaseModel,
     BeforeValidator,
@@ -56,6 +57,48 @@ type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 
 JsonObject = dict[str, JsonValue]
 """Bounded strict-JSON об'єкт (`core`, `attributes`, `latest_state`, event payload)."""
+
+MAX_JSON_DEPTH: Final = 8
+"""Максимальна вкладеність `BoundedJsonObject` (корінь — рівень 1)."""
+MAX_JSON_ARRAY_ITEMS: Final = 256
+"""Максимум елементів одного масиву в `BoundedJsonObject` (§9.2: без unbounded arrays)."""
+MAX_JSON_OBJECT_KEYS: Final = 512
+"""Максимум ключів одного об'єкта в `BoundedJsonObject`."""
+
+
+def _check_bounded(value: JsonValue, depth: int, path: str) -> None:
+    if depth > MAX_JSON_DEPTH:
+        msg = f"{path}: вкладеність > {MAX_JSON_DEPTH} (§9.2 bounded snapshot)"
+        raise ValueError(msg)
+    if isinstance(value, dict):
+        if len(value) > MAX_JSON_OBJECT_KEYS:
+            msg = f"{path}: {len(value)} ключів > {MAX_JSON_OBJECT_KEYS} (§9.2 bounded snapshot)"
+            raise ValueError(msg)
+        for key, item in value.items():
+            _check_bounded(item, depth + 1, f"{path}.{key}")
+    elif isinstance(value, list):
+        if len(value) > MAX_JSON_ARRAY_ITEMS:
+            msg = (
+                f"{path}: масив {len(value)} елементів > {MAX_JSON_ARRAY_ITEMS}; unbounded "
+                "списки (offers, observations, reviews) — окремі collections (§9.2)"
+            )
+            raise ValueError(msg)
+        for index, item in enumerate(value):
+            _check_bounded(item, depth + 1, f"{path}[{index}]")
+
+
+def require_bounded_json(value: JsonObject) -> JsonObject:
+    """Validator `BoundedJsonObject`: межі глибини, масивів і ключів (§9.2)."""
+    _check_bounded(value, 1, "$")
+    return value
+
+
+BoundedJsonObject = Annotated[JsonObject, AfterValidator(require_bounded_json)]
+"""`JsonObject` з межами `MAX_JSON_DEPTH`/`MAX_JSON_ARRAY_ITEMS`/`MAX_JSON_OBJECT_KEYS` (§9.2).
+
+Застосовується до нових контрактів PR2 (normalized payload, version snapshot, observations);
+межі не змінюють JSON Schema (перевірка — лише в моделі).
+"""
 
 
 def parse_schema_version(value: str) -> tuple[int, int]:

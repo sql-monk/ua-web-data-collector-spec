@@ -1,0 +1,266 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Посилання на immutable content-addressed artifact.\n\n`schema_version` тут — версія схеми *вмісту* (наприклад, normalized payload), а не\nверсія цього контракту (`ArtifactRef.contract_version`).",
+      "properties": {
+        "media_type": {
+          "minLength": 3,
+          "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Версія схеми вмісту artifact (для normalized/event payload).",
+          "title": "Schema Version"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "media_type",
+        "sha256",
+        "size_bytes",
+        "uri"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "Грошове значення без float: `amount_minor` у мінімальних одиницях + `currency` (§5.1).",
+      "properties": {
+        "amount_minor": {
+          "description": "Сума в мінімальних одиницях валюти (копійки, центи); лише int (§5.1).",
+          "title": "Amount Minor",
+          "type": "integer"
+        },
+        "currency": {
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount_minor",
+        "currency"
+      ],
+      "title": "Money",
+      "type": "object"
+    },
+    "TranslationQualityFlag": {
+      "description": "Прапорці якості перекладу (§5.4, §12.1); розширюється minor-версією через WP-01C.",
+      "enum": [
+        "preservation_failed",
+        "low_language_confidence",
+        "provider_truncated",
+        "language_unsupported"
+      ],
+      "title": "TranslationQualityFlag",
+      "type": "string"
+    },
+    "TranslationStatus": {
+      "description": "Статус версії перекладу новини (§5.4); єдиний enum статусу перекладу в проєкті (§5.5).\n\nЗакритий: рівно чотири значення; нове значення — major (споживачі читають як закритий).",
+      "enum": [
+        "pending",
+        "translated",
+        "not_required",
+        "translation_failed"
+      ],
+      "title": "TranslationStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/common/news_translation.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable версія перекладу статті (§5.4, `news_translations`).\n\nЗміна оригіналу → нова версія перекладу (інший `source_content_hash`/`article_version_id`);\nстарий переклад не перезаписується. `translation_idempotency_key` має дорівнювати\n`translation_idempotency_key(article_version_id, target_language, provider, model_version,\nglossary_version)` (§9.3 п.7). Body — inline `body_text` **або** `body_artifact`, або\nжодного (nullable, R-20).\n\nІнваріанти статусу: `translated` вимагає `title`; `pending`/`not_required` не несуть\nперекладеного тексту (для `not_required` read API віддає оригінал без повторного\nзберігання, §5.4).",
+  "properties": {
+    "article_id": {
+      "format": "uuid",
+      "title": "Article Id",
+      "type": "string"
+    },
+    "article_version_id": {
+      "format": "uuid",
+      "title": "Article Version Id",
+      "type": "string"
+    },
+    "body_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "body_text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Body Text"
+    },
+    "character_count": {
+      "default": 0,
+      "description": "Символи, надіслані провайдеру.",
+      "minimum": 0,
+      "title": "Character Count",
+      "type": "integer"
+    },
+    "cost": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Money"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Вартість (`amount_minor` ≥ 0)."
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "glossary_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Glossary Version",
+      "type": "string"
+    },
+    "lead": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Lead"
+    },
+    "model_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Model Version",
+      "type": "string"
+    },
+    "provider": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Provider",
+      "type": "string"
+    },
+    "quality_flags": {
+      "items": {
+        "$ref": "#/$defs/TranslationQualityFlag"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_content_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Content Hash",
+      "type": "string"
+    },
+    "source_language": {
+      "anyOf": [
+        {
+          "maxLength": 35,
+          "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Мова оригіналу статті (article-level), якщо відома.",
+      "title": "Source Language"
+    },
+    "status": {
+      "$ref": "#/$defs/TranslationStatus"
+    },
+    "target_language": {
+      "description": "Цільова мова; у v1 — `uk` (§5.4).",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "title": "Target Language",
+      "type": "string"
+    },
+    "title": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Title"
+    },
+    "translation_idempotency_key": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Translation Idempotency Key",
+      "type": "string"
+    }
+  },
+  "required": [
+    "article_id",
+    "article_version_id",
+    "created_at",
+    "glossary_version",
+    "model_version",
+    "provider",
+    "source_content_hash",
+    "status",
+    "target_language",
+    "translation_idempotency_key"
+  ],
+  "title": "NewsTranslation",
+  "type": "object",
+  "x-contract-version": "1.0"
+}
