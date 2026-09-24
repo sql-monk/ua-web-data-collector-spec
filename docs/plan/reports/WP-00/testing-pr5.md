@@ -37,3 +37,8 @@
 
 Перший повний локальний прогін показав один невідтворений збій близько 15% і був перерваний
 до summary. Повторний прогін з `-x` пройшов повністю; остаточним Linux-підтвердженням є PR CI.
+
+## PR CI
+
+PR #14: **6/6 green** — python, web, PostgreSQL integration, Docker clean-host
+build/SBOM/trivy/up/e2e, pre-commit і gitleaks. Docker job завершився за 5:11.

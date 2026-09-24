@@ -14,10 +14,10 @@
 | Secret values відсутні в env/inspect/logs | met |
 | Clean-host compose config і runtime | met |
 | `api_ro` insert denial | deferred за дозволом картки: потребує WP-01B `--users` |
-| Linux CI | pending до PR |
+| Linux CI | met — PR #14, 6/6 green, включно з Docker clean-host job |
 
 Forbidden areas `src/**`, migrations, root Dockerfile і CI workflow не змінювались.
 
 ## Вердикт
 
-**accept**, за умови зеленого PR CI. Невиконаних блокуючих вимог немає.
+**accept**. Невиконаних блокуючих вимог немає.
