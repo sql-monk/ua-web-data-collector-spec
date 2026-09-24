@@ -263,7 +263,7 @@ def db_ensure_mongo(
     (Docker secret), `COLLECTOR_MONGO_DATABASE` (domain-БД, типово `collector`). Member host у
     конфігурації RS = `COLLECTOR_MONGO_HOST:PORT`. `--users` читає секрети **до** з'єднання:
     відсутній або чужий URI-секрет дає exit 1 без жодних змін. Drift міграцій, невалідні
-    документи при `warn → error` і конфлікт indexes — exit 1 (повідомлення без секретів).
+    документи при `warn -> error` і конфлікт indexes — exit 1 (повідомлення без секретів).
     """
     from pymongo import MongoClient
     from pymongo.errors import PyMongoError
