@@ -1,0 +1,175 @@
+{
+  "$defs": {
+    "ContactKind": {
+      "description": "Тип контактного значення (§5.1 `contacts`).",
+      "enum": [
+        "phone",
+        "email",
+        "url",
+        "messenger",
+        "other"
+      ],
+      "title": "ContactKind",
+      "type": "string"
+    },
+    "ContactValue": {
+      "additionalProperties": false,
+      "description": "Контактне значення: тип, вихідний рядок і нормалізована форма (§9.3 п.8).",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ContactKind"
+        },
+        "normalized": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Normalized"
+        },
+        "raw": {
+          "minLength": 1,
+          "title": "Raw",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "raw"
+      ],
+      "title": "ContactValue",
+      "type": "object"
+    },
+    "Lineage": {
+      "additionalProperties": false,
+      "description": "Блок `lineage` (§9.2): fetch → raw → parser → projection task.",
+      "properties": {
+        "fetch_id": {
+          "format": "uuid",
+          "title": "Fetch Id",
+          "type": "string"
+        },
+        "parser_version": {
+          "minLength": 1,
+          "title": "Parser Version",
+          "type": "string"
+        },
+        "projection_task_id": {
+          "format": "uuid",
+          "title": "Projection Task Id",
+          "type": "string"
+        },
+        "raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fetch_id",
+        "parser_version",
+        "projection_task_id",
+        "raw_sha256"
+      ],
+      "title": "Lineage",
+      "type": "object"
+    },
+    "SourceIdentity": {
+      "additionalProperties": false,
+      "description": "Первинний природний ключ `(source_id, source_item_id)` (§9.3 п.1).",
+      "properties": {
+        "source_id": {
+          "description": "ID джерела з docs/research/source-registry.yaml.",
+          "maxLength": 64,
+          "pattern": "^(news|vehicle|catalog)_[a-z]{2}_[a-z0-9]+(_[a-z0-9]+)*$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_item_id": {
+          "description": "Стабільний ID сутності на джерелі.",
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Source Item Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_item_id"
+      ],
+      "title": "SourceIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/mongo/seller_contact_observation.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`contact_observations` (§9.2): typed contact values (+ raw) продавця на момент observation.\n\nПублічні контакти живуть лише в domain collections (§18); у логах/fixtures — ні.",
+  "properties": {
+    "_id": {
+      "description": "ID observation (UUID, генерує projector).",
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "contacts": {
+      "items": {
+        "$ref": "#/$defs/ContactValue"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Contacts",
+      "type": "array"
+    },
+    "lineage": {
+      "$ref": "#/$defs/Lineage"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "projection_task_id": {
+      "format": "uuid",
+      "title": "Projection Task Id",
+      "type": "string"
+    },
+    "projection_version": {
+      "minimum": 1,
+      "title": "Projection Version",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "seller_id": {
+      "description": "Seller entity UUID (назва поля — index §9.2).",
+      "format": "uuid",
+      "title": "Seller Id",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceIdentity"
+    }
+  },
+  "required": [
+    "_id",
+    "contacts",
+    "lineage",
+    "observed_at",
+    "projection_task_id",
+    "projection_version",
+    "seller_id",
+    "source"
+  ],
+  "title": "SellerContactObservation",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

@@ -1,0 +1,329 @@
+{
+  "$defs": {
+    "DataDomain": {
+      "description": "Домен даних; збігається з `kind` у `docs/research/source-registry.yaml`.",
+      "enum": [
+        "news",
+        "vehicle",
+        "catalog"
+      ],
+      "title": "DataDomain",
+      "type": "string"
+    },
+    "EntityKind": {
+      "description": "`entity_kind` current document (§9.2); розширюється WP-07/WP-09 через dependency-запит.",
+      "enum": [
+        "catalog_item",
+        "catalog_offer",
+        "vehicle_listing",
+        "seller"
+      ],
+      "title": "EntityKind",
+      "type": "string"
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Lineage": {
+      "additionalProperties": false,
+      "description": "Блок `lineage` (§9.2): fetch → raw → parser → projection task.",
+      "properties": {
+        "fetch_id": {
+          "format": "uuid",
+          "title": "Fetch Id",
+          "type": "string"
+        },
+        "parser_version": {
+          "minLength": 1,
+          "title": "Parser Version",
+          "type": "string"
+        },
+        "projection_task_id": {
+          "format": "uuid",
+          "title": "Projection Task Id",
+          "type": "string"
+        },
+        "raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fetch_id",
+        "parser_version",
+        "projection_task_id",
+        "raw_sha256"
+      ],
+      "title": "Lineage",
+      "type": "object"
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "Грошове значення без float: `amount_minor` у мінімальних одиницях + `currency` (§5.1).",
+      "properties": {
+        "amount_minor": {
+          "description": "Сума в мінімальних одиницях валюти (копійки, центи); лише int (§5.1).",
+          "title": "Amount Minor",
+          "type": "integer"
+        },
+        "currency": {
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount_minor",
+        "currency"
+      ],
+      "title": "Money",
+      "type": "object"
+    },
+    "NormalizedArtifactRef": {
+      "additionalProperties": false,
+      "description": "Normalized projection artifact (§9.1 `normalized_artifacts`) з lineage до raw/fetch.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/DataDomain"
+        },
+        "entity_uuid": {
+          "format": "uuid",
+          "title": "Entity Uuid",
+          "type": "string"
+        },
+        "fetch_id": {
+          "format": "uuid",
+          "title": "Fetch Id",
+          "type": "string"
+        },
+        "media_type": {
+          "minLength": 3,
+          "pattern": "^[\\w.+-]+/[\\w.+-]+(;.*)?$",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "parser_version": {
+          "minLength": 1,
+          "title": "Parser Version",
+          "type": "string"
+        },
+        "produced_at": {
+          "format": "date-time",
+          "title": "Produced At",
+          "type": "string"
+        },
+        "raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Sha256",
+          "type": "string"
+        },
+        "raw_uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Raw Uri",
+          "type": "string"
+        },
+        "schema_version": {
+          "description": "Версія схеми normalized payload.",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uri": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9+.-]*://.+",
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domain",
+        "entity_uuid",
+        "fetch_id",
+        "media_type",
+        "parser_version",
+        "produced_at",
+        "raw_sha256",
+        "raw_uri",
+        "schema_version",
+        "sha256",
+        "size_bytes",
+        "uri"
+      ],
+      "title": "NormalizedArtifactRef",
+      "type": "object"
+    },
+    "ObservationReason": {
+      "description": "Причина business observation (§9.2): зміна state hash або heartbeat.",
+      "enum": [
+        "changed",
+        "heartbeat"
+      ],
+      "title": "ObservationReason",
+      "type": "string"
+    },
+    "ObservedValues": {
+      "additionalProperties": false,
+      "description": "Спостережені значення offer/listing snapshot (§5.2, §5.3): ціна, наявність, решта bounded.\n\n`observed_at` не дублюється: час спостереження — `SystemTime.observed_at` payload-а\n(одне джерело правди). Доменні поля (old price, mileage, promoted, view counters) до\nтипізації WP-07/WP-09 лежать у `values`.",
+      "properties": {
+        "availability": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Наявність/stock text як нормалізовано адаптером.",
+          "title": "Availability"
+        },
+        "price": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Money"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "values": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "description": "Інші observed значення (bounded, §9.2).",
+          "title": "Values",
+          "type": "object"
+        }
+      },
+      "title": "ObservedValues",
+      "type": "object"
+    }
+  },
+  "$id": "https://ua-collector.local/schemas/mongo/observation_record.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Offer/listing observation (§9.2, §9.3 п.5): `changed` або `heartbeat`.\n\nСтворюється лише для `applied_to_current` task, коли змінився state hash (`changed`) або\nсплив heartbeat interval (`heartbeat`); unique `projection_task_id` робить replay\nідемпотентним.",
+  "properties": {
+    "_id": {
+      "description": "ID observation (UUID, генерує projector).",
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NormalizedArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "entity_kind": {
+      "$ref": "#/$defs/EntityKind"
+    },
+    "entity_uuid": {
+      "description": "Parent offer/listing entity UUID.",
+      "format": "uuid",
+      "title": "Entity Uuid",
+      "type": "string"
+    },
+    "lineage": {
+      "$ref": "#/$defs/Lineage"
+    },
+    "observed": {
+      "$ref": "#/$defs/ObservedValues"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "projection_task_id": {
+      "format": "uuid",
+      "title": "Projection Task Id",
+      "type": "string"
+    },
+    "projection_version": {
+      "minimum": 1,
+      "title": "Projection Version",
+      "type": "integer"
+    },
+    "reason": {
+      "$ref": "#/$defs/ObservationReason"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state_hash": {
+      "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+      "title": "State Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "_id",
+    "entity_kind",
+    "entity_uuid",
+    "lineage",
+    "observed",
+    "observed_at",
+    "projection_task_id",
+    "projection_version",
+    "reason",
+    "state_hash"
+  ],
+  "title": "ObservationRecord",
+  "type": "object",
+  "x-contract-version": "1.0"
+}

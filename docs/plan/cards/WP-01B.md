@@ -155,6 +155,8 @@ Integration з порожньої БД: `ensure-mongo --validators --indexes` д
 
 ## PR2 — `wp/01b-2-projector`: projector core і receipts (§7.3 крок 3)
 
+> **Зауваження після WP-01C PR2 (PR #9, SR-3 spec-review, 2026-09-24):** `state_changed` у version record і в receipt для задачі, не застосованої до current (порядок 3-1-2), означає різне — **не копіювати** значення з receipt у version record, інакше validator відхилить запис і транзакція обірветься. Див. `docs/contracts.md` (розділ про `state_changed`). `AppliedProjectionReceipt` без `_id` у контракті: `_id = projection_task_id` пишеться репозиторієм WP-01B PR1 і відкидається при читанні.
+
 Бібліотечний рівень без реєстрації в runtime (runtime-інтеграція — PR3): `apply_projection(command, payload) -> AppliedProjectionReceipt` у `src/collector/persistence/mongo/` (точна назва модуля — за implementer).
 
 ### Вимоги

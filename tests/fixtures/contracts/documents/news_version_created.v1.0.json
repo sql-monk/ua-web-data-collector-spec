@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "event_id": "33333333-3333-4333-8333-333333333333",
+  "event_type": "news.version_created",
+  "article_id": "55555555-5555-4555-8555-555555555551",
+  "article_version_id": "55555555-5555-4555-8555-555555555552",
+  "version_number": 2,
+  "source": {
+    "source_id": "news_de_tagesschau",
+    "source_item_id": "artikel-123"
+  },
+  "original_language": "de",
+  "source_locale_raw": "de-DE",
+  "content_access": "full",
+  "content_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "title_artifact": {
+    "uri": "s3://artifacts/news/11/1111111111111111111111111111111111111111111111111111111111111111",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "size_bytes": 512,
+    "media_type": "text/plain",
+    "schema_version": null
+  },
+  "lead_artifact": {
+    "uri": "s3://artifacts/news/22/2222222222222222222222222222222222222222222222222222222222222222",
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "size_bytes": 512,
+    "media_type": "text/plain",
+    "schema_version": null
+  },
+  "cleaned_body_artifact": {
+    "uri": "s3://artifacts/news/33/3333333333333333333333333333333333333333333333333333333333333333",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "size_bytes": 512,
+    "media_type": "text/html",
+    "schema_version": null
+  },
+  "backfill": false,
+  "occurred_at": "2026-09-01T12:00:00Z"
+}
