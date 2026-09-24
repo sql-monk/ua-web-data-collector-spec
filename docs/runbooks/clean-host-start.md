@@ -38,8 +38,8 @@ docker compose ps
 ```
 
 Очікуваний результат `docker compose ps`: `postgres`, `mongo`, `minio`, `api`,
-`scheduler`, `gui` і всі `*-worker` — `Up (healthy)`; `migrate-postgres` та `ensure-mongo` —
-`Exited (0)`. `gui` — єдиний контейнер з published port (`0.0.0.0:80->8080/tcp`):
+`scheduler`, `gui` і всі `*-worker` — `Up (healthy)`; `migrate-postgres`, `ensure-mongo` та
+`ensure-minio` — `Exited (0)`. `gui` — єдиний контейнер з published port (`0.0.0.0:80->8080/tcp`):
 
 ```bash
 curl -sI http://localhost/                          # сторінка + CSP/security headers
@@ -85,6 +85,28 @@ owner WP-00 / оператор, 2026-09-24).
 
 Секрети, створені до WP-00 PR4, лишаються (скрипт не перезаписує наявні файли) — повторний
 запуск `init-secrets.sh` лише додасть сім нових DSN.
+
+### MinIO, MongoDB і провайдер перекладу: облікові дані компонентів (WP-00 PR5)
+
+Той самий `init-secrets.sh` генерує ще шість `minio_<component>` (`access_key=collector-<component>`
++ випадковий 40-hex `secret_key`), чотири `mongo_uri_<component>` (власний пароль кожному) і
+створює **порожній** `google_translation_credentials` (credential провайдера перекладу вписує
+оператор; порожній = переклад вимкнено). На хості до PR5 повторний запуск лише додасть ці файли.
+Формати, мапа споживачів і ротація — `deploy/compose/README.md`, розділ «Секрети».
+
+One-shot `ensure-minio` створює buckets і користувачів MinIO з policies. Перевірка після
+`up -d --wait` (з контейнера `ensure-minio`-образу, секрети лише з файлів, у argv — нічого):
+
+```bash
+docker compose run --rm --no-deps --entrypoint bash ensure-minio -c '
+  export MC_HOST_c="http://$(cat /run/secrets/minio_root_user):$(cat /run/secrets/minio_root_password)@minio:9000"
+  mc ls c; mc admin user list c'
+# buckets archive/ events/ normalized/ raw/ translated/; шість enabled collector-<component>
+```
+
+`ensure-mongo` поки лише ініціалізує replica set: `--validators --indexes --users` вмикає
+`COLLECTOR_ENSURE_MONGO_SCHEMA=1` після merge WP-01B PR1 (до того прапорців у CLI немає, і
+one-shot завершився б помилкою).
 
 ### Завислий lock `init-secrets.sh` (`.init-secrets.lock`)
 
@@ -158,4 +180,8 @@ docker compose down -v         # + видалення volumes (усі дані!)
 | порт 80 на хості зайнятий | `GUI_PORT=8081 docker compose up -d --wait` |
 | після `git pull` (хост до WP-00 PR4) `up` без `init-secrets.sh`: `migrate-postgres` `Exited (1)` або помилка монтування secret; у `deploy/compose/secrets/` з'явились **каталоги** `postgres_dsn_<component>/` | Compose не знайшов файл секрету, і Docker Desktop створив на його місці порожній каталог (на Linux engine `up` натомість падає з помилкою про відсутній файл). Запустіть `./deploy/compose/secrets/init-secrets.sh`: він прибирає порожні каталоги-заглушки (`fix   … прибрано`) і додає лише відсутні секрети, наявні не чіпає; потім `docker compose up -d --wait`. Якщо скрипт зупинився з `error: … каталог, а не файл секрету` — каталог не порожній: перевірте вміст, видаліть його (`rm -r`) і повторіть |
 | `migrate-postgres` `Exited (1)`, `у /run/secrets бракує DSN-секретів: …` | у контейнер не змонтовано частину `postgres_dsn_<component>` (напр. власний override без них): поверніть монтування всіх семи в `migrate-postgres` |
+| `ensure-minio` `Exited (1)`, `…/minio_<component>: access_key має бути …` або `secret_key має бути 40 hex-символів` | файл секрету змінено вручну або він з іншого формату; видаліть його, запустіть `init-secrets.sh`, потім `docker compose up -d ensure-minio` і перестворіть сервіси, що його монтують |
+| `ensure-minio` `Exited (1)`, `collector-<component>: очікувалась лише policy …` | користувачу вручну прикріплено ще одну policy; `mc admin policy detach <alias> <policy> --user collector-<component>` і повторіть `up` |
+| `ensure-mongo` `Exited (2)`, `COLLECTOR_ENSURE_MONGO_SCHEMA має бути 0 або 1` | задайте `0` або `1` (або приберіть змінну — типово `0`) |
+| `ensure-mongo` `Exited (2)` після `COLLECTOR_ENSURE_MONGO_SCHEMA=1` | CLI ще без `--users` (WP-01B PR1 не злитий) — поверніть `0` |
 | secret file `Permission denied` у контейнері | файли секретів мають бути readable для uid 10001/999 (`chmod 0644`) |

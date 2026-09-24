@@ -9,7 +9,7 @@ Base-файл — `docker-compose.yml` у корені репозиторію (C
 
 | Profile | Сервіси | Стан |
 |---|---|---|
-| `core` | `postgres`, `mongo`, `minio`, one-shot `migrate-postgres`, `ensure-mongo`, `api`, `scheduler` | PR2 |
+| `core` | `postgres`, `mongo`, `minio`, one-shot `migrate-postgres`, `ensure-mongo`, `ensure-minio`, `api`, `scheduler` | PR2; `ensure-minio` — PR5 |
 | `workers` | `discovery-`, `fetch-`, `parse-`, `projector-`, `translation-`, `export-`, `maintenance-worker` | PR2 (placeholder-процеси до WP-01D) |
 | `browser` | `browser-worker`, 0 replicas | PR2 placeholder на image `collector`; окремий image — WP-02 PR3 |
 | `gui` | `gui` (React SPA + nginx reverse proxy `/api`) | PR3 — єдиний публічний порт стека |
@@ -43,6 +43,7 @@ Parse/projector/export/maintenance/scheduler/one-shots — лише `backend`, �
 `./deploy/compose/secrets/init-secrets.sh` створює відсутні файли: паролі генерує
 випадково (`openssl rand -hex 24`, fallback `python3 secrets`/`/dev/urandom`), `mongo_keyfile`
 — `openssl rand -base64 756`; з прикладу копіюється лише не-секретне `minio_root_user`.
+Невідомий `*.example` — зупинка до будь-якого запису (placeholder ніколи не стає секретом).
 Файли отримують 0644 свідомо: Compose bind-mount-ить їх у `/run/secrets/<name>` з правами
 хоста, а читають non-root uid контейнерів (10001 — collector, 999 — postgres/mongo);
 0600 → `Permission denied` на Linux. У `environment` сервісів дозволені лише
@@ -54,11 +55,97 @@ Parse/projector/export/maintenance/scheduler/one-shots — лише `backend`, �
 | Secret | Споживач |
 |---|---|
 | `postgres_password` | `postgres` (`POSTGRES_PASSWORD_FILE`) |
-| `mongo_root_password` | `mongo` (`MONGO_INITDB_ROOT_PASSWORD_FILE`), `ensure-mongo` |
+| `mongo_root_password` | `mongo` (`MONGO_INITDB_ROOT_PASSWORD_FILE`), `ensure-mongo` — більше ніхто |
 | `mongo_keyfile` | `mongo` (`--keyFile`, копія в tmpfs 0400) |
-| `minio_root_user`, `minio_root_password` | `minio` (`MINIO_ROOT_*_FILE`) |
-| `postgres_dsn` | `migrate-postgres`, `scheduler` і `*-worker` (`COLLECTOR_POSTGRES_DSN_FILE`); будується з `postgres_password`. **Тимчасово спільний:** §13 хоче окремі per-component DSN, але LOGIN-ролей ще немає — запит у `docs/plan/deps/WP-01D-to-WP-01A.md` (WP-01D PR1) |
-| `postgres_dsn_<component>` (`scheduler`, `fetcher`, `parser`, `projector`, `translation`, `api_ro`, `export_ro`) | `migrate-postgres` (усі сім, каталог `/run/secrets` = типовий `COLLECTOR_POSTGRES_ROLE_SECRETS_DIR`): `collector db roles --with-login` бере з кожного пароль і робить `collector_<component>` LOGIN-роллю (SCRAM verifier). Користувач = роль, пароль — власний випадковий hex на кожен компонент (WP-00 PR4). Runtime-сервіси переходять на свій DSN у WP-01D PR1b |
+| `minio_root_user`, `minio_root_password` | `minio` (`MINIO_ROOT_*_FILE`), `ensure-minio` — більше ніхто |
+| `postgres_dsn` | лише `migrate-postgres` (`COLLECTOR_POSTGRES_DSN_FILE`); будується з `postgres_password`. §13: migration role не використовується runtime-процесами |
+| `postgres_dsn_<component>` (`scheduler`, `fetcher`, `parser`, `projector`, `translation`, `api_ro`, `export_ro`) | `migrate-postgres` (усі сім, каталог `/run/secrets` = типовий `COLLECTOR_POSTGRES_ROLE_SECRETS_DIR`): `collector db roles --with-login` бере з кожного пароль і робить `collector_<component>` LOGIN-роллю (SCRAM verifier). Користувач = роль, пароль — власний випадковий hex на кожен компонент (WP-00 PR4). Кожен runtime-сервіс монтує лише свій (WP-01D PR1b): discovery/fetch/browser → `fetcher`, parse → `parser`, projector → `projector`, translation → `translation`, scheduler/maintenance/export → `scheduler` |
+| `minio_fetcher` | `ensure-minio`, `discovery-`, `fetch-`, `browser-worker` (`COLLECTOR_MINIO_CREDENTIALS_FILE`) |
+| `minio_parser` | `ensure-minio`, `parse-worker` |
+| `minio_projector` | `ensure-minio`, `projector-worker` |
+| `minio_translation` | `ensure-minio`, `translation-worker` |
+| `minio_maintenance` | `ensure-minio`, `maintenance-worker` |
+| `minio_readonly` | `ensure-minio`, `api`, `export-worker` |
+| `mongo_uri_projector` | `ensure-mongo`, `projector-worker` (`COLLECTOR_MONGO_URI_FILE`) |
+| `mongo_uri_compactor` | `ensure-mongo`, `projector-worker` (`COLLECTOR_MONGO_COMPACTOR_URI_FILE`: compactor WP-01B PR4 працює в тому ж процесі під окремим користувачем) |
+| `mongo_uri_api_ro` | `ensure-mongo`, `api` (`COLLECTOR_MONGO_URI_FILE`) |
+| `mongo_uri_export_ro` | `ensure-mongo`, `export-worker` (`COLLECTOR_MONGO_URI_FILE`) |
+| `google_translation_credentials` | лише `translation-worker` (`COLLECTOR_TRANSLATION_CREDENTIALS_FILE`) |
+
+`scheduler`, `discovery-`, `fetch-`, `browser-`, `parse-worker` Mongo-облікових даних не мають
+(§13); `scheduler` не має і MinIO. Мапу перевіряють `tests/unit/test_compose_config_adversarial.py`
+(`SECRET_CONSUMERS`, `RUNTIME_SECRET_FILES`) і `tests/unit/test_secrets_object_store.py`.
+
+### MinIO: buckets, користувачі, policies (WP-00 PR5)
+
+One-shot `ensure-minio` (profile `core`, `depends_on: minio: service_healthy`) виконує
+`minio/ensure-minio.sh` у тому самому pinned image, що й сервер (там є vendor `mc`), від uid
+10001 з read-only rootfs. Ідемпотентно створює buckets `raw`, `normalized`, `archive`,
+`translated`, `events` і для кожного компонента — policy `collector-<component>`
+(`minio/policies/<component>.json`) та користувача з тим самим іменем. Після attach
+перевіряється, що в користувача рівно одна policy; зайву (додану вручну) треба відкріпити
+(`mc admin policy detach`), інакше one-shot завершується 1.
+
+| Компонент | Дозволи (S3 actions) |
+|---|---|
+| `fetcher` | `raw`: `PutObject`, `GetObject` (Get = Head); **без** Delete |
+| `parser` | `raw`: `GetObject`; `normalized`: `PutObject`, `GetObject` |
+| `projector` | `normalized`: `GetObject`; `events`: `PutObject`, `GetObject`; `archive`: `PutObject`, `GetObject`, `DeleteObject` |
+| `translation` | `normalized`: `GetObject`; `translated`: `PutObject`, `GetObject` |
+| `maintenance` | `raw`, `normalized`, `events`, `translated`: `ListBucket`, `GetObject`, `DeleteObject` |
+| `readonly` | усі п'ять buckets: `GetObject` |
+
+S3 не має окремої дії для HEAD: `HeadObject` авторизується як `s3:GetObject`. MinIO відповідає
+404 на HEAD відсутнього ключа і без `ListBucket` (перевірено), тому `ListBucket` є лише в
+maintenance (sweeper).
+
+**Формат секрету `minio_<component>`** — один файл, два рядки `ключ=значення`, LF:
+
+```text
+access_key=collector-<component>
+secret_key=<40 hex-символів>
+```
+
+Access key — ім'я компонента (його видно в журналі MinIO: хто записав чи видалив об'єкт);
+secret key — випадковий, 40 символів (історичний ліміт MinIO на довжину secret key). Сервіс
+читає файл за `COLLECTOR_MINIO_CREDENTIALS_FILE` (парсер — WP-02 `collector.storage`).
+`ensure-minio` приймає лише `access_key=collector-<component>` і 40 hex; інший вміст —
+exit 1 з іменем файла, без значень. Секрети не потрапляють в argv (`docker top`): root іде
+в `mc` через змінну `MC_HOST_collector` усередині процесу, secret key користувача — через stdin.
+
+**Ротація:** видалити `secrets/minio_<component>`, запустити `init-secrets.sh`, потім
+`docker compose up -d ensure-minio` (оновить secret key користувача) і перестворити сервіси,
+що монтують секрет (`docker compose up -d --force-recreate <service>`).
+
+### MongoDB: користувачі компонентів (WP-00 PR5)
+
+`mongo_uri_<component>` — URI з власним паролем:
+`mongodb://collector_<component>:<48 hex>@mongo:27017/collector?replicaSet=rs0&authSource=admin`
+(хост/порт/БД — `MONGO_HOST`, `MONGO_PORT`, `MONGO_DB` при запуску `init-secrets.sh`).
+Користувачів створює `collector db ensure-mongo --users` (WP-01B PR1) з паролів у цих файлах
+(каталог `/run/secrets`). До merge WP-01B PR1 CLI `--users` не має, тому compose запускає
+розширену команду лише за перемикачем:
+
+| `COLLECTOR_ENSURE_MONGO_SCHEMA` | Команда `ensure-mongo` |
+|---|---|
+| `0` (типово зараз) | `collector db ensure-mongo` — лише replica set |
+| `1` | `collector db ensure-mongo --validators --indexes --users` |
+| інше | exit 2 без запуску |
+
+Вартовий `test_ensure_mongo_schema_switch_default_follows_cli_capability` падає, щойно CLI
+отримає `--users`, а типове значення лишиться `0`: хто зливається другим (WP-00 PR5 чи
+WP-01B PR1), той змінює default на `1`.
+
+### Секрет провайдера перекладу (WP-04)
+
+`google_translation_credentials` — зовнішній credential оператора (service-account JSON
+Google Cloud Translation). `init-secrets.sh` його **не генерує**: якщо файла немає, створює
+порожній (інакше `docker compose up` падає на відсутньому file-secret), а наявний — не чіпає
+ніколи. Порожній файл = провайдер не налаштований; `translation-worker` за замовчуванням має
+`COLLECTOR_TRANSLATION_PROVIDER=disabled` (jobs чекають у `pending`). Увімкнення: записати JSON
+у `deploy/compose/secrets/google_translation_credentials` (поза git), задати
+`COLLECTOR_TRANSLATION_PROVIDER`, `COLLECTOR_TRANSLATION_PROJECT`,
+`COLLECTOR_TRANSLATION_LOCATION` (типово `global`) і перестворити `translation-worker`.
 
 ## Override для розробки
 
@@ -87,6 +174,10 @@ Base-файл портів не публікує; на shared/production host ov
 | `COLLECTOR_LOG_LEVEL` | `INFO` | рівень structlog у контейнерах |
 | `POSTGRES_DB`, `POSTGRES_USER` | `collector` | ім'я БД/ролі; пароль — лише secret |
 | `MONGO_ROOT_USERNAME` | `collector_root` | root user Mongo; пароль — лише secret |
+| `COLLECTOR_ENSURE_MONGO_SCHEMA` | `0` | `1` → `ensure-mongo --validators --indexes --users` (після WP-01B PR1) |
+| `COLLECTOR_TRANSLATION_PROVIDER` | `disabled` | провайдер перекладу `translation-worker` (WP-04) |
+| `COLLECTOR_TRANSLATION_PROJECT`, `COLLECTOR_TRANSLATION_LOCATION` | порожньо / `global` | Google Cloud Translation v3 (WP-04) |
+| `MONGO_HOST`, `MONGO_PORT`, `MONGO_DB` | `mongo`/`27017`/`collector` | лише для `init-secrets.sh`: хост/порт/БД у `mongo_uri_*` |
 | `DEV_*_PORT` | 5432/27017/9000/9001/8000 | порти override |
 
 ## `gui/nginx.conf` — конфіг operator GUI (WP-00 PR3)
