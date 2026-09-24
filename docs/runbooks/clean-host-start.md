@@ -105,9 +105,8 @@ docker compose run --rm --no-deps --entrypoint /bin/sh ensure-minio -c '
 # buckets archive/ events/ normalized/ raw/ translated/; шість enabled collector-<component>
 ```
 
-`ensure-mongo` поки лише ініціалізує replica set: `--validators --indexes --users` вмикає
-`COLLECTOR_ENSURE_MONGO_SCHEMA=1` після merge WP-01B PR1 (до того прапорців у CLI немає, і
-one-shot завершився б помилкою).
+`ensure-mongo` типово виконує `--validators --indexes --users` (`COLLECTOR_ENSURE_MONGO_SCHEMA=1`)
+після WP-01B PR1. Значення `0` лишає тільки ініціалізацію replica set для аварійної діагностики.
 
 ### Завислий lock `init-secrets.sh` (`.init-secrets.lock`)
 
@@ -183,6 +182,5 @@ docker compose down -v         # + видалення volumes (усі дані!)
 | `migrate-postgres` `Exited (1)`, `у /run/secrets бракує DSN-секретів: …` | у контейнер не змонтовано частину `postgres_dsn_<component>` (напр. власний override без них): поверніть монтування всіх семи в `migrate-postgres` |
 | `ensure-minio` `Exited (1)`, `…/minio_<component>: access_key має бути …` або `secret_key має бути 40 hex-символів` | файл секрету змінено вручну або він з іншого формату; видаліть його, запустіть `init-secrets.sh`, потім `docker compose up -d ensure-minio` і перестворіть сервіси, що його монтують |
 | `ensure-minio` `Exited (1)`, `collector-<component>: очікувалась лише policy …` | користувачу вручну прикріплено ще одну policy; `mc admin policy detach <alias> <policy> --user collector-<component>` і повторіть `up` |
-| `ensure-mongo` `Exited (2)`, `COLLECTOR_ENSURE_MONGO_SCHEMA має бути 0 або 1` | задайте `0` або `1` (або приберіть змінну — типово `0`) |
-| `ensure-mongo` `Exited (2)` після `COLLECTOR_ENSURE_MONGO_SCHEMA=1` | CLI ще без `--users` (WP-01B PR1 не злитий) — поверніть `0` |
+| `ensure-mongo` `Exited (2)`, `COLLECTOR_ENSURE_MONGO_SCHEMA має бути 0 або 1` | задайте `0` або `1` (або приберіть змінну — типово `1`) |
 | secret file `Permission denied` у контейнері | файли секретів мають бути readable для uid 10001/999 (`chmod 0644`) |

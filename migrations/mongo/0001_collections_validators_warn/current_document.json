@@ -1,0 +1,292 @@
+{
+  "$jsonSchema": {
+    "title": "current_document_base@1.0",
+    "properties": {
+      "_id": {
+        "bsonType": "binData"
+      },
+      "attributes": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "bsonType": "string"
+            },
+            {
+              "bsonType": [
+                "int",
+                "long"
+              ]
+            },
+            {
+              "bsonType": [
+                "int",
+                "long",
+                "double",
+                "decimal"
+              ]
+            },
+            {
+              "bsonType": "bool"
+            },
+            {
+              "items": {},
+              "bsonType": "array"
+            },
+            {
+              "additionalProperties": {},
+              "bsonType": "object"
+            },
+            {
+              "bsonType": "null"
+            }
+          ]
+        },
+        "bsonType": "object"
+      },
+      "core": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "bsonType": "string"
+            },
+            {
+              "bsonType": [
+                "int",
+                "long"
+              ]
+            },
+            {
+              "bsonType": [
+                "int",
+                "long",
+                "double",
+                "decimal"
+              ]
+            },
+            {
+              "bsonType": "bool"
+            },
+            {
+              "items": {},
+              "bsonType": "array"
+            },
+            {
+              "additionalProperties": {},
+              "bsonType": "object"
+            },
+            {
+              "bsonType": "null"
+            }
+          ]
+        },
+        "bsonType": "object"
+      },
+      "entity_kind": {
+        "enum": [
+          "catalog_item",
+          "catalog_offer",
+          "vehicle_listing",
+          "seller"
+        ],
+        "bsonType": "string"
+      },
+      "first_seen_at": {
+        "bsonType": "date"
+      },
+      "identity_hash": {
+        "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+        "bsonType": "string"
+      },
+      "last_seen_at": {
+        "bsonType": "date"
+      },
+      "latest_state": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "bsonType": "string"
+            },
+            {
+              "bsonType": [
+                "int",
+                "long"
+              ]
+            },
+            {
+              "bsonType": [
+                "int",
+                "long",
+                "double",
+                "decimal"
+              ]
+            },
+            {
+              "bsonType": "bool"
+            },
+            {
+              "items": {},
+              "bsonType": "array"
+            },
+            {
+              "additionalProperties": {},
+              "bsonType": "object"
+            },
+            {
+              "bsonType": "null"
+            }
+          ]
+        },
+        "bsonType": "object"
+      },
+      "lineage": {
+        "additionalProperties": false,
+        "properties": {
+          "fetch_id": {
+            "bsonType": "binData"
+          },
+          "parser_version": {
+            "minLength": 1,
+            "bsonType": "string"
+          },
+          "projection_task_id": {
+            "bsonType": "binData"
+          },
+          "raw_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "bsonType": "string"
+          }
+        },
+        "required": [
+          "fetch_id",
+          "parser_version",
+          "projection_task_id",
+          "raw_sha256"
+        ],
+        "bsonType": "object"
+      },
+      "projection_version": {
+        "minimum": 1,
+        "bsonType": [
+          "int",
+          "long"
+        ]
+      },
+      "schema_version": {
+        "minimum": 1,
+        "bsonType": [
+          "int",
+          "long"
+        ]
+      },
+      "source": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_url": {
+            "minLength": 1,
+            "bsonType": "string"
+          },
+          "source_id": {
+            "maxLength": 64,
+            "pattern": "^(news|vehicle|catalog)_[a-z]{2}_[a-z0-9]+(_[a-z0-9]+)*$",
+            "bsonType": "string"
+          },
+          "source_item_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "bsonType": "string"
+          }
+        },
+        "required": [
+          "canonical_url",
+          "source_id",
+          "source_item_id"
+        ],
+        "bsonType": "object"
+      },
+      "state_hash": {
+        "pattern": "^v[1-9][0-9]*:[0-9a-f]{64}$",
+        "bsonType": "string"
+      },
+      "time": {
+        "additionalProperties": false,
+        "properties": {
+          "fetched_at": {
+            "bsonType": "date"
+          },
+          "ingested_at": {
+            "bsonType": "date"
+          },
+          "observed_at": {
+            "bsonType": "date"
+          },
+          "source_event_at": {
+            "anyOf": [
+              {
+                "bsonType": "date"
+              },
+              {
+                "bsonType": "null"
+              }
+            ]
+          },
+          "source_time_inferred": {
+            "bsonType": "bool"
+          },
+          "source_time_precision": {
+            "enum": [
+              "second",
+              "minute",
+              "hour",
+              "day",
+              "month",
+              "year",
+              "unknown"
+            ],
+            "bsonType": "string"
+          },
+          "source_timezone_raw": {
+            "anyOf": [
+              {
+                "bsonType": "string"
+              },
+              {
+                "bsonType": "null"
+              }
+            ]
+          },
+          "source_updated_at": {
+            "anyOf": [
+              {
+                "bsonType": "date"
+              },
+              {
+                "bsonType": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "fetched_at",
+          "ingested_at",
+          "observed_at"
+        ],
+        "bsonType": "object"
+      }
+    },
+    "required": [
+      "_id",
+      "core",
+      "entity_kind",
+      "first_seen_at",
+      "identity_hash",
+      "last_seen_at",
+      "lineage",
+      "projection_version",
+      "schema_version",
+      "source",
+      "state_hash",
+      "time"
+    ],
+    "bsonType": "object"
+  }
+}

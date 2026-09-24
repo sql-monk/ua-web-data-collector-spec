@@ -3,7 +3,7 @@
 - `db migrate` (після WP-01A PR1 — реальний Alembic): без DSN → 1 з назвою env; недоступний
   сервер → 1 без stdout (помилка драйвера підставляється, socket не створюється);
 - `db ensure-mongo`: ідемпотентна ініціалізація single-member replica set (фейковий клієнт);
-  `--validators/--indexes` після ініціалізації — стаб WP-01B (код 2);
+  `--validators/--indexes` після ініціалізації — міграції/indexes WP-01B PR1 (підмінені);
 - `worker <role>`/`scheduler`: після WP-01D PR1 це справжній runtime, а placeholder-процес
   лишається rollback-шляхом за `COLLECTOR_WORKER_PLACEHOLDER=1` (живий до stop/SIGTERM, код 0,
   стаб-рядок у stderr); поведінку runtime перевіряє tests/unit/workers і
@@ -225,14 +225,33 @@ def test_db_ensure_mongo_initiates_and_exits_0(fake_mongo_client: type[FakeClien
     assert "not implemented" not in result.output
 
 
-def test_db_ensure_mongo_validators_indexes_are_stub_after_init(
-    fake_mongo_client: type[FakeClient],
+def test_db_ensure_mongo_validators_indexes_run_after_init(
+    fake_mongo_client: type[FakeClient], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """WP-01B PR1 замінив стаб на міграції/indexes (docs/plan/deps/WP-01B-to-WP-00.md, п.1).
+
+    Інваріант лишився: схема застосовується лише після ініціалізації RS, стаб-рядка немає.
+    Реальний шлях покрито tests/integration/mongo/test_cli_ensure_mongo.py.
+    """
+    from collector.persistence.mongo import admin
+
+    calls: list[dict[str, Any]] = []
+
+    def _apply(client: Any, database: str, **kwargs: Any) -> admin.SchemaResult:
+        assert "replSetInitiate" in client.admin.commands
+        calls.append({"database": database, **kwargs})
+        return admin.SchemaResult()
+
+    monkeypatch.setattr(admin, "apply_mongo_schema", _apply)
+    monkeypatch.delenv("COLLECTOR_MONGO_DATABASE", raising=False)
     result = runner.invoke(app, ["db", "ensure-mongo", "--validators", "--indexes"])
-    assert result.exit_code == 2
-    assert result.stderr.strip().endswith("not implemented: owned by WP-01B")
+    assert result.exit_code == 0, result.output
+    assert "not implemented" not in result.output
+    assert calls == [
+        {"database": "collector", "validators": True, "indexes": True, "credentials": None}
+    ]
     client = fake_mongo_client.last
-    assert client is not None and "replSetInitiate" in client.admin.commands
+    assert client is not None and client.closed
 
 
 def test_db_ensure_mongo_exits_1_on_driver_error(

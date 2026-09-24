@@ -15,8 +15,10 @@
 - `db roles [--sql PATH] [--with-login [--secrets-dir DIR]]` — реальна (WP-01A): ролі БД §13 і
   GRANT, ідемпотентно; `--with-login` (PR2) вмикає LOGIN runtime-ролей з паролями з
   DSN-секретів `postgres_dsn_<component>`;
-- `db ensure-mongo` — реально ініціалізує single-member replica set (ідемпотентно; WP-00 PR2);
-  `--validators`/`--indexes` лишаються стабом WP-01B (після ініціалізації RS → код 2);
+- `db ensure-mongo [--validators] [--indexes] [--users [--secrets-dir DIR]]` — реальна:
+  ініціалізує single-member replica set (ідемпотентно; WP-00 PR2), далі (WP-01B PR1)
+  forward-only Mongo-міграції (collections + `$jsonSchema` validators), indexes маніфесту §9.2 і
+  Mongo-користувачі компонентів §13 з URI-секретів `mongo_uri_<component>`;
 - `api` — запускає uvicorn зі стабом `GET /api/v1/health/components`
   (`collector.api.health`; owner WP-11A);
 - `worker <role>` — реальна (WP-01D PR1): реєстрація instance, claim із черги §7.2,
@@ -52,6 +54,7 @@ if TYPE_CHECKING:
 
     from pymongo import MongoClient
 
+    from collector.persistence.mongo.users import MongoUserCredential
     from collector.persistence.postgres.config import PostgresSettings
     from collector.workers.config import SchedulerRuntimeConfig, WorkerRuntimeConfig
 
@@ -222,23 +225,64 @@ def version() -> None:
 @db_app.command("ensure-mongo")
 def db_ensure_mongo(
     validators: Annotated[
-        bool, typer.Option("--validators", help="Застосувати $jsonSchema validators.")
+        bool,
+        typer.Option(
+            "--validators", help="Застосувати Mongo-міграції: collections і $jsonSchema validators."
+        ),
     ] = False,
     indexes: Annotated[
-        bool, typer.Option("--indexes", help="Створити/перевірити indexes.")
+        bool,
+        typer.Option(
+            "--indexes", help="Створити відсутні indexes маніфесту §9.2, звітувати зайві."
+        ),
     ] = False,
+    users: Annotated[
+        bool,
+        typer.Option(
+            "--users",
+            help=(
+                "Створити custom roles і користувачів компонентів §13; пароль кожного — з "
+                "URI-секрету mongo_uri_<component> у --secrets-dir."
+            ),
+        ),
+    ] = False,
+    secrets_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--secrets-dir",
+            help=(
+                "Каталог URI-секретів (типово $COLLECTOR_MONGO_USER_SECRETS_DIR або /run/secrets)."
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """Ініціалізує MongoDB replica set (реально); validators та індекси — стаб WP-01B.
+    """Ініціалізує MongoDB replica set; далі — validators, indexes і користувачі (WP-01B).
 
     Env: `COLLECTOR_MONGO_HOST`/`COLLECTOR_MONGO_PORT`, `COLLECTOR_MONGO_REPLICA_SET`
     (типово `rs0`), `COLLECTOR_MONGO_ROOT_USERNAME`, `COLLECTOR_MONGO_ROOT_PASSWORD[_FILE]`
-    (Docker secret). Member host у конфігурації RS = `COLLECTOR_MONGO_HOST:PORT`.
+    (Docker secret), `COLLECTOR_MONGO_DATABASE` (domain-БД, типово `collector`). Member host у
+    конфігурації RS = `COLLECTOR_MONGO_HOST:PORT`. `--users` читає секрети **до** з'єднання:
+    відсутній або чужий URI-секрет дає exit 1 без жодних змін. Drift міграцій, невалідні
+    документи при `warn -> error` і конфлікт indexes — exit 1 (повідомлення без секретів).
     """
     from pymongo import MongoClient
     from pymongo.errors import PyMongoError
 
+    from collector.persistence.mongo.users import (
+        MongoUserError,
+        load_user_credentials,
+        user_secrets_dir,
+    )
+
     configure_logging(os.environ.get("COLLECTOR_LOG_LEVEL", "INFO"))
     log = get_logger("collector.db.ensure_mongo")
+    try:
+        credentials = (
+            load_user_credentials(secrets_dir or user_secrets_dir(os.environ)) if users else None
+        )
+    except MongoUserError as exc:
+        typer.echo(f"mongo users: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     host, port = mongo_address()
     replica_set = os.environ.get("COLLECTOR_MONGO_REPLICA_SET", "rs0")
     username = env_or_file("COLLECTOR_MONGO_ROOT_USERNAME")
@@ -253,25 +297,85 @@ def db_ensure_mongo(
         serverSelectionTimeoutMS=10_000,
         connectTimeoutMS=MONGO_CLIENT_TIMEOUT_MS,
         socketTimeoutMS=MONGO_CLIENT_TIMEOUT_MS,
+        uuidRepresentation="standard",
+        tz_aware=True,
     )
     try:
-        initiated = ensure_mongo_replica_set(
-            client, replica_set=replica_set, member_host=f"{host}:{port}"
+        try:
+            initiated = ensure_mongo_replica_set(
+                client, replica_set=replica_set, member_host=f"{host}:{port}"
+            )
+        except (PyMongoError, ValueError, TimeoutError) as exc:
+            log.error("ensure_mongo.failed", error=f"{type(exc).__name__}: {exc}"[:300])
+            raise typer.Exit(code=1) from exc
+        log.info(
+            "ensure_mongo.replica_set_ready",
+            replica_set=replica_set,
+            member=f"{host}:{port}",
+            initiated_now=initiated,
         )
-    except (PyMongoError, ValueError, TimeoutError) as exc:
-        log.error("ensure_mongo.failed", error=f"{type(exc).__name__}: {exc}"[:300])
-        raise typer.Exit(code=1) from exc
+        if validators or indexes or users:
+            _ensure_mongo_schema(
+                client, validators=validators, indexes=indexes, credentials=credentials
+            )
     finally:
         client.close()
-    log.info(
-        "ensure_mongo.replica_set_ready",
-        replica_set=replica_set,
-        member=f"{host}:{port}",
-        initiated_now=initiated,
+
+
+def _ensure_mongo_schema(
+    client: MongoClient[dict[str, object]],
+    *,
+    validators: bool,
+    indexes: bool,
+    credentials: list[MongoUserCredential] | None,
+) -> None:
+    """Validators/indexes/users після RS; будь-яка помилка → exit 1 без секретів у stderr."""
+    from pymongo.errors import PyMongoError
+
+    from collector.persistence.mongo.admin import IndexConflictError, apply_mongo_schema
+    from collector.persistence.mongo.client import DEFAULT_DATABASE, MONGO_DATABASE_ENV
+    from collector.persistence.mongo.migrations import (
+        InvalidDocumentsError,
+        MigrationDriftError,
+        MigrationsNotFoundError,
     )
-    if validators or indexes:
-        # $jsonSchema validators та індекси (§8, §9.2) — owner WP-01B.
-        not_implemented("WP-01B")
+    from collector.persistence.mongo.users import MongoUserError
+
+    database = os.environ.get(MONGO_DATABASE_ENV, "").strip() or DEFAULT_DATABASE
+    try:
+        result = apply_mongo_schema(
+            client,
+            database,
+            validators=validators,
+            indexes=indexes,
+            credentials=credentials,
+        )
+    except (
+        MigrationDriftError,
+        InvalidDocumentsError,
+        MigrationsNotFoundError,
+        IndexConflictError,
+        MongoUserError,
+    ) as exc:
+        typer.echo(f"ensure-mongo: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except PyMongoError as exc:
+        typer.echo(f"ensure-mongo: {type(exc).__name__}: {exc}"[:300], err=True)
+        raise typer.Exit(code=1) from exc
+    if validators:
+        applied = ", ".join(result.migrations_applied) or "none (up to date)"
+        typer.echo(f"mongo migrations applied to {database}: {applied}")
+    if result.indexes is not None:
+        typer.echo(
+            f"mongo indexes: created={len(result.indexes.created)} "
+            f"present={len(result.indexes.present)}"
+        )
+        for name in result.indexes.created:
+            typer.echo(f"index created: {name}")
+        for name in result.indexes.extra:
+            typer.echo(f"index not in manifest (review $indexStats): {name}", err=True)
+    if result.users:
+        typer.echo(f"mongo users applied: {', '.join(result.users)}")
 
 
 @db_app.command("migrate")

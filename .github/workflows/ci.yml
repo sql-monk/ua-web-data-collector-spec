@@ -131,6 +131,76 @@ jobs:
       - name: pytest -m integration tests/integration/scaling
         run: uv run pytest -m integration tests/integration/scaling
 
+  integration-mongo:
+    name: integration (MongoDB 8.0 replica set)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # WP-01B: mongod — `docker run` у кроці (service container не приймає аргументи mongod), той
+    # самий digest, що в compose; `enableTestCommands=1` — ЛИШЕ тут (failpoints PR2). Root-пароль і
+    # keyfile генеруються в job (жодних секретів у файлі); тести ходять на 127.0.0.1 з
+    # directConnection=true, RS member host — 127.0.0.1:27017 всередині контейнера.
+    # COLLECTOR_TEST_REQUIRE_DOCKER=1: недоступний Mongo або будь-який skip → fail, не skip
+    # (tests/integration/mongo/conftest.py; вартовий tests/unit/persistence/mongo/
+    # test_ci_integration_guard.py).
+    env:
+      COLLECTOR_TEST_MONGO_URI: mongodb://127.0.0.1:27017/?directConnection=true
+      COLLECTOR_TEST_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python from .python-version
+        run: uv python install
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: MongoDB 8.0 replica set (pinned digest, keyFile, enableTestCommands лише в тестах)
+        # Root-пароль — лише у файлі $RUNNER_TEMP (MONGO_INITDB_ROOT_PASSWORD_FILE у контейнері,
+        # COLLECTOR_TEST_MONGO_ROOT_PASSWORD_FILE для тестів) і замаскований у логах.
+        run: |
+          set -eu
+          user=collector_ci_root
+          pw_file="$RUNNER_TEMP/mongo_root_pw"
+          openssl rand -hex 24 > "$pw_file"
+          chmod 0644 "$pw_file"
+          echo "::add-mask::$(cat "$pw_file")"
+          {
+            echo "COLLECTOR_TEST_MONGO_ROOT_USERNAME=$user"
+            echo "COLLECTOR_TEST_MONGO_ROOT_PASSWORD_FILE=$pw_file"
+          } >> "$GITHUB_ENV"
+          docker run -d --name mongo -p 127.0.0.1:27017:27017 \
+            --tmpfs /data/db:rw,mode=1777 --tmpfs /data/configdb:rw,mode=1777 \
+            -v "$pw_file:/run/mongo_root_pw:ro" \
+            -e MONGO_INITDB_ROOT_USERNAME="$user" \
+            -e MONGO_INITDB_ROOT_PASSWORD_FILE=/run/mongo_root_pw \
+            -e COLLECTOR_TEST_KEYFILE="$(openssl rand -hex 64)" \
+            --entrypoint bash \
+            mongo:8.0@sha256:4968f22d0c6c10ef29952f3e807f62872ba22b3312f25803564fbfc08255efc2 \
+            -ec 'printf %s "$COLLECTOR_TEST_KEYFILE" > /tmp/keyfile && chmod 400 /tmp/keyfile && chown mongodb:mongodb /tmp/keyfile && exec docker-entrypoint.sh mongod --replSet rs0 --keyFile /tmp/keyfile --bind_ip_all --setParameter enableTestCommands=1'
+          for _ in $(seq 1 60); do
+            if docker exec mongo mongosh --quiet --norc -u "$user" -p "$(cat "$pw_file")" \
+              --authenticationDatabase admin --eval 'db.hello().isreplicaset ? quit(0) : quit(1)' \
+              > /dev/null 2>&1; then
+              echo "mongod ready"; exit 0
+            fi
+            sleep 2
+          done
+          docker logs mongo | tail -50
+          exit 1
+
+      - name: pytest -m integration tests/integration/mongo
+        run: uv run pytest -m integration tests/integration/mongo -rs
+
+      - name: mongod logs (лише при падінні)
+        if: failure()
+        run: docker logs mongo 2>&1 | tail -200
+
   pre-commit:
     name: pre-commit (ruff, markdownlint, hygiene)
     runs-on: ubuntu-latest
