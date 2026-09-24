@@ -362,6 +362,7 @@ class FetchHandler(TaskHandler):
         now = self._context.clock()
         async with self._context.sessions() as session:
             snapshot = await latest_robots_snapshot(session, task.source_id, requested_url)  # type: ignore[arg-type]
+        previous_snapshot = snapshot
         if snapshot is None or not snapshot.fresh(now, self._robots_ttl):
             target = robots_url(requested_url)
             fetched = await self._fetcher.fetch(
@@ -395,7 +396,11 @@ class FetchHandler(TaskHandler):
                     request_variant="robots",
                     apply_route_effects=False,
                 )
-                if fetched.decision.outcome is FetchOutcome.RETRYABLE and snapshot is None:
+                if (
+                    fetched.status != 404
+                    and fetched.decision.outcome is not FetchOutcome.SUCCESS
+                    and previous_snapshot is None
+                ):
                     return self._task_result(fetched, now)
             async with self._context.sessions() as session:
                 snapshot = await latest_robots_snapshot(session, task.source_id, requested_url)  # type: ignore[arg-type]

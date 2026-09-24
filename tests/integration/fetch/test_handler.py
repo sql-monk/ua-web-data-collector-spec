@@ -216,6 +216,39 @@ async def test_respect_policy_snapshots_robots_then_blocks_page_without_request(
         assert await session.scalar(select(func.count()).select_from(CrawlJob)) == 0
 
 
+async def test_respect_policy_does_not_allow_page_when_robots_is_forbidden(
+    pg_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    source, route = await seed(pg_sessions, policy=replace(POLICY, robots_policy="respect"))
+    fetcher = StubFetcher(
+        FetchResult(
+            FetchDecision(
+                FetchOutcome.PERMANENT_FAILURE,
+                ContentAccess.BLOCKED,
+                "http_403",
+                route_incident=True,
+            ),
+            "https://news.example.test/robots.txt",
+            final_url="https://news.example.test/robots.txt",
+            status=403,
+        )
+    )
+    handler, _ = build_handler(pg_sessions, fetcher)
+
+    result = await handler.handle(task(source.id, route.id))  # type: ignore[attr-defined]
+
+    assert (result.disposition, result.error_code) == ("quarantine", "http_403")
+    assert [request.request_kind for request in fetcher.requests] == ["robots"]
+    async with pg_sessions() as session:
+        [recorded] = (await session.execute(select(Fetch))).scalars().all()
+        assert recorded.request_variant == "robots"
+        assert recorded.http_status == 403
+        route_state = await session.scalar(
+            select(SourceRoute.state).where(SourceRoute.id == route.id)  # type: ignore[attr-defined]
+        )
+        assert route_state == RouteState.HEALTHY.value
+
+
 async def test_success_uploads_raw_and_atomically_enqueues_parse(
     pg_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
