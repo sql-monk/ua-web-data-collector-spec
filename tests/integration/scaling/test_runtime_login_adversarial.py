@@ -55,6 +55,11 @@ MakeConfig = Callable[..., WorkerRuntimeConfig]
 MakePool = Callable[..., Awaitable[int]]
 CLI_TIMEOUT = 90
 SLOW = 60.0
+CYCLE_CLOCK = PAST + timedelta(hours=1)
+"""Заморожений годинник runtime у тесті повного циклу (code review PR1b, low #1): claim бачить
+jobs, покладені на `PAST`, а `retry` ставить `not_before = CYCLE_CLOCK + backoff`, тож job `n=1`
+не може бути claim-нута вдруге, хоч скільки триває тест на повільному хості (раніше —
+реальний час + 30 с backoff)."""
 """Таймаут очікування стану в циклових тестах: на завантаженому хості (паралельні прогони,
 сторонні контейнери) event loop буває заблокований на десятки секунд — чекаємо довше, але
 все одно на стан, а не на час."""
@@ -142,6 +147,7 @@ async def test_full_worker_cycle_fits_the_grants_of_the_mapped_login_role(
         worker_config(role=role, lease_seconds=180, stop_grace_seconds=0.3),
         role_sessions(role),
         handler,
+        clock=lambda: CYCLE_CLOCK,
     )
     stop = asyncio.Event()
     task = asyncio.create_task(runtime.run(stop=stop, install_signals=False))
@@ -158,6 +164,7 @@ async def test_full_worker_cycle_fits_the_grants_of_the_mapped_login_role(
     assert (await _job(pg_sessions, ids[0])).status == "succeeded"
     retried = await _job(pg_sessions, ids[1])
     assert (retried.status, retried.last_error_code) == ("retry", "handler_error")
+    assert retried.not_before > CYCLE_CLOCK, "retry поза годинником runtime"
     quarantined = await _job(pg_sessions, ids[2])
     assert (quarantined.status, quarantined.last_error_code) == ("quarantined", "bad_input")
 
@@ -173,6 +180,7 @@ async def test_full_worker_cycle_fits_the_grants_of_the_mapped_login_role(
     await asyncio.wait_for(task, timeout=SLOW)
 
     assert handler.cancelled == [3]
+    assert handler.started.count(1) == 1, "retry-job не claim-илась повторно"
     released = await _job(pg_sessions, ids[3])
     assert (released.status, released.lease_owner, released.attempt) == ("pending", None, 0)
     assert (released.last_error_code, released.last_error_message) == (None, None)

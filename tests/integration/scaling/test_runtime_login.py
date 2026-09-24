@@ -21,11 +21,17 @@ from uuid import UUID
 import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import URL
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from typer.testing import CliRunner
 
 from collector.cli import app
 from collector.persistence.postgres.config import PostgresSettings
+from collector.persistence.postgres.engine import create_session_factory
 from collector.persistence.postgres.models import CrawlJob, WorkerInstance, WorkerPool
 from collector.persistence.postgres.roles import MIGRATE_ROLE, RoleLoginError
 from collector.workers.config import SchedulerRuntimeConfig, WorkerRuntimeConfig
@@ -102,6 +108,66 @@ async def test_worker_refuses_to_start_as_a_member_of_collector_migrate(
     await enqueue_jobs(1)
     runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
     await _assert_refused_before_any_write(runtime, pg_sessions, MIGRATE_ROLE)
+
+
+@pytest.fixture
+async def fetcher_extra_membership(
+    login_urls: dict[str, URL], pg_engine: AsyncEngine, request: pytest.FixtureRequest
+) -> AsyncIterator[str]:
+    """`collector_fetcher` тимчасово — член іншої ролі (параметр); після тесту REVOKE."""
+    granted = str(request.param)
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'GRANT "{granted}" TO collector_fetcher'))
+    try:
+        yield granted
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.execute(text(f'REVOKE "{granted}" FROM collector_fetcher'))
+
+
+@pytest.mark.parametrize(
+    "fetcher_extra_membership",
+    ["collector_scheduler", "collector_api_ro", "pg_read_all_stats", "pg_monitor"],
+    indirect=True,
+)
+async def test_worker_refuses_membership_in_another_component_or_monitoring_role(
+    fetcher_extra_membership: str,
+    pg_sessions: async_sessionmaker[AsyncSession],
+    runtime_sessions: async_sessionmaker[AsyncSession],
+    worker_config: MakeConfig,
+    handler: ControlledHandler,
+    enqueue_jobs: EnqueueJobs,
+) -> None:
+    """S-3 (security-pr1b): дрейф ролей (`GRANT collector_scheduler TO collector_fetcher`,
+    `pg_read_all_stats`/`pg_monitor`) непомітно розширив би права компонента — відмова."""
+    await enqueue_jobs(1)
+    runtime = WorkerRuntime(worker_config(), runtime_sessions, handler)
+    await _assert_refused_before_any_write(runtime, pg_sessions, fetcher_extra_membership)
+
+
+async def test_worker_refuses_a_privileged_session_with_a_default_role(
+    pg_database: PostgresSettings,
+    pg_sessions: async_sessionmaker[AsyncSession],
+    login_urls: dict[str, URL],
+    worker_config: MakeConfig,
+    handler: ControlledHandler,
+    enqueue_jobs: EnqueueJobs,
+) -> None:
+    """S-2 (security-pr1b): superuser-логін із default `role = collector_fetcher` дає
+    `current_user` = runtime-роль, але `session_user` лишається superuser (`RESET ROLE`) — відмова.
+    """
+    await enqueue_jobs(1)
+    engine = create_async_engine(
+        pg_database.url, connect_args={"server_settings": {"role": "collector_fetcher"}}
+    )
+    try:
+        async with engine.connect() as conn:
+            assert await conn.scalar(text("SELECT current_user")) == "collector_fetcher"
+            assert await conn.scalar(text("SELECT session_user")) != "collector_fetcher"
+        runtime = WorkerRuntime(worker_config(), create_session_factory(engine), handler)
+        await _assert_refused_before_any_write(runtime, pg_sessions, "session_user")
+    finally:
+        await engine.dispose()
 
 
 async def test_worker_refuses_the_login_role_of_another_component(
@@ -199,8 +265,11 @@ async def test_scheduler_runs_as_collector_scheduler(
     await asyncio.wait_for(task, timeout=15)
 
 
-def _cli_env(url: URL) -> dict[str, str]:
+def _cli_env(url: URL) -> dict[str, str | None]:
+    """Env для `CliRunner`; `None` прибирає змінну хоста (code review PR1b, low #3): інакше
+    `COLLECTOR_POSTGRES_DSN_FILE` з оточення мав би пріоритет над DSN тесту."""
     return {
+        "COLLECTOR_POSTGRES_DSN_FILE": None,
         "COLLECTOR_POSTGRES_DSN": url.render_as_string(hide_password=False),
         "COLLECTOR_WORKER_PLACEHOLDER": "0",
         "COLLECTOR_WORKER_STOP_GRACE_SECONDS": "1",

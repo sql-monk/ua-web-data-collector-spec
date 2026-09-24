@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ from collector.persistence.postgres.roles import (
     dsn_secret_name,
 )
 from collector.workers import login
+from collector.workers.handlers import NoopHandler, resolve_handler
 from collector.workers.roles import (
     DB_ROLE_BY_WORKER_ROLE,
     SCHEDULER_DB_ROLE,
@@ -155,3 +157,37 @@ def test_cli_exits_1_on_foreign_login_without_leaking_the_dsn(
     assert "Traceback" not in result.output
     assert password not in result.output
     assert dsn not in result.output
+
+
+def test_export_worker_keeps_scheduler_role_only_while_its_handler_is_noop() -> None:
+    """Тест-вартовий S-1 (security-pr1b): `export-worker` під `collector_scheduler` — тимчасово.
+
+    Ризик у картці WP-01D закривається до першого реального export handler (WP-11A) або до pilot.
+    Щойно export отримує handler, відмінний від `NoopHandler`, поки монтує
+    `postgres_dsn_scheduler` / мапиться на `collector_scheduler`, цей тест падає: спершу окрема
+    роль (`collector_exporter` / `collector_export_ro`-з'єднання), потім handler.
+    """
+    services: dict[str, Any] = yaml.safe_load(
+        (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    )["services"]
+    on_scheduler_role = (
+        db_role_for(WorkerRole.EXPORT) == SCHEDULER_DB_ROLE
+        or "postgres_dsn_scheduler" in services["export-worker"]["secrets"]
+    )
+    if not on_scheduler_role:
+        return
+    reason = (
+        "export-worker досі під collector_scheduler (ризик S-1 картки WP-01D): спершу окрема "
+        "роль для експорту, потім реальний handler"
+    )
+    handler = resolve_handler(WorkerRole.EXPORT)
+    assert type(handler) is NoopHandler, reason
+    # Реєстр наповнюється при імпорті доменного модуля, тож перевіряємо й джерела: жоден модуль
+    # не реєструє фабрику для EXPORT.
+    registrations = re.compile(r"HANDLER_FACTORIES\s*(\[|\.update|\.setdefault)[^\n]*EXPORT")
+    offenders = [
+        str(path.relative_to(REPO_ROOT))
+        for path in (REPO_ROOT / "src").rglob("*.py")
+        if registrations.search(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == [], f"{reason}: {offenders}"

@@ -404,8 +404,15 @@ def enqueue_jobs(
 
 
 @pytest.fixture
-async def running() -> AsyncIterator[list[asyncio.Task[None]]]:
-    """Реєстр фонових runtime-задач: наприкінці тесту всі гарантовано зупинені."""
+async def running(role_engine: RoleEngine) -> AsyncIterator[list[asyncio.Task[None]]]:
+    """Реєстр фонових runtime-задач: наприкінці тесту всі гарантовано зупинені.
+
+    Залежить від `role_engine` навмисно (code review PR1b, low #2): pytest знімає фікстуру раніше
+    за її залежності, тож runtime скасовується **до** `dispose()` engine-ів і
+    `ALTER ROLE … NOLOGIN` — впалий посередині тест не засмічує логи `heartbeat_failed`/`fenced`
+    через уже вимкнений логін.
+    """
+    del role_engine  # потрібна лише як залежність порядку teardown
     tasks: list[asyncio.Task[None]] = []
     yield tasks
     for task in tasks:
